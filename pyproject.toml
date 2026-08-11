@@ -1,0 +1,16 @@
+# Python tooling config — ruff (lint + format) chuẩn toàn team
+# Chạy: .venv/Scripts/python -m ruff check . && .venv/Scripts/python -m ruff format .
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+exclude = [".venv", "node_modules", "docs", "_bmad"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

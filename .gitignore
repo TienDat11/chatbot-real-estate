@@ -65,7 +65,13 @@ __pycache__/
 .claude/logs/
 .claude/sessions/
 .claude/worktrees/
+.agents/
 _bmad/
+skills-lock.json
+.mcp.json
+
+# evidence / report artifacts (KHÔNG đẩy lên git)
+camellia-report-full.png
 
 # --- internal planning / docs (KHÔNG đẩy lên git — chỉ code) ---
 .claude/

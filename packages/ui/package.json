@@ -1,0 +1,43 @@
+{
+  "name": "@rag-ragre/ui",
+  "version": "0.1.0",
+  "description": "Design system shared cho RAG pháp lý bất động sản (antd v5 + React 18/19)",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^5.5.1",
+    "@rag-ragre/contracts": "0.1.0",
+    "dayjs": "^1.11.13",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0"
+  },
+  "peerDependencies": {
+    "antd": ">=5.20.0",
+    "react": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "antd": "^5.22.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "^5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

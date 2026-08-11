@@ -1,0 +1,21 @@
+# LightRAG entity types — Legal bất động sản Việt Nam
+# Plan §4.3: addon_params={'language':'Vietnamese', 'entity_type_prompt_file':'prompts/entity_type/legal_vn.yml'}
+# ⚠️ Spike Ngày 1 (spike 4): verify format mà LightRAG 1.5.6 mong đợi cho
+#    entity_type_prompt_file (YAML biến ENTITY_TYPES / python module).
+
+ENTITY_TYPES:
+  - "VĂN_BẢN_PHÁP_LUẬT"      # Luật, Nghị định, Thông tư, Nghị quyết (vd: Luật Đất đai 2024)
+  - "ĐIỀU_KHOẢN"             # Điều/Khoản cụ thể trong văn bản (vd: Điều 123 BLDS 2015)
+  - "CƠ_QUAN_NHÀ_NƯỚC"       # Bộ, Sở, Tòa án, UBND, Văn phòng đăng ký đất đai
+  - "CHỦ_THỂ"                # cá nhân/tổ chức giữ quyền, mua giới, khách hàng
+  - "TÀI_SẢN_BẤT_ĐỘNG_SẢN"   # thửa đất, căn hộ, nhà ở, dự án, sổ đỏ/GCN
+  - "GIAO_DỊCH"              # mua bán, chuyển nhượng, thế chấp, cầm cố, tặng cho, cho thuê
+  - "QUY_CHẾ"                # quy hoạch, hạn mức, thuế, phí, lệ phí trước bạ
+  - "TỔ_CHỨC_TÀI_CHÍNH"      # ngân hàng, tổ chức tín dụng, quỹ (policy vay)
+  - "CHÍNH_SÁCH_VAY"         # deposit %, thời hạn vay, lãi suất, ân hạn
+  - "THỜI_ĐIỂM"              # hiệu lực, thời hạn, ngày ra sổ, thời điểm 50 ngày
+
+# Nguyên tắc:
+# - Entity phải là danh từ riêng/khái niệm pháp lý có định danh; KHÔNG trích số liệu
+#   (giá/diện tích/lãi suất) — số nằm trong SQL facts layer, không cho vào graph.
+# - Relation: 2 entity + 1 quan hệ ngắn (vd: "thế chấp", "ban-hanh", "ap-dung").

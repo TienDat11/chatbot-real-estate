@@ -1,0 +1,43 @@
+# =============================================================================
+# rag-real-estate — Python dependencies (pin theo AD-17 + AD-18)
+# Plan: .claude/plans/rag-real-estate-final.plan.md §15
+# Python >= 3.10
+# =============================================================================
+
+# --- Framework / engine ---
+lightrag-hku==1.5.6
+llama-index-core==0.14.23          # Workflows bundled (llama-index-workflows >=2.14,<3)
+llama-index-llms-openai-like==0.7.2
+
+# --- Schema / validation ---
+pydantic>=2.8.0,<3
+pydantic-settings>=2.2,<3
+
+# --- DB ---
+sqlalchemy>=2,<3                   # chỉ llama-index dùng (lightrag đi asyncpg)
+asyncpg>=0.31
+psycopg2-binary
+pgvector
+sqlglot                            # NL2SQL AST guard — pin bản mới nhất tại Ngày 1
+
+# --- LLM / embedding ---
+openai>=2,<3
+tiktoken>=0.7
+
+# --- API server ---
+fastapi>=0.115
+uvicorn[standard]
+gunicorn
+python-dotenv
+httpx
+
+# --- Ingest / parse ---
+docling                            # parser chính (MinerU optional fallback)
+
+# --- Eval ---
+ragas
+
+# --- Test / dev ---
+pytest
+pytest-asyncio
+ruff

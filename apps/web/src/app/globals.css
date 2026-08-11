@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f7f8fa;
+  --foreground: #1a2233;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-be-vietnam), "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+/* Slim scrollbar for the chat area */
+.chat-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.chat-scroll::-webkit-scrollbar-thumb {
+  background: #d5dbe6;
+  border-radius: 999px;
+}
+.chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Typing caret shown while the assistant streams */
+.typing-caret::after {
+  content: "▍";
+  color: #1f46a8;
+  animation: caret-blink 1s steps(1) infinite;
+  margin-left: 1px;
+}
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Align numbers in the facts table */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Evidence rail only on wide screens */
+.evidence-rail {
+  display: none;
+}
+@media (min-width: 1200px) {
+  .evidence-rail {
+    display: block;
+  }
+}
