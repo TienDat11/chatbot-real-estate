@@ -1,0 +1,81 @@
+# dependencies
+node_modules/
+**/node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+coverage/
+
+# next.js
+apps/web/.next/
+apps/web/out/
+.next/
+out/
+
+# production
+dist/
+build/
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# env files
+.env
+.env.*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# playwright / test artifacts
+.playwright-mcp/
+.proxy/
+
+# --- python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# --- ai tooling / agent-generated local state (keep .claude/CLAUDE.md + plans) ---
+.claude/settings.local.json
+.claude/todos/
+.claude/logs/
+.claude/sessions/
+.claude/worktrees/
+_bmad/
+
+# --- internal planning / docs (KHÔNG đẩy lên git — chỉ code) ---
+.claude/
+docs/
+
+# --- turbo / build cache ---
+.turbo/
+
+# --- local data ---
+*.sqlite
+*.sqlite3
+data/
+uploads/

@@ -1,0 +1,20 @@
+# EditorConfig — chuẩn format toàn team (tránh conflict line-ending/indent khi save)
+# https://editorconfig.org
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+[*.{ts,tsx,js,jsx,mjs,cjs,json,css,md,yml,yaml,sql}]
+indent_style = space
+indent_size = 2
+
+[Makefile]
+indent_style = tab
