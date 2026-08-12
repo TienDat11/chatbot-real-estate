@@ -1,0 +1,20 @@
+{
+  "name": "rag-real-estate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RAG pháp lý bất động sản — monorepo (Next.js web + shared contracts + UI)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev -w @rag-ragre/web",
+    "build": "npm run build -w @rag-ragre/web",
+    "build:packages": "npm run build -w @rag-ragre/contracts && npm run build -w @rag-ragre/ui && npm run build -w @rag-ragre/web",
+    "typecheck": "npm run typecheck -w @rag-ragre/web",
+    "lint": "npm run lint -w @rag-ragre/web"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

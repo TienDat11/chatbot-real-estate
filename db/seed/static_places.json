@@ -1,0 +1,30 @@
+{
+  "center": {"lat": 16.0558, "lng": 108.2455},
+  "note": "Fallback catalog — THE CAMELLIA brief §7 (rumor-grade, approximate coords). Replace with live Google Places when GEO_API_KEY + GEO_BINDING=google are configured.",
+  "places": [
+    {"name": "Biển Mỹ Khê", "kinds": ["beach", "tourist_attraction"], "lat": 16.0603, "lng": 108.2489, "distance_m": 900, "address": "Phường Phước Mỹ, Sơn Trà, Đà Nẵng", "rating": 4.6},
+    {"name": "Vịnh Sơn Trà", "kinds": ["tourist_attraction", "natural_feature"], "lat": 16.0800, "lng": 108.2600, "distance_m": 3000, "address": "Bán đảo Sơn Trà, Đà Nẵng", "rating": 4.7},
+    {"name": "Bán đảo Sơn Trà", "kinds": ["park", "tourist_attraction"], "lat": 16.0930, "lng": 108.2780, "distance_m": 4500, "address": "Sơn Trà, Đà Nẵng", "rating": 4.8},
+    {"name": "Chùa Linh Ứng", "kinds": ["place_of_worship", "tourist_attraction"], "lat": 16.1000, "lng": 108.2730, "distance_m": 5500, "address": "Bán đảo Sơn Trà, Đà Nẵng", "rating": 4.8},
+    {"name": "Nhà Trưng bày Hoàng Sa", "kinds": ["museum", "tourist_attraction"], "lat": 16.0700, "lng": 108.2350, "distance_m": 1800, "address": "Sơn Trà, Đà Nẵng", "rating": 4.5},
+    {"name": "Bảo tàng 3D Art In Paradise", "kinds": ["museum", "tourist_attraction"], "lat": 16.0520, "lng": 108.2300, "distance_m": 2500, "address": "Sơn Trà, Đà Nẵng", "rating": 4.4},
+    {"name": "UBND phường Sơn Trà", "kinds": ["local_government_office"], "lat": 16.0680, "lng": 108.2380, "distance_m": 1500, "address": "Sơn Trà, Đà Nẵng", "rating": 3.8},
+    {"name": "THCS Lý Tự Trọng", "kinds": ["school"], "lat": 16.0600, "lng": 108.2400, "distance_m": 700, "address": "Sơn Trà, Đà Nẵng", "rating": 4.0},
+    {"name": "Trường Tiểu học Nguyễn Tri Phương", "kinds": ["school"], "lat": 16.0620, "lng": 108.2420, "distance_m": 800, "address": "Sơn Trà, Đà Nẵng", "rating": 4.1},
+    {"name": "Co.opmart Sơn Trà", "kinds": ["supermarket", "shopping_mall"], "lat": 16.0590, "lng": 108.2390, "distance_m": 800, "address": "Sơn Trà, Đà Nẵng", "rating": 4.2},
+    {"name": "Chợ Mai", "kinds": ["market", "local_government_office"], "lat": 16.0580, "lng": 108.2410, "distance_m": 600, "address": "Sơn Trà, Đà Nẵng", "rating": 3.9},
+    {"name": "Chợ Chiều", "kinds": ["market"], "lat": 16.0570, "lng": 108.2440, "distance_m": 400, "address": "Sơn Trà, Đà Nẵng", "rating": 3.8},
+    {"name": "Trung tâm Hành chính TP Đà Nẵng", "kinds": ["local_government_office"], "lat": 16.0540, "lng": 108.2200, "distance_m": 2800, "address": "Hải Châu, Đà Nẵng", "rating": 4.0},
+    {"name": "Bệnh viện Đà Nẵng", "kinds": ["hospital"], "lat": 16.0770, "lng": 108.2210, "distance_m": 3500, "address": "Hải Châu, Đà Nẵng", "rating": 4.0},
+    {"name": "Bệnh viện Vinmec Đà Nẵng", "kinds": ["hospital"], "lat": 16.0480, "lng": 108.2240, "distance_m": 3000, "address": "Ngũ Hành Sơn, Đà Nẵng", "rating": 4.3},
+    {"name": "Bệnh viện Gia đình Đà Nẵng", "kinds": ["hospital"], "lat": 16.0500, "lng": 108.2230, "distance_m": 3100, "address": "Hải Châu, Đà Nẵng", "rating": 4.1},
+    {"name": "Ga Đà Nẵng", "kinds": ["transit_station", "train_station"], "lat": 16.0770, "lng": 108.2130, "distance_m": 4200, "address": "Thanh Khê, Đà Nẵng", "rating": 4.0},
+    {"name": "Cầu Sông Hàn", "kinds": ["tourist_attraction", "bridge"], "lat": 16.0620, "lng": 108.2270, "distance_m": 2200, "address": "Sông Hàn, Đà Nẵng", "rating": 4.6},
+    {"name": "Cầu Rồng", "kinds": ["tourist_attraction", "bridge"], "lat": 16.0610, "lng": 108.2280, "distance_m": 2100, "address": "Sông Hàn, Đà Nẵng", "rating": 4.6},
+    {"name": "GO! Đà Nẵng", "kinds": ["shopping_mall", "supermarket"], "lat": 16.0520, "lng": 108.2250, "distance_m": 2600, "address": "Hải Châu, Đà Nẵng", "rating": 4.2},
+    {"name": "Đại học Đà Nẵng", "kinds": ["university"], "lat": 16.0710, "lng": 108.2260, "distance_m": 2500, "address": "Hải Châu, Đà Nẵng", "rating": 4.3},
+    {"name": "Chợ Hàn", "kinds": ["market", "tourist_attraction"], "lat": 16.0690, "lng": 108.2260, "distance_m": 2400, "address": "Hải Châu, Đà Nẵng", "rating": 4.1},
+    {"name": "Chợ Mân Thái", "kinds": ["market"], "lat": 16.0700, "lng": 108.2330, "distance_m": 1800, "address": "Sơn Trà, Đà Nẵng", "rating": 3.9},
+    {"name": "Sân bay quốc tế Đà Nẵng", "kinds": ["airport"], "lat": 16.0440, "lng": 108.1990, "distance_m": 5500, "address": "Hải Châu, Đà Nẵng", "rating": 4.2}
+  ]
+}

@@ -1,0 +1,25 @@
+# =============================================================================
+# rag-real-estate — Dev stack: PostgreSQL 16.6+ pgvector
+# Plan §10 Ngày 1-2 | LightRAG 1.5.6 cần PG >= 16.6
+# =============================================================================
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ragre-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ragre}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragre_dev_password}
+      POSTGRES_DB: ${POSTGRES_DATABASE:-ragre}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ragre} -d ${POSTGRES_DATABASE:-ragre}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  pgdata:
