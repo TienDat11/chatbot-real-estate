@@ -8,6 +8,7 @@
 -- 0. Extensions
 CREATE EXTENSION IF NOT EXISTS vector;       -- pgvector (LightRAG vector storage)
 CREATE EXTENSION IF NOT EXISTS btree_gist;   -- interval exclusion constraint
+CREATE EXTENSION IF NOT EXISTS pgcrypto;     -- sha256() for seed content hashing
 
 -- 1. documents — registry metadata contract (v2); one row per document/price table/campaign doc
 CREATE TABLE IF NOT EXISTS documents (
@@ -146,7 +147,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
-RETURN (
+AS $$
   WITH cur AS (
     SELECT subject_id, policy_key, fact_key, value_num FROM facts
     WHERE effective_from <= as_of
@@ -166,7 +167,7 @@ RETURN (
   JOIN cur term  ON term.subject_id = pol.subject_id AND term.policy_key = pol.policy_key AND term.fact_key = 'term_months'
   LEFT JOIN cur int_pct ON int_pct.subject_id = pol.subject_id AND int_pct.policy_key = pol.policy_key AND int_pct.fact_key = 'interest_rate_pct'
   JOIN cur price ON price.subject_id = pol.subject_id AND price.fact_key = 'price_vnd'
-);
+$$;
 
 CREATE OR REPLACE VIEW v_unit_offers
 WITH (security_invoker = true) AS
@@ -272,7 +273,6 @@ BEGIN
   END IF;
 END
 $$;
-GRANT SET ON ROLE ro_query TO ragre;
 GRANT SELECT ON documents, document_chunks, campaigns, fact_subjects, facts,
   chunk_fact_refs, fact_aliases, v_unit_offers TO ro_query;
 GRANT EXECUTE ON FUNCTION v_unit_offers_as_of(date) TO ro_query;

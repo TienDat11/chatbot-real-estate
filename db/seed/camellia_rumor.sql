@@ -21,7 +21,7 @@ INSERT INTO documents
 VALUES
   ('price-camellia-2026q3', 'price', 'Giá định hướng Camellia Q3/2026 (RUMOR)',
    'data/_processed/price_matrix.json', '2026-08-13', NULL, 'published',
-   sha256('seed:price-camellia-2026q3'::TEXT)::TEXT,
+   encode(digest('seed:price-camellia-2026q3', 'sha256'), 'hex'),
    '{"project":"camellia","campaign":"camellia-2026q3","currency":"VND",
      "trust":"estimate","note":"Guidance bands per unit type x payment method; official grid pending."}')
 ON CONFLICT (doc_id) DO NOTHING;
@@ -160,8 +160,7 @@ SELECT s.id, 'htls_banks', 'htls', 'camellia-2026q3', v.value_text, 'enum', v.qu
        FALSE, '2026-08-13', NULL, 'price-camellia-2026q3', 0.90, v.trust
 FROM fact_subjects s
 CROSS JOIN (VALUES
-  ('VietinBank, MB Bank, SHB', 'exact', 'confirmed'),
-  ('MBV (Ngân hàng TNHH MTV Việt Nam Hiện Đại) - dự kiến', 'approx', 'estimate')
+  ('VietinBank, MB Bank, SHB (MBV dự kiến - chưa xác nhận)', 'approx', 'estimate')
 ) AS v(value_text, quality, trust)
 WHERE s.subject_key = 'project:camellia'
   AND NOT EXISTS (
