@@ -1,22 +1,8 @@
-# =============================================================================
-# rag-real-estate — Eval runner (CLI)
-# Plan §11 (AD-8) + §10 Ngày 9 | Python >= 3.10 | UTF-8
-#
-# Metric: faithfulness (judge LLM ghim version) + numeric exact-match +
-#         routing/path accuracy + refusal correctness + freshness (campaign expire)
-#         + answer-relevancy proxy (expected_answer_contains coverage) + P50/P95 latency.
-#
-# Usage:
-#   python eval/run_eval.py                          # full golden set, backend thật
-#   python eval/run_eval.py --subset 10              # 10 câu đầu
-#   python eval/run_eval.py --only-category legal    # chỉ legal
-#   python eval/run_eval.py --dry                    # CI: mock pipeline + mock judge (định thức)
-#   python eval/run_eval.py --inject                 # chạy eval/injection_test_vn.json qua guard
-#   python eval/run_eval.py --json-out eval/results.json
-#
-# Ngưỡng khởi điểm (§11): exact-match >= 0.95; unsupported-claim = 0; delta ~0.05.
-# Latency budget: P50 < 6s, P95 < 10s.
-# =============================================================================
+# Eval runner (CLI) — golden-set regression for the RAG chatbot (plan §11 AD-8).
+# Usage: --subset N | --only-category <legal|...> | --dry (mock pipeline + judge) |
+#        --inject (guard eval) | --json-out <file>.
+# Baseline (§11): numeric exact-match >= 0.95, zero unsupported claims, delta ~0.05;
+# latency budget: P50 < 6s, P95 < 10s.
 
 from __future__ import annotations
 
@@ -35,21 +21,18 @@ from typing import Any, Optional
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-# ---------------------------------------------------------------------------
-# Settings — ưu tiên ingest/config.py (Settings duy nhất của hệ thống); fallback
-# đọc thẳng env (ingest chưa dựng lúc viết eval — defensive).
-# ---------------------------------------------------------------------------
+# Settings — prefer ingest/config.py (single source of truth); fall back to raw env when it is unavailable.
 try:  # pragma: no cover
     from ingest.config import Settings as IngestSettings  # type: ignore
 
     _HAS_INGEST_SETTINGS = True
-except Exception:  # noqa: BLE001 — ingest/config.py chưa tồn tại lúc dev
+except Exception:  # noqa: BLE001 — module may not exist during early dev
     _HAS_INGEST_SETTINGS = False
 
 
 @dataclass
 class EvalSettings:
-    """Cấu hình eval — đọc từ env, không hardcode secret."""
+    """Eval configuration — read from env, no hardcoded secrets."""
 
     postgres_host: str = os.getenv("POSTGRES_HOST", "localhost")
     postgres_port: int = int(os.getenv("POSTGRES_PORT", "5432"))
@@ -58,11 +41,11 @@ class EvalSettings:
     postgres_database: str = os.getenv("POSTGRES_DATABASE", "ragre")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "")
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
-    # Judge LLM ghim version — khác checkpoint với answer model (tránh correlated failure §7-conflict-7)
+    # Pin the judge LLM separately from the answer model to avoid correlated failures (§7-conflict-7)
     judge_model: str = os.getenv("EVAL_JUDGE_MODEL", "deepseek-v4-flash-0731")
     judge_timeout_s: float = float(os.getenv("EVAL_JUDGE_TIMEOUT_S", "30"))
     pipeline_timeout_s: float = float(os.getenv("EVAL_PIPELINE_TIMEOUT_S", "60"))
-    n_sim: int = int(os.getenv("EVAL_N_SIM", "1"))  # số lần lặp 1 câu (đo latency ổn định)
+    n_sim: int = int(os.getenv("EVAL_N_SIM", "1"))  # pipeline runs per question (stable latency measurement)
 
     @classmethod
     def load(cls) -> "EvalSettings":
@@ -78,15 +61,13 @@ class EvalSettings:
                     llm_base_url=base.llm_base_url,
                     llm_api_key=base.llm_api_key,
                 )
-            except Exception:  # noqa: BLE001 — thiếu env bắt buộc → fallback env thuần
+            except Exception:  # noqa: BLE001 — missing required env falls back to plain env
                 pass
         return cls()
 
 
-# ---------------------------------------------------------------------------
-# Pipeline — import api.workflow.RagQueryPipeline (defensive; api chưa dựng lúc
-# viết eval → chạy --dry hoặc CI subset). Spike: verify signature thật Ngày 1.
-# ---------------------------------------------------------------------------
+# Pipeline — import api.workflow.RagQueryPipeline defensively; eval may run --dry before api/ exists.
+# (spike, day 1) Verify the real signature.
 try:  # pragma: no cover
     from api.workflow import RagQueryPipeline  # type: ignore
 except Exception:  # noqa: BLE001
@@ -94,7 +75,7 @@ except Exception:  # noqa: BLE001
 
 
 async def run_pipeline(pipeline: Any, question: str, as_of: Optional[str], settings: EvalSettings) -> dict:
-    """Gọi pipeline với nhiều hình dạng call (spike: verify signature thật)."""
+    """Invoke the pipeline across several calling shapes (spike: verify the real signature)."""
     kwargs: dict[str, Any] = {"query": question}
     if as_of:
         kwargs["as_of"] = as_of
@@ -112,18 +93,18 @@ async def run_pipeline(pipeline: Any, question: str, as_of: Optional[str], setti
 
 
 def _build_pipeline(settings: EvalSettings) -> Any:
-    """Dựng RagQueryPipeline — thử nhiều constructor shape. Spike: verify Ngày 1."""
+    """Build RagQueryPipeline, trying multiple constructor shapes. (Spike: verify day 1.)"""
     if RagQueryPipeline is None:
         raise RuntimeError(
             "api/workflow.py chưa có — không dựng được RagQueryPipeline. "
             "Chạy --dry (mock) hoặc đợi api/ được dựng."
         )
     try:
-        return RagQueryPipeline()  # constructor không tham số
+        return RagQueryPipeline()  # parameterless constructor
     except TypeError:
         pass
     try:
-        return RagQueryPipeline(settings)  # nhận settings
+        return RagQueryPipeline(settings)  # takes settings
     except TypeError:
         pass
     if _HAS_INGEST_SETTINGS:
@@ -135,7 +116,7 @@ def _build_pipeline(settings: EvalSettings) -> Any:
 
 
 def is_rejected(payload: dict) -> bool:
-    """Phát hiện query bị chặn (L1 guard/refusal) — kiểm tra nhiều key vì contract thay đổi."""
+    """Detect a blocked query (L1 guard/refusal) — probe several keys since the contract varies."""
     for key in ("blocked", "rejected", "refused"):
         if payload.get(key) is True:
             return True
@@ -150,41 +131,38 @@ def is_rejected(payload: dict) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Parse số tiếng Việt trong câu trả lời (numeric exact-match)
-# "2.000.000.000" / "2,000,000,000" / "2000000000" / "2 tỷ" / "1,2 tỷ" / "8,5%"
-# ---------------------------------------------------------------------------
-_VND_UNIT = {"nghìn": 1e3, "k": 1e3, "triệu": 1e6, "tr": 1e6, "tỷ": 1e9, "tỉ": 1e9}
-# KHÔNG chứa \s: ký tự class có space sẽ khiến greedy match nuốt nhiều số liền nhau
-# ("2.000.000.000 25%" → "2.000.000.000 25" thành 1 token). Dấu phân cách nghìn
-# là dấu chấm/phẩy, KHÔNG có space.
-_NUM_TOKEN = r"[0-9][0-9\,\.]*[0-9]|[0-9]"
+# Vietnamese number parsing for numeric exact-match.
+    # Handles "2.000.000.000" / "2,000,000,000" / "2000000000" / "2 tỷ" / "1,2 tỷ" / "8,5%".
+    _VND_UNIT = {"nghìn": 1e3, "k": 1e3, "triệu": 1e6, "tr": 1e6, "tỷ": 1e9, "tỉ": 1e9}
+    # No \s: a space in the class lets the greedy match swallow adjacent numbers
+    # ("2.000.000.000 25%" merges into one token). Thousand separators are dot/comma, never space.
+    _NUM_TOKEN = r"[0-9][0-9\,\.]*[0-9]|[0-9]"
 
 
 def _raw_to_float(raw: str) -> float:
     raw = raw.strip().replace(" ", "").replace(" ", "")
     if "," in raw and "." in raw:
-        # "2,000,000.5" → phẩy = nghìn, chấm = thập phân
+        # "2,000,000.5" — comma thousands, dot decimal
         if raw.rfind(",") < raw.rfind("."):
             raw = raw.replace(",", "")
         else:
             raw = raw.replace(".", "").replace(",", ".")
     elif "," in raw:
-        # "2,000,000,000" → nghìn; "1,2" → thập phân (VN dùng phẩy thập phân)
+        # "2,000,000,000" thousand separators; "1,2" a Vietnamese decimal comma
         parts = raw.split(",")
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit() and len(parts[1]) != 3:
             raw = raw.replace(",", ".")
         else:
             raw = raw.replace(",", "")
     elif "." in raw:
-        # "2.000.000.000" (nhiều chấm = nghìn) vs "2.5" (thập phân)
+        # "2.000.000.000" (multiple dots = thousands) vs "2.5" (decimal point)
         if raw.count(".") > 1:
             raw = raw.replace(".", "")
     return float(raw)
 
 
 def extract_amounts(text: str) -> list[float]:
-    """Trích số tiền (đã quy về VND nguyên) — '2 tỷ' → 2e9; '1,2 tỷ' → 1.2e9."""
+    """Extract money amounts (normalized to whole VND) — '2 tỷ' → 2e9; '1,2 tỷ' → 1.2e9."""
     seen: list[float] = []
     for m in re.finditer(rf"({_NUM_TOKEN})\s*({'|'.join(_VND_UNIT)})\b", text, flags=re.IGNORECASE | re.UNICODE):
         try:
@@ -193,7 +171,7 @@ def extract_amounts(text: str) -> list[float]:
                 seen.append(val)
         except ValueError:
             continue
-    # số nguyên trần (>= 6 chữ số → khả năng là tiền) — "8000000000" hoặc "2.000.000.000"
+    # Bare integers of 6+ digits are likely money — "8000000000" or "2.000.000.000".
     for m in re.finditer(r"\b([0-9][0-9.,]{5,})\b", text):
         try:
             val = _raw_to_float(m.group(1))
@@ -205,7 +183,7 @@ def extract_amounts(text: str) -> list[float]:
 
 
 def extract_pct(text: str) -> list[float]:
-    """Trích phần trăm — '25%' → 25.0; '8,5%' → 8.5; '0,5%' → 0.5."""
+    """Extract percentages — '25%' → 25.0; '8,5%' → 8.5; '0,5%' → 0.5."""
     out: list[float] = []
     for m in re.finditer(rf"({_NUM_TOKEN})\s*(?:%|phần trăm|phan tram)", text, flags=re.IGNORECASE | re.UNICODE):
         try:
@@ -216,7 +194,7 @@ def extract_pct(text: str) -> list[float]:
 
 
 def extract_m2(text: str) -> list[float]:
-    """Trích diện tích — '85,5 m²' → 85.5; '72 m2' → 72.0."""
+    """Extract areas — '85,5 m²' → 85.5; '72 m2' → 72.0."""
     out: list[float] = []
     for m in re.finditer(rf"({_NUM_TOKEN})\s*(?:m2|m²|mét vuông|met vuong)", text, flags=re.IGNORECASE | re.UNICODE):
         try:
@@ -227,7 +205,7 @@ def extract_m2(text: str) -> list[float]:
 
 
 def extract_ints(text: str) -> list[int]:
-    """Trích số nguyên (count/term) — term 180/240, count 4/5/11."""
+    """Extract integers (counts/terms) — term 180/240, counts 4/5/11."""
     out: list[int] = []
     for m in re.finditer(r"\b([0-9][0-9_]*)\b", text):
         raw = m.group(1).replace("_", "")
@@ -242,7 +220,7 @@ _M2_KEYS = {"area_m2"}
 
 
 def numeric_exact_match(expected_facts: dict[str, Any], answer: str) -> tuple[bool, list[str]]:
-    """Mọi value trong expected_facts phải xuất hiện trong answer (sau normalize)."""
+    """Every expected_facts value must appear in the answer after normalization."""
     if not expected_facts:
         return True, []
     amounts = extract_amounts(answer)
@@ -267,23 +245,21 @@ def numeric_exact_match(expected_facts: dict[str, Any], answer: str) -> tuple[bo
     return (not missing), missing
 
 
-# ---------------------------------------------------------------------------
-# Judge LLM — faithfulness (ghim version). Khác dòng với answer model.
-# ---------------------------------------------------------------------------
+# Faithfulness judge — pinned version, kept separate from the answer model.
 class BaseJudge:
     async def judge(self, question: str, answer: str, contexts: list[str]) -> tuple[bool, float, str]:
         raise NotImplementedError
 
 
 class MockJudge(BaseJudge):
-    """Judge định thức cho --dry / CI: pass nếu any-of token xuất hiện trong answer."""
+    """Deterministic judge for --dry/CI: passes when any token appears in the answer."""
 
     async def judge(self, question: str, answer: str, contexts: list[str]) -> tuple[bool, float, str]:
         return True, 1.0, "mock judge (--dry)"
 
 
 class LLMJudge(BaseJudge):
-    """Judge LLM OpenAI-compatible — JSON mode, ghim `judge_model`."""
+    """OpenAI-compatible judge LLM — JSON mode, pinned `judge_model`."""
 
     def __init__(self, settings: EvalSettings) -> None:
         self.settings = settings
@@ -328,11 +304,9 @@ class LLMJudge(BaseJudge):
         return supported, score, str(data.get("reason", ""))[:200]
 
 
-# ---------------------------------------------------------------------------
-# Context fetch (gold_chunk_ids → chunk content) — dùng cho judge faithfulness.
-# ---------------------------------------------------------------------------
+# Context fetch: gold_chunk_ids → chunk content, for the faithfulness judge.
 async def fetch_chunk_contexts(doc_prefixes: list[str], settings: EvalSettings) -> list[str]:
-    """Đọc nội dung chunk thuộc các doc_id khớp (gold_chunk_ids dùng prefix doc_id)."""
+    """Load chunk content for the matching doc_ids (gold_chunk_ids use doc_id prefixes)."""
     if not doc_prefixes:
         return []
     try:
@@ -362,7 +336,7 @@ async def fetch_chunk_contexts(doc_prefixes: list[str], settings: EvalSettings) 
             )
             out.extend(r["content"] for r in rows)
         return out
-    except Exception as exc:  # noqa: BLE001 — không chặn eval khi DB chưa có chunk
+    except Exception as exc:  # noqa: BLE001 — don't fail eval when the DB has no chunks yet
         print(f"  [warn] fetch_chunk_contexts skip: {exc}")
         return []
     finally:
@@ -370,9 +344,7 @@ async def fetch_chunk_contexts(doc_prefixes: list[str], settings: EvalSettings) 
             await conn.close()
 
 
-# ---------------------------------------------------------------------------
 # Result model
-# ---------------------------------------------------------------------------
 @dataclass
 class QuestionResult:
     id: str
@@ -390,11 +362,9 @@ class QuestionResult:
     error: str = ""
 
 
-# ---------------------------------------------------------------------------
-# Mock pipeline (--dry) — định thức, không cần backend
-# ---------------------------------------------------------------------------
+# Mock pipeline (--dry) — deterministic, no backend required.
 class MockPipeline:
-    """Trả payload khớp expectation của golden câu → test harness chạy đúng."""
+    """Return a payload matching each golden question so the harness runs correctly."""
 
     def __init__(self, golden: dict[str, Any]) -> None:
         self.golden = golden
@@ -402,7 +372,7 @@ class MockPipeline:
     async def run(self, query: str, as_of: Optional[str] = None, **_: Any) -> dict:
         q = self._find_question(query)
         if q is None:
-            # --inject --dry: mock chặn prompt dạng injection để harness đo được
+            # --inject --dry: mock blocks injection-shaped prompts so the harness can measure.
             low = query.lower()
             if any(
                 m in low
@@ -461,9 +431,7 @@ class MockPipeline:
         return None
 
 
-# ---------------------------------------------------------------------------
 # Check helpers
-# ---------------------------------------------------------------------------
 def _calc_p50_p95(values: list[float]) -> tuple[float, float]:
     if not values:
         return 0.0, 0.0
@@ -520,9 +488,7 @@ def _overall_pass(r: QuestionResult) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
 # Eval core
-# ---------------------------------------------------------------------------
 async def evaluate_question(
     pipeline: Any,
     judge: BaseJudge,
@@ -542,7 +508,7 @@ async def evaluate_question(
             run_pipeline(pipeline, q["question"], q.get("as_of"), settings),
             timeout=settings.pipeline_timeout_s,
         )
-    except Exception as exc:  # noqa: BLE001 — eval KHÔNG crash khi pipeline lỗi
+    except Exception as exc:  # noqa: BLE001 — a pipeline failure must not crash eval
         res.error = f"pipeline lỗi: {exc.__class__.__name__}: {exc}"
         res.fail_reasons.append(res.error)
         return res
@@ -550,7 +516,7 @@ async def evaluate_question(
 
     answer = str(payload.get("answer") or "")
     payload_routing = payload.get("routing")
-    blocked = is_rejected(payload)  # guard chặn → routing không có ý nghĩa (bỏ qua check)
+    blocked = is_rejected(payload)  # a blocked guard makes routing checks meaningless
 
     ok_c, why_c = _check_content(q, answer)
     res.pass_content = ok_c
@@ -603,9 +569,7 @@ def _pass_rate(results: list[QuestionResult]) -> dict[str, float]:
     }
 
 
-# ---------------------------------------------------------------------------
 # Injection eval (--inject)
-# ---------------------------------------------------------------------------
 async def eval_injection(pipeline: Any, settings: EvalSettings, dry: bool) -> dict[str, Any]:
     path = REPO_ROOT / "eval" / "injection_test_vn.json"
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -620,10 +584,10 @@ async def eval_injection(pipeline: Any, settings: EvalSettings, dry: bool) -> di
             )
             rejected = is_rejected(payload)
             if not rejected and not dry:
-                # heuristics: answer thể hiện từ chối → coi là bị chặn
+                # Heuristic: a refusal-style answer counts as blocked.
                 answer = str(payload.get("answer") or "")
                 rejected = any(m in answer.lower() for m in ["từ chối", "không thể", "không liên quan"])
-        except Exception as exc:  # noqa: BLE001 — pipeline lỗi do injection → fail-closed
+        except Exception as exc:  # noqa: BLE001 — pipeline failure on injection fails closed
             rejected = True
             payload = {"error": str(exc)}
         latency = (time.perf_counter() - start) * 1000.0
@@ -645,9 +609,7 @@ async def eval_injection(pipeline: Any, settings: EvalSettings, dry: bool) -> di
     return {"rows": rows, "pass_pct": pct, "ok_threshold": ok_threshold, "pass": pct >= ok_threshold}
 
 
-# ---------------------------------------------------------------------------
 # Output
-# ---------------------------------------------------------------------------
 def _print_summary(results: list[QuestionResult], rates: dict[str, float], latencies: list[float]) -> None:
     p50, p95 = _calc_p50_p95(latencies)
     print("\n" + "=" * 78)
@@ -704,9 +666,7 @@ def _print_failures(results: list[QuestionResult]) -> None:
             print(f"      - {why}")
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 async def amain(args: argparse.Namespace, settings: EvalSettings) -> int:
     dry = args.dry
     if args.inject:
@@ -744,8 +704,8 @@ async def amain(args: argparse.Namespace, settings: EvalSettings) -> int:
     for i, q in enumerate(questions, 1):
         res = await evaluate_question(pipeline, judge, q, settings, dry)
         results.append(res)
-        # latency: mặc định tái dùng res.latency_ms (1 lần gọi pipeline/câu);
-        # n_sim > 1 → đo thêm (chỉ dùng khi cần ổn định latency).
+        # latency: reuse res.latency_ms by default (one pipeline call per question);
+        # n_sim > 1 reruns to make the latency measurement stable.
         if settings.n_sim <= 1:
             latencies_ms.append(res.latency_ms)
         else:

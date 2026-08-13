@@ -1,8 +1,8 @@
 import { Typography } from "antd";
 
 /**
- * Footer disclaimer: AI hỗ trợ tra cứu, không phải tư vấn pháp lý chính thức.
- * Luôn hiển thị ở đáy trang để đáp ứng yêu cầu trust của sản phẩm legal.
+ * Footer disclaimer: AI-assisted lookup, not formal legal advice.
+ * Always visible at the page footer to satisfy the legal product's trust requirement.
  */
 export function Disclaimer() {
   return (

@@ -1,9 +1,7 @@
-"""Audit append-only (plan §4.8 + db/audit.sql).
+"""Append-only audit trail (plan §4.8 + db/audit.sql).
 
-- INSERT 1 dòng/query vào `query_audit` (role owner ragre — có GRANT INSERT từ audit.sql).
-- Redact literal sql_spec + sql_query TRƯỚC khi ghi (không bao giờ lưu secret).
-- sha256: prompt_hash/answer_hash (replay §17.6).
-- `write_audit` KHÔNG BAO GIỜ làm fail pipeline — try/except + log.
+Inserts one row per query with redacted literals and hashed prompt/answer
+(replay §17.6); the writer never raises, so a failed audit cannot break the pipeline.
 """
 
 from __future__ import annotations
@@ -21,7 +19,7 @@ logger = logging.getLogger("api.audit")
 
 _audit_pool: asyncpg.Pool | None = None
 
-# Literal: string '...' hoặc số đứng độc lập → thay bằng '?' (redaction an toàn cho audit)
+# Standalone string/number literals -> '?' placeholders (audit-safe redaction).
 _LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\b\d+(?:\.\d+)?\b")
 
 
@@ -40,7 +38,7 @@ async def close_audit_pool() -> None:
 
 
 def redact_sql_spec(spec: Any) -> Any:
-    """Thay literal value trong filters bằng '❚REDACTED❚' (giữ cấu trúc để replay routing)."""
+    """Replace filter literal values with a redacted marker, preserving shape for replay."""
     if not isinstance(spec, dict):
         return spec
     out = dict(spec)
@@ -58,14 +56,14 @@ def redact_sql_spec(spec: Any) -> Any:
 
 
 def redact_sql_query(sql: str | None) -> str | None:
-    """Redact literal số/chuỗi trong SQL (vd '= 2000000000' → '= ?')."""
+    """Mask numeric/string literals in SQL (e.g. '= 2000000000' -> '= ?')."""
     if not sql:
         return sql
     return _LITERAL_RE.sub("?", sql)
 
 
 async def write_audit(entry: dict[str, Any]) -> None:
-    """Ghi audit. Không bao giờ raise ra pipeline (try/except + log)."""
+    """Write one audit row; never raise into the pipeline (try/except + log)."""
     try:
         pool = await get_audit_pool()
         sql = """INSERT INTO query_audit (
@@ -105,15 +103,13 @@ async def write_audit(entry: dict[str, Any]) -> None:
                 _jsonb({"flags": entry.get("degraded", [])}),
                 entry.get("latency_ms"),
             )
-    except Exception:  # noqa: BLE001 — audit KHÔNG bao giờ crash pipeline
+    except Exception:  # noqa: BLE001 — a failed audit must never crash the pipeline
         logger.exception("audit write failed (ignored)")
 
 
-# ---------------------------------------------------------------------------
-# Encoding helpers cho asyncpg
-# ---------------------------------------------------------------------------
+# asyncpg parameter encoding helpers.
 def _jsonb(v: Any) -> str | None:
-    """JSONB param: asyncpg nhận str JSON hợp lệ hoặc None."""
+    """Encode as an asyncpg JSONB parameter: a valid JSON string or None."""
     if v is None:
         return None
     import json

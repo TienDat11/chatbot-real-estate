@@ -1,8 +1,8 @@
-"""LightRAG singleton — PG storages + embedding binding + chunking passthrough.
+"""LightRAG singleton — PG storages, embedding binding, chunking passthrough.
 
-Plan §3.7 (A1) + §4.3 (A3): embed Vietnamese, entity_type_prompt_file, entity_extraction_use_json.
-⚠️ SPIKE (Ngày 1): verify signature LightRAG 1.5.6 — constructor kwargs + chunking_func +
-   QueryParam import path. Code dưới đây defensive (try nhiều import path, fallback kwargs).
+(plan §3.7 A1 + §4.3 A3) Vietnamese embeddings, entity_type_prompt_file, entity_extraction_use_json.
+(spike day 1) Verify the LightRAG 1.5.6 signature — constructor kwargs, chunking_func, and the
+QueryParam import path. The code below is defensive: it tries several import paths and falls back.
 """
 
 from __future__ import annotations
@@ -21,17 +21,17 @@ logger = logging.getLogger(__name__)
 
 _lightrag: Any | None = None
 _lock = threading.Lock()
-LIGHTRAG_READY = False  # api/rag_leg.py + /ready đọc cờ này
+LIGHTRAG_READY = False  # read by api/rag_leg.py and /ready
 
 
 class LightRAGUnavailableError(RuntimeError):
-    """LightRAG chưa init được (thiếu dep / thiếu key) — pipeline degrade thay vì crash."""
+    """LightRAG could not initialize (missing dependency/key) — let the pipeline degrade, not crash."""
 
 
 def _make_embedding_func() -> Callable[[list[str]], list[list[float]]]:
-    """Embedding theo binding. aibox/dashscope dùng OpenAI-compatible client.
+    """Return the embedding function for the configured binding.
 
-    ⚠️ SPIKE 2 (provider): verify base URL + max_token thật của text-embedding-v4.
+    (spike 2, provider) Verify the real base URL and max_token of text-embedding-v4.
     """
     import openai
 
@@ -44,13 +44,13 @@ def _make_embedding_func() -> Callable[[list[str]], list[list[float]]]:
 
         def embed(texts: list[str]) -> list[list[float]]:
             resp = client.embeddings.create(model=model, input=texts)
-            # sap xếp theo index để ổn định (batch API có thể trả lệch thứ tự)
+            # Sort by index for stability (the batch API may reorder responses).
             ordered = sorted(resp.data, key=lambda d: d.index)
             return [d.embedding for d in ordered]
 
         return embed
 
-    # Fallback 'local' — CẦN model local thật (Qwen3-Embedding-0.6B, dims 1024).
+    # Fallback 'local' — a real local model (Qwen3-Embedding-0.6B, 1024 dims) is required.
     logger.warning(
         "EMBEDDING_BINDING=%r không có key/không hỗ trợ — dùng stub local. "
         "KHÔNG được chạy production với stub này (vector rác). SPIKE: cài model local.",
@@ -67,7 +67,7 @@ def _make_embedding_func() -> Callable[[list[str]], list[list[float]]]:
 
 
 def _make_llm_func() -> Callable[..., Any]:
-    """LLM cho LightRAG extraction (graph entity/relation) — qwen3.7-flash qua OpenAI-compatible."""
+    """LLM for LightRAG extraction (graph entities/relations) — qwen3.7-flash over an OpenAI-compatible client."""
     import openai
 
     client = openai.OpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
@@ -100,21 +100,21 @@ def get_lightrag() -> Any:
             return _lightrag
 
         try:
-            from lightrag import LightRAG, QueryParam  # noqa: F401  (re-export dùng chung)
-            from lightrag.lightrag import QueryParam as _QP  # thử đúng path (spike)
+            from lightrag import LightRAG, QueryParam  # noqa: F401  (re-exported for shared use)
+            from lightrag.lightrag import QueryParam as _QP  # correct-path attempt (spike)
             from lightrag.storage import (
                 PGKVStorage,
                 PGDocStatusStorage,
                 PGTableGraphStorage,
                 PGVectorStorage,
             )
-        except ImportError as exc:  # pragma: no cover — phụ thuộc môi trường
+        except ImportError as exc:  # pragma: no cover — environment-dependent
             raise LightRAGUnavailableError(
                 f"Thiếu lightrag-hku==1.5.6 (pip install -r requirements.txt): {exc}"
             ) from exc
 
-        # ⚠️ SPIKE 4: signature chính xác của ainsert chunking_func + QueryParam.
-        #    chunking_func passthrough: trả nguyên chunk — LightRAG KHÔNG re-chunk.
+        # (spike 4) Verify the exact ainsert chunking_func and QueryParam signatures.
+        #   Passthrough returns chunks as-is — LightRAG must not re-chunk.
         try:
             _lightrag = LightRAG(
                 working_dir=settings.lightrag_workspace,
@@ -145,7 +145,7 @@ def get_lightrag() -> Any:
                 max_parallel=settings.max_parallel_workers,
             )
         except Exception:
-            # Fallback: retry với kwargs tối thiểu (nếu param mới không được hỗ trợ ở 1.5.6)
+            # Retry with minimal kwargs in case 1.5.6 does not support the new params.
             logger.warning("LightRAG init lỗi với đủ kwargs — thử fallback tối thiểu", exc_info=True)
             try:
                 _lightrag = LightRAG(
@@ -173,9 +173,9 @@ def get_lightrag() -> Any:
 
 
 async def ainsert_document(rag: Any, doc_id: str, chunks: list[str], chunk_ids: list[str]) -> None:
-    """Insert 1 doc vào LightRAG — ids/file_paths 1:1 với registry chunk_id.
+    """Insert one document into LightRAG — ids/file_paths map 1:1 to registry chunk_ids.
 
-    Plan §3.2 step 6: ainsert SAU COMMIT, chunking_func passthrough.
+    (plan §3.2 step 6) Insert after COMMIT, with chunking_func passthrough.
     """
     try:
         await rag.ainsert(
@@ -185,15 +185,15 @@ async def ainsert_document(rag: Any, doc_id: str, chunks: list[str], chunk_ids: 
             chunking_func=lambda c: [c],  # passthrough (A1) — verify signature (spike)
         )
     except TypeError:
-        # fallback: không có chunking_func trong signature 1.5.6
+        # The 1.5.6 signature may lack chunking_func.
         logger.warning("LightRAG ainsert không nhận chunking_func — fallback không passthrough")
         await rag.ainsert(chunks, ids=chunk_ids, file_paths=[doc_id] * len(chunks))
-    except Exception as exc:  # noqa: BLE001 — ghi lỗi rõ ràng, gọi nơi khác quyết định retry
+    except Exception as exc:  # noqa: BLE001 — surface the error; callers decide on retry
         raise RuntimeError(f"ainsert LightRAG lỗi (doc={doc_id}): {exc}") from exc
 
 
 async def adelete_by_doc_id(rag: Any, lightrag_doc_id: str) -> None:
-    """Xóa doc khỏi LightRAG (hủy tài liệu — plan §3.6)."""
+    """Remove a document from LightRAG on doc invalidation (plan §3.6)."""
     try:
         await rag.adelete_by_doc_id(lightrag_doc_id)
     except Exception as exc:  # noqa: BLE001

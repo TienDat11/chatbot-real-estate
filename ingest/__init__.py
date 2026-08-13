@@ -1,6 +1,6 @@
 """rag-real-estate — ingest package.
 
-Cấu hình tập trung + pipeline: parse → extract facts → placeholder → load registry → LightRAG.
+Shared config plus the ingest pipeline: parse, extract facts, placeholder, registry load, LightRAG.
 """
 
 __version__ = "0.1.0"

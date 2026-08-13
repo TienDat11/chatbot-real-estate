@@ -1,34 +1,13 @@
--- =============================================================================
--- rag-real-estate — Seed: chính sách vay (ma trận policy → facts)
--- Plan §3.3 (policy_key) + §3.4 (v_unit_offers) + edge case §3.4 (NULL ≠ 0%)
--- Idempotent | UTF-8
---
--- ⚠️ MOCK/DEMO DATA — dữ liệu demo (policy dựng sẵn), chờ dữ liệu thật từ
---   chủ dữ liệu (plan §10). Chưa từng áp lên DB thật; KHÔNG dùng trong production.
---
--- File này INSERT policy facts (deposit_pct/term_months/interest_rate_pct) cho
--- MỌI căn có price_vnd, gắn campaign_key + policy_key. Chạy độc lập hoặc SONG
--- SONG với db/seed/price_campaigns.sql — an toàn vì mọi INSERT có NOT EXISTS
--- guard theo (subject_id, fact_key, policy_key, effective_from).
---
--- Ma trận:
---   bank_a  → deposit 25.00% / term 180 tháng / lãi 8.5000%/năm
---   bank_b  → deposit 30.00% / term 240 tháng / lãi 8.0000%/năm
---   support → deposit  0.00% / term 120 tháng / lãi 0.0000%/năm  (chỉ A06-01)
---
--- Loại trừ:
---   * unit:tower-a/A06-01 — CHỈ nhận policy support (0% trả trước thay vì ngân hàng)
---   * unit:tower-a/A04-03 — KHÔNG policy → không xuất hiện trong v_unit_offers
---
--- Kỷ luật kiểu số (AD-14): % điểm NUMERIC(5,2); lãi suất NUMERIC(6,4);
--- term_months NUMERIC nguyên. NULL ≠ 0.00.
--- =============================================================================
+-- rag-real-estate — Seed: loan policies (policy matrix -> facts). Plan §3.3 + §3.4 (edge case NULL != 0%).
+-- MOCK/DEMO DATA: sample policies, awaiting real data (plan §10); not for production.
+-- Inserts policy facts (deposit_pct/term_months/interest_rate_pct) for EVERY unit with price_vnd, with
+-- campaign_key + policy_key; safe alongside db/seed/price_campaigns.sql (NOT EXISTS guards keyed on subject/fact/policy/from).
+-- Matrix: bank_a 25.00%/180mo/8.5000% | bank_b 30.00%/240mo/8.0000% | support 0.00%/120mo/0.0000% (A06-01 only).
+-- Exclusions: A06-01 takes only 'support' (0% down instead of a bank); A04-03 none -> absent from v_unit_offers. Numeric discipline per AD-14. Idempotent | UTF-8.
 
 BEGIN;
 
--- ---------------------------------------------------------------------------
--- 1. bank_a / bank_b cho mọi căn có price_vnd (trừ A06-01, A04-03)
--- ---------------------------------------------------------------------------
+-- 1. bank_a / bank_b for every unit with price_vnd (except A06-01, A04-03)
 WITH policy_tpl AS (
   SELECT * FROM (VALUES
     ('bank_a', 'deposit_pct',       25.00::NUMERIC(5,2), 'pct'),
@@ -39,7 +18,7 @@ WITH policy_tpl AS (
     ('bank_b', 'interest_rate_pct',  8.0000::NUMERIC(6,4), 'pct')
   ) AS t(policy_key, fact_key, value_num, unit)
 ),
--- Mọi căn có fact giá (lấy interval + campaign từ fact price hiện hành)
+-- Every unit with a price fact (interval + campaign derive from the current price fact)
 units AS (
   SELECT f.subject_id, fs.subject_key, f.campaign_key, f.effective_from, f.effective_to, f.source_doc_id
   FROM facts f
@@ -61,9 +40,7 @@ WHERE u.subject_key NOT IN ('unit:tower-a/A06-01', 'unit:tower-a/A04-03')
       AND f.effective_from = u.effective_from
   );
 
--- ---------------------------------------------------------------------------
--- 2. support (0% trả trước) — chỉ áp dụng cho A06-01
--- ---------------------------------------------------------------------------
+-- 2. support (0% down payment) — applied only to A06-01
 WITH support_tpl AS (
   SELECT * FROM (VALUES
     ('support', 'deposit_pct',       0.00::NUMERIC(5,2), 'pct'),

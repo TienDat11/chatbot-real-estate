@@ -1,10 +1,8 @@
-"""Merge + hydrate + build context blocks (plan §4.6).
+"""Merge, hydrate, and build context blocks (plan §4.6).
 
-- `hydrate_chunks`: đính metadata doc (title/section/effective dates/kind) từ registry
-  (JOIN document_chunks + documents) — để generation dẫn nguồn đúng.
-- Build RAG_CONTEXT block (delimiter + JSON-encode, strip key `_` nội bộ) và FACT_EVIDENCE
-  block (JSON-encode các fe-block do sql_leg tạo).
-- `sources[]` cho UI (dedup theo doc_id); `facts[]` cho bảng FE.
+hydrate_chunks attaches doc metadata (title/section/dates/kind) from the registry
+so generation cites correct sources. RAG_CONTEXT and FACT_EVIDENCE blocks are
+JSON-encoded with an internal-key strip; sources[] dedups by doc_id for the UI.
 """
 
 from __future__ import annotations
@@ -39,7 +37,7 @@ def _iso(v: Any) -> str | None:
 
 
 def _strip_internal(chunk: dict) -> dict:
-    """Bỏ key nội bộ (bắt đầu bằng '_') trước khi JSON hoá ra LLM/UI."""
+    """Drop internal keys (leading '_') before JSON-encoding to the LLM/UI."""
     return {k: v for k, v in chunk.items() if not k.startswith("_")}
 
 
@@ -108,10 +106,10 @@ async def _resolve_chunk_placeholders(chunks: list[dict], conn: Any, as_of: date
 
 
 async def hydrate_chunks(chunks: list[dict], as_of: date | None = None) -> list[dict]:
-    """Đính doc metadata (title, section, kind, effective dates) từ registry.
+    """Attach doc metadata (title, section, kind, effective dates) from the registry.
 
-    Placeholder tokens (⟦FACT:...) trong chunk content được hydrate thành giá trị fact
-    hiệu lực tại as_of; resolve lỗi giữ nguyên token (không crash).
+    FACT placeholder tokens in chunk content hydrate to the fact value in effect at
+    as_of; failed resolves leave tokens intact (never crash).
     """
     if not chunks:
         return []
@@ -145,13 +143,13 @@ async def hydrate_chunks(chunks: list[dict], as_of: date | None = None) -> list[
             except Exception as exc:  # noqa: BLE001 — tokens stay unresolved, never crash
                 logger.warning("merge: placeholder resolve failed: %s", exc)
         return out
-    except Exception as exc:  # noqa: BLE001 — hydrate fail → giữ chunk thô (không crash)
+    except Exception as exc:  # noqa: BLE001 — hydration failure keeps raw chunks (never crash)
         logger.warning("merge.hydrate fail: %s", exc)
         return [{**c} for c in chunks]
 
 
 def build_rag_context(chunks: list[dict]) -> str:
-    """RAG_CONTEXT block — JSON-encode chunk đã hydrate (L2: delimiter + JSON)."""
+    """RAG_CONTEXT block — JSON-encode the hydrated chunks (L2: delimiter + JSON)."""
     payload = [
         {
             "id": c.get("id"),
@@ -169,12 +167,12 @@ def build_rag_context(chunks: list[dict]) -> str:
 
 
 def build_evidence_context(evidence: list[dict]) -> str:
-    """FACT_EVIDENCE block — JSON-encode fe blocks (nguồn số DUY NHẤT)."""
+    """FACT_EVIDENCE block — JSON-encode the fe blocks (the sole numeric source)."""
     return f"{DELIMITER}\nFACT_EVIDENCE (số liệu từ hệ thống dữ liệu — nguồn số DUY NHẤT, LLM không tự tính):\n{json.dumps(evidence, ensure_ascii=False)}\n{DELIMITER}"
 
 
 def build_sources(chunks: list[dict]) -> list[dict]:
-    """sources[] cho UI — dedup theo doc_id, giữ thứ tự lần đầu xuất hiện."""
+    """sources[] for the UI — dedup by doc_id, keeping first-seen order."""
     seen: set[str] = set()
     sources: list[dict] = []
     for c in chunks:
@@ -195,7 +193,7 @@ def build_sources(chunks: list[dict]) -> list[dict]:
 
 
 def build_facts(evidence: list[dict]) -> list[dict]:
-    """facts[] cho UI — chỉ lấy field hiển thị từ fe blocks."""
+    """facts[] for the UI — only display fields from fe blocks."""
     return [
         {
             "fe_id": e.get("fe_id"),
@@ -209,7 +207,7 @@ def build_facts(evidence: list[dict]) -> list[dict]:
 
 
 async def merge_context(query: str, rag_chunks: list[dict], evidence: list[dict], as_of: date | None) -> Merged:
-    """Gom 2 chân → context blocks + sources/facts cho UI."""
+    """Combine both legs into context blocks plus sources/facts for the UI."""
     hydrated = await hydrate_chunks(rag_chunks, as_of) if rag_chunks else []
     rag_blocks = build_rag_context(hydrated)
     evidence_blocks = build_evidence_context(evidence or [])
