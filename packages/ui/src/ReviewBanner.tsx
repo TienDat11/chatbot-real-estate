@@ -1,9 +1,9 @@
 import { Alert } from "antd";
 
 /**
- * Banner cảnh báo khi câu trả lời LOW confidence hoặc chứa keyword
- * high-stakes (cầm cố, thế chấp, tranh chấp...) — cần tư vấn viên
- * xác nhận trước khi phản hồi khách hàng.
+ * Warning banner when the answer is LOW confidence or contains high-stakes
+ * keywords (e.g. pledge, mortgage, dispute) — advisor confirmation required
+ * before responding to the customer.
  */
 export function ReviewBanner() {
   return (

@@ -1,11 +1,8 @@
-"""L4 output guard (plan §4.7): numeric grounding + orphan numbers + citation + confidence 3-tier.
+"""L4 output guard (plan §4.7): numeric grounding, orphan detection, citations, confidence.
 
-(a) MỌI số tài chính trong answer phải byte-match (đã normalize) một FACT_EVIDENCE value.
-(b) Số vô chủ (orgphan) → confidence LOW + cờ review.
-(c) Citation grounding best-effort: span trích dẫn nằm trong chunk hydrated (nếu sources mang content).
-(d) Confidence 3-tier + `requires_review` (LOW + high-stakes keywords).
-
-Chú ý: `guard_output` là plain async function — test được không cần framework.
+Financial numbers must byte-match a normalized FACT_EVIDENCE value; orphans force LOW
+and review, citation grounding is best-effort, and LOW/high-stakes set requires_review.
+Plain async — testable without a framework.
 """
 
 from __future__ import annotations
@@ -18,8 +15,8 @@ from typing import Any
 
 logger = logging.getLogger("api.guard_output")
 
-# Số + đơn vị tiếng Việt (tỷ/million/ngàn + %/m2) — CHỈ coi là "số tài chính" khi có đơn vị
-# hoặc độ lớn >= 1 triệu (loại Điều 123, năm 2025, tầng 10... khỏi orphan false-positive).
+# Numbers with Vietnamese units (tỷ/triệu/ngàn + %/m2); "financial" only when a
+# unit is present or the magnitude is >= 1M (skips articles, years, floors).
 _NUMBER_RE = re.compile(r"(\d[\d.,]*)\s*(tỷ|tỉ|triệu|ngàn|nghìn|đồng|đ|vnđ|%|m2|m²)?", re.IGNORECASE)
 _FINANCIAL_MIN = 1_000_000
 
@@ -39,7 +36,7 @@ class GuardResult:
 
 
 def _to_decimal(v: Any) -> Decimal | None:
-    """Chuẩn hoá value → Decimal (an toàn cho số lớn > 2^53)."""
+    """Normalize a value to Decimal — safe for numbers beyond 2^53."""
     if isinstance(v, bool):
         return None
     if isinstance(v, Decimal):
@@ -58,7 +55,7 @@ def _to_decimal(v: Any) -> Decimal | None:
 
 
 def _normalize_amount_text(text: str) -> Decimal | None:
-    """Chuẩn hoá 1 match số: '2,85 tỷ' → 2850000000; '25%' → 25; '2.000.000.000' → int."""
+    """Normalize one numeric match: '2,85 tỷ' -> 2850000000; '25%' -> 25; '2.000.000.000' -> int."""
     t = (text or "").strip().lower()
     unit = None
     for u in _VN_UNITS:
@@ -85,10 +82,10 @@ def _normalize_amount_text(text: str) -> Decimal | None:
 
 
 def extract_amounts(text: str) -> list[Decimal]:
-    """Mọi con số TÀI CHÍNH trong answer (đã normalize) — dùng cho orphan check.
+    """All normalized financial numbers in the answer, for the orphan check.
 
-    Chỉ giữ số có đơn vị tiền/%/diện tích hoặc độ lớn >= 1 triệu (tránh false-positive
-    trên Điều luật, năm, tầng...).
+    Keeps figures with a money/%/area unit or magnitude >= 1M to avoid false positives
+    on laws, years, floors.
     """
     out: list[Decimal] = []
     for m in _NUMBER_RE.finditer(text or ""):
@@ -103,7 +100,7 @@ def extract_amounts(text: str) -> list[Decimal]:
 
 
 def evidence_values(facts: list[dict]) -> list[Decimal]:
-    """Tập value từ FACT_EVIDENCE (fields) đã normalize."""
+    """Normalized field values from FACT_EVIDENCE blocks."""
     out: list[Decimal] = []
     for fact in facts or []:
         for v in (fact.get("fields") or {}).values():
@@ -114,15 +111,15 @@ def evidence_values(facts: list[dict]) -> list[Decimal]:
 
 
 def _byte_match(d: Decimal, evidence: list[Decimal]) -> bool:
-    """byte-match (normalized): tồn tại value evidence bằng đúng d."""
+    """Byte-match (normalized): true when an evidence value equals d exactly."""
     return any(d == e for e in evidence)
 
 
 def _citation_grounding(answer: str, sources: list[dict], known_fe_ids: list[str]) -> dict:
-    """Best-effort: trích dẫn [fe-xxx] / tên nguồn phải xuất hiện trong sources.
+    """Best-effort: [fe-xxx] citations and source titles must appear in sources.
 
-    Chưa đủ chunk content ở đây (sources chỉ mang metadata) → verdict 'pending' nếu
-    không có span để kiểm tra; 'pass' nếu mọi citation có nguồn tương ứng.
+    Without chunk content here, verdict stays 'pending' when there is no span to
+    check; 'pass' when every citation has a matching source.
     """
     known = set(known_fe_ids or [])
     verdict: dict[str, Any] = {"status": "pending", "detail": "no span to check"}
@@ -130,7 +127,7 @@ def _citation_grounding(answer: str, sources: list[dict], known_fe_ids: list[str
     if fe_cites:
         missing = [c for c in fe_cites if c not in known]
         verdict = {"status": "pass" if not missing else "fail", "fe_citations": len(fe_cites), "missing": missing}
-    # tên nguồn (title) — best-effort substring
+    # Source titles — best-effort substring check
     titles = [s.get("title") or "" for s in sources or []]
     if titles:
         matched = [t for t in titles if t and (t in answer or any(w in answer for w in _title_words(t)))]
@@ -140,7 +137,7 @@ def _citation_grounding(answer: str, sources: list[dict], known_fe_ids: list[str
 
 
 def _title_words(title: str) -> list[str]:
-    """Tách từ đặc trưng của title (≥3 ký tự) để so khớp substring."""
+    """Distinctive title words (>= 3 chars) used for substring matching."""
     return [w for w in re.split(r"\s+", title) if len(w) >= 3]
 
 
@@ -151,9 +148,9 @@ def _confidence_3tier(
     degraded: list[str],
     has_approx: bool,
 ) -> str:
-    """HIGH (grounding pass + SQL>=1 row ∨ >=2 chunk rerank>=0.8 + không inconsistent);
+    """HIGH when grounding passes and SQL has >= 1 row or >= 2 chunks at rerank >= 0.8;
 
-    MEDIUM khi 1 nguồn/degraded/approx; LOW khi không pass.
+    MEDIUM with a single source, degraded, or approx; LOW when not passing.
     """
     if not numeric_pass:
         return "LOW"
@@ -173,11 +170,11 @@ async def guard_output(
     routing: dict | None,
     meta: dict | None = None,
 ) -> GuardResult:
-    """Chạy 4 kiểm tra L4 + gán confidence/requires_review (không raise)."""
+    """Run the four L4 checks, then confidence/requires_review (never raises)."""
     meta = meta or {}
     verdicts: dict[str, Any] = {}
 
-    # (a) numeric grounding — mọi số trong answer khớp FACT_EVIDENCE
+    # (a) numeric grounding — every number in the answer matches FACT_EVIDENCE
     evidence = evidence_values(facts)
     amounts = extract_amounts(answer)
     orphan = [a for a in amounts if not _byte_match(a, evidence)]

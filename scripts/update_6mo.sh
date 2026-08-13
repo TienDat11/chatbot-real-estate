@@ -1,35 +1,17 @@
 #!/usr/bin/env bash
-# =============================================================================
-# rag-real-estate — scripts/update_6mo.sh (update pháp lý định kỳ ~6 tháng)
-# Plan §3.6 + §10 Ngày 10 + §4.8 | Chạy OFF-BOX (máy dev, KHÔNG trên VPS 4GB)
-#
-# Chuỗi: backup → ingest incremental (chỉ doc đổi, text_hash) → verify → regression
-#        → re-baseline golden.
-#
-# Nguyên tắc:
-#   * Pháp lý đổi ~6 tháng/lần → incremental (LightRAG merge node/edge, KHÔNG rebuild).
-#   * Chỉ chunk ĐỔI (text_hash mới) được re-embed — đường dẫn vector tối thiểu.
-#   * Filter hiệu lực: văn bản cũ đánh status='expired' + effective_to (§4.3) —
-#     KHÔNG xóa; hydrate tự loại.
-#   * Backup trước mọi thay đổi; rollback có runbook (pg_restore + re-baseline cũ).
-#
-# Usage:
-#   ./scripts/update_6mo.sh --docs-dir data/legal_2026H2 --changed-list data/changed_doc_ids.txt
-#   --docs-dir    : thư mục chứa file gốc mới/cập nhật
-#   --changed-list: file 1 dòng/doc_id (doc_id đổi trong kỳ này) — ingest/load.py xử lý
-#
-# CRM-level notes (tích hợp sau khi có CRM):
-#   * Đơn vị kinh doanh gửi danh sách văn bản mới + ngày hiệu lực (data owner).
-#   * Nhập `effective_from/effective_to` trong metadata file kèm doc.
-#   * Sau update: thông báo mua giới qua CRM về văn bản hết hiệu lực (vd Luật cũ).
-# =============================================================================
+# 6-month legal update (plan §3.6 §4.8 §10): backup -> incremental ingest -> verify -> regression -> re-baseline.
+# Run off-box (dev machine, not the 4GB VPS).
+# Usage: ./scripts/update_6mo.sh --docs-dir <dir> --changed-list <file>
+#   --docs-dir     : directory with new/updated source docs
+#   --changed-list : one doc_id per line (only these are ingested)
+# Env: POSTGRES_* from .env; optional PYTHON_BIN.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-# --- load .env --------------------------------------------------------------
+# Load .env for POSTGRES_* credentials.
 if [[ -f .env ]]; then
   set -a; # shellcheck disable=SC1091
   source .env; set +a
@@ -59,17 +41,15 @@ mkdir -p "${BACKUP_DIR}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 DUMP="${BACKUP_DIR}/legal_${STAMP}.dump"
 
-# --- 1. backup toàn bộ (registry + graph/vector của LightRAG) --------------
+# 1. Backup the whole registry plus LightRAG graph/vector tables.
 echo "==> backup full (documents, facts, chunks, refs, campaigns, LightRAG tables)"
 PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
   -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
   -d "${POSTGRES_DATABASE}" -F c -f "${DUMP}"
 echo "    backup OK → ${DUMP}"
 
-# --- 2. ingest incremental (off-box) ---------------------------------------
-# ingest/load.py CLI: python -m ingest.load --dir <docs_dir> --changed <csv-doc_ids>
-# Chỉ xử lý doc_id trong --changed; mỗi doc: parse → extract → COMMIT registry
-# (documents/chunks/facts/refs) → LightRAG ainsert chunk placeholder-annotated.
+# 2. Incremental ingest (off-box): python -m ingest.load --dir <dir> --changed <csv>
+#    Only doc_ids in --changed are processed: parse -> extract -> COMMIT registry -> LightRAG ainsert.
 echo "==> ingest incremental: ${DOCS_DIR} (${CHANGED_LIST})"
 if [[ -f ingest/load.py ]]; then
   CHANGED_CSV="$(paste -sd, "${CHANGED_LIST}")"
@@ -79,20 +59,18 @@ else
   exit 1
 fi
 
-# --- 3. verify integrity (A13) ----------------------------------------------
+# 3. Verify integrity (A13).
 echo "==> verify_ingest.sql — mọi count phải = 0"
 PGPASSWORD="${POSTGRES_PASSWORD}" psql \
   -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
   -d "${POSTGRES_DATABASE}" -f scripts/verify_ingest.sql
-# (đọc kết quả thủ công — mọi check_name phải OK)
+# (read manually — every check_name must be OK)
 
-# --- 4. regression full golden set -----------------------------------------
+# 4. Run the full golden-set regression.
 echo "==> golden-set regression (full)"
 "${PYTHON_BIN}" eval/run_eval.py --fail-fast --json-out "backups/regression_${STAMP}.json"
 
-# --- 5. re-baseline ---------------------------------------------------------
-# So sánh với baseline cũ (backups/baseline.json nếu có); delta ngưỡng ~0.05 (§11).
-# PASS → ghi baseline mới.
+# 5. Re-baseline: compare against the previous baseline (if any); delta threshold ~0.05 (§11).
 REGRESSION_JSON="backups/regression_${STAMP}.json"
 BASELINE="backups/baseline.json"
 if [[ -f "${BASELINE}" ]]; then

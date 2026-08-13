@@ -1,7 +1,7 @@
-"""Parser — Docling (chính) tách text + bảng, pre-chunk theo Điều/Khoản ≤ cap.
+"""Parser — Docling extracts text and tables, pre-chunked by article/clause up to the cap.
 
-Plan §3.2 step 1 + §3.7 (A1): pre-chunk Điều/Khoản; hard cap ≤ chunk_cap chars;
-Điều dài tách theo Khoản. MinerU = fallback cho PDF scan xấu (spike optional).
+(plan §3.2 step 1 + §3.7 A1) Pre-chunk by article/clause with a hard cap of chunk_cap chars;
+long articles split on clause boundaries. MinerU is an optional fallback for poor PDF scans.
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ from ingest.config import settings
 
 
 class ParserError(RuntimeError):
-    """Không parse được file — gọi nơi khác quyết định review thủ công."""
+    """File could not be parsed — the caller decides whether to route it to manual review."""
 
 
 @dataclass
 class ParsedSection:
-    """1 pre-chunk: text + section title + tables (nếu có)."""
+    """One pre-chunk: text plus optional section title and tables."""
     text: str
     section_title: str | None = None
     tables: list[list[list[str]]] = field(default_factory=list)
@@ -39,17 +39,17 @@ class ParsedDoc:
         return "\n\n".join(s.text for s in self.sections)
 
 
-# Regex tách Điều trong văn bản pháp luật VN: "Điều 123.", "Điều 1.", "Điều 45:" ...
+# Matches article headers in Vietnamese legal text: "Điều 123.", "Điều 1.", "Điều 45:" ...
 _ARTICLE_RE = re.compile(
     r"^\s*Điều\s+(\d+|[IVXLCDM]+)\s*[.:]\s*(\S.*?)$",
     re.IGNORECASE | re.MULTILINE,
 )
-# Regex tách Khoản: "1. ", "2. " ở đầu dòng (trong phạm vi Điều)
+# Matches clause numbers starting a line within an article, e.g. "1. ", "2. ".
 _CLAUSE_RE = re.compile(r"^\s*(\d{1,2})\s*[.)]\s+", re.MULTILINE)
 
 
 def _split_articles(text: str) -> list[tuple[str, str]]:
-    """Trả list (article_title, body). Nếu không nhận diện được Điều → 1 chunk thô."""
+    """Return (article_title, body) pairs; falls back to a single raw chunk when no articles match."""
     matches = list(_ARTICLE_RE.finditer(text))
     if not matches:
         return [(None, text)]
@@ -63,11 +63,11 @@ def _split_articles(text: str) -> list[tuple[str, str]]:
 
 
 def _split_clauses(body: str, cap: int) -> list[str]:
-    """Tách Khoản trong body; các Khoản dài vẫn cắt cứng theo cap."""
+    """Split clauses within an article body; oversized clauses are still hard-cut at cap."""
     if len(body) <= cap:
         return [body]
     clauses = _CLAUSE_RE.split(body)
-    # _CLAUSE_RE.split chèn số vào đầu — gộp lại dạng (text, num, text, num, ...)
+    # _CLAUSE_RE.split prepends numbers — reassemble as (text, num, text, num, ...).
     chunks: list[str] = []
     buf = clauses[0] if clauses else ""
     for i in range(1, len(clauses) - 1, 2):
@@ -79,7 +79,7 @@ def _split_clauses(body: str, cap: int) -> list[str]:
         else:
             buf = f"{buf}\n{piece}".strip()
     if buf:
-        # cắt cứng nếu siêu dài
+        # Hard-cut when still oversized.
         while len(buf) > cap:
             chunks.append(buf[:cap])
             buf = buf[cap:]
@@ -88,7 +88,7 @@ def _split_clauses(body: str, cap: int) -> list[str]:
 
 
 def _prechunk(article_title: str | None, body: str, cap: int) -> list[ParsedSection]:
-    """article → 1 ParsedSection/body (đủ ngắn) hoặc nhiều section theo Khoản."""
+    """Article to one section when short, or multiple clause-based sections otherwise."""
     if len(body) <= cap:
         return [ParsedSection(text=body, section_title=article_title)]
     return [
@@ -98,10 +98,10 @@ def _prechunk(article_title: str | None, body: str, cap: int) -> list[ParsedSect
 
 
 async def parse_document(path: str, kind: str, doc_id: str | None = None, title: str | None = None) -> ParsedDoc:
-    """Parse file (PDF/Word/MD/JSON) bằng Docling → ParsedDoc với pre-chunks.
+    """Parse a PDF/Word/MD/JSON file with Docling into pre-chunked sections.
 
     Raises:
-        ParserError: file không đọc được / không extract được text.
+        ParserError: file is unreadable or no text could be extracted.
     """
     try:
         from docling.document_converter import DocumentConverter
@@ -123,7 +123,7 @@ async def parse_document(path: str, kind: str, doc_id: str | None = None, title:
         result = converter.convert(p)
         raw_text = result.document.export_to_markdown() or ""
     except Exception as exc:  # noqa: BLE001
-        # PDF scan xấu → nhắc MinerU fallback (spike)
+        # Poor PDF scan — hint at the optional MinerU fallback.
         raise ParserError(f"Docling parse thất bại ({path}): {exc}") from exc
 
     if not raw_text.strip():
@@ -137,7 +137,7 @@ async def parse_document(path: str, kind: str, doc_id: str | None = None, title:
     if not sections:
         sections = [ParsedSection(text=raw_text[: settings.chunk_cap])]
 
-    # doc_id fallback từ filename
+    # Derive doc_id from the filename as a fallback.
     if not doc_id:
         stem = p.stem.lower().replace(" ", "-")
         doc_id = f"{kind}-{stem}"

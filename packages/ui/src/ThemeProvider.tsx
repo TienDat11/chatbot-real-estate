@@ -7,9 +7,8 @@ import "dayjs/locale/vi";
 dayjs.locale("vi");
 
 /**
- * Design tokens enterprise-trust (xanh navy #1F46A8) cho toàn bộ app.
- * Bọc toàn bộ app trong <ThemeProvider>; mọi component dưới đây đều
- * kế thừa token qua ConfigProvider context.
+ * Enterprise-trust design tokens (navy #1F46A8) for the whole app.
+ * Wrap the app in <ThemeProvider>; children inherit the tokens via ConfigProvider.
  */
 export interface ThemeProviderProps {
   children: ReactNode;

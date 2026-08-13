@@ -8,8 +8,8 @@ export interface MarkdownViewProps {
 }
 
 /**
- * Render markdown (GFM) với style khớp design system: đề mục xanh navy,
- * bảng có border nhẹ, code block nền xám. Dùng cho nội dung câu trả lời.
+ * Render markdown (GFM) with design-system styling: navy headings,
+ * subtle table borders, gray code blocks. Used for answer content.
  */
 export function MarkdownView({ content, className }: MarkdownViewProps) {
   return (

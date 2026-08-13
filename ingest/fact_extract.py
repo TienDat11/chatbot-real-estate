@@ -1,7 +1,7 @@
-"""Fact extraction — LLM (qwen3.7-flash, JSON mode) + extract deterministic từ bảng.
+"""Fact extraction — LLM (qwen3.7-flash, JSON mode) and deterministic table extraction.
 
-Plan §3.2 step 3-4: retry 1; invalid/low-conf → fact_review_queue, KHÔNG đoán.
-Kỷ luật số (AD-14): tiền NUMERIC(20,0); % NUMERIC(5,2); lãi suất NUMERIC(6,4). CẤM float.
+(plan §3.2 steps 3-4) One retry; invalid or low-confidence facts go to the review queue, never guessed.
+(AD-14) Numeric discipline: money NUMERIC(20,0); pct NUMERIC(5,2); interest NUMERIC(6,4). No float.
 """
 
 from __future__ import annotations
@@ -14,20 +14,18 @@ from pydantic import BaseModel, Field
 
 from ingest.config import settings
 
-# ---------------------------------------------------------------------------
 # Schema extract
-# ---------------------------------------------------------------------------
 FACT_UNITS = ("vnd", "m2", "pct", "months", "days", "enum")
 FACT_QUALITIES = ("exact", "range", "approx")
 FACT_SUBJECT_TYPES = ("unit", "parcel", "project", "legal_fact", "taxon")
 
 
 class ExtractedFact(BaseModel):
-    """1 fact trích được từ văn bản/bảng — Pydantic v2 (validate ở biên)."""
+    """A single fact extracted from text or a table — Pydantic v2, validated at the boundary."""
     fact_key: str = Field(min_length=1)          # price_vnd | deposit_pct | term_months | interest_rate_pct | area_m2 | ...
     subject_key: str = Field(min_length=1)       # 'unit:tower-a/A10-01' | 'tax:le-phi-truoc-ba'
     subject_type: str = Field(pattern="|".join(FACT_SUBJECT_TYPES))
-    subject_display: str = ""                     # tên con người đọc
+    subject_display: str = ""                     # human-readable name
     value_num: Decimal | None = None
     value_text: str | None = None
     unit: str = Field(pattern="|".join(FACT_UNITS))
@@ -36,20 +34,18 @@ class ExtractedFact(BaseModel):
     range_max: Decimal | None = None
     policy_key: str | None = None                 # 'bank_a' | 'bank_b' | 'support'
     campaign_key: str | None = None
-    extract_conf: float | None = None             # [0,1] — <0.6 → review queue
-    span: str | None = None                       # đoạn gốc trong text
+    extract_conf: float | None = None             # [0,1] — below 0.6 routes to the review queue
+    span: str | None = None                       # verbatim span in the source text
 
     def model_post_init(self, __context: Any) -> None:
-        # ràng buộc lỏng: pct ∈ [0,100]; vnd > 0 — bắt sớm ở biên
+        # Loose boundary checks: pct in [0,100]; vnd > 0 — fail at the input edge.
         if self.unit == "pct" and self.value_num is not None and not (0 <= self.value_num <= 100):
             raise ValueError(f"pct ngoài [0,100]: {self.value_num}")
         if self.unit == "vnd" and self.value_num is not None and self.value_num <= 0:
             raise ValueError(f"vnd phải > 0: {self.value_num}")
 
 
-# ---------------------------------------------------------------------------
-# Parse số tiếng Việt (plan §4.2 + edge case 13/29)
-# ---------------------------------------------------------------------------
+# Vietnamese number parsing (plan §4.2 + edge case 13/29).
 _NUMBER_WORDS = {
     "không": 0, "một": 1, "hai": 2, "ba": 3, "bốn": 4, "năm": 5,
     "sáu": 6, "bảy": 7, "tám": 8, "chín": 9, "mười": 10, "mươi": 10,
@@ -65,27 +61,27 @@ _AMOUNT_RE = re.compile(
 
 
 def _strip_thousands(s: str) -> str:
-    # "2.850.000.000" → "2850000000"; "1,2" → "1.2" (dấu phẩy = thập phân nếu 1 chữ số sau)
+    # "2.850.000.000" → "2850000000"; "1,2" → "1.2" (a comma means a decimal separator when one digit follows)
     if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", s):
         return s.replace(".", "")
     if re.fullmatch(r"\d{1,3}(?:,\d{3})+", s):
         return s.replace(",", "")
-    # "1,2" → "1.2" (phân số VN dùng dấu phẩy)
+    # "1,2" → "1.2" (Vietnamese decimals use a comma).
     if "," in s and "." not in s:
         return s.replace(",", ".")
     return s
 
 
 def parse_vn_number(text: str) -> Decimal | None:
-    """Parse số tiền/diện tích tiếng Việt → Decimal. Trả None nếu không nhận diện.
+    """Parse a Vietnamese amount/area string to Decimal, or None when unrecognized.
 
-    Hỗ trợ: "2,85 tỷ", "2.850.000.000đ", "85,5 m²", "25%", "một tỷ hai trăm".
+    Accepts: "2,85 tỷ", "2.850.000.000đ", "85,5 m²", "25%", "một tỷ hai trăm".
     """
     t = text.strip().lower()
     if not t:
         return None
 
-    # Số viết bằng chữ: "một tỷ hai trăm triệu" → 1_200_000_000
+    # Number spelled out in words: "một tỷ hai trăm triệu" → 1_200_000_000
     words = t.split()
     if words and all(w in _NUMBER_WORDS or w in _UNIT_WORDS for w in words):
         total = Decimal(0)
@@ -120,7 +116,7 @@ def parse_vn_number(text: str) -> Decimal | None:
         return None
     unit = (m.group("unit") or "").lower()
     if unit == "%":
-        return num  # phần trăm điểm, không nhân
+        return num  # percentage points, no scaling
     if unit == "m²" or unit == "m2":
         return num
     if unit in _UNIT_WORDS:
@@ -129,13 +125,11 @@ def parse_vn_number(text: str) -> Decimal | None:
 
 
 def extract_amount(text: str) -> Decimal | None:
-    """Lấy amount đầu tiên trong text (cho rewrite budget)."""
+    """Return the first amount in text (for rewrite budget sizing)."""
     return parse_vn_number(text)
 
 
-# ---------------------------------------------------------------------------
-# Extraction LLM (JSON mode)
-# ---------------------------------------------------------------------------
+# Extraction LLM (JSON mode).
 _EXTRACT_SYSTEM = (
     "Bạn trích xuất dữ liệu số liệu và chính sách từ tài liệu bất động sản pháp lý Việt Nam. "
     "Trả về JSON array các fact. Chỉ tin vào nội dung văn bản — KHÔNG suy đoán. "
@@ -161,7 +155,7 @@ Văn bản:
 
 
 async def extract_facts(text: str, doc_id: str, kind: str) -> list[ExtractedFact]:
-    """Trích fact bằng LLM JSON mode (retry 1). Lỗi/JSON lỗi → raise (load.py ghi review_queue)."""
+    """Extract facts via LLM JSON mode (one retry); raise on failure so load.py records the review queue."""
     import json
 
     import openai
@@ -195,10 +189,9 @@ async def extract_facts(text: str, doc_id: str, kind: str) -> list[ExtractedFact
 
 
 def extract_facts_from_table(header: list[str], rows: list[list[str]], campaign_key: str | None = None) -> list[ExtractedFact]:
-    """Deterministic: bảng giá → price_vnd/area_m2/deposit_pct/term_months/interest_rate_pct.
+    """Deterministic table extraction: price_vnd/area_m2/deposit_pct/term_months/interest_rate_pct.
 
-    Header nhận diện theo từ khóa: 'giá'/'price', 'diện tích'/'dt'/'area', 'trả trước'/'cọc',
-    'thời hạn'/'kỳ hạn'/'term', 'lãi suất'/'interest'.
+    Column headers are matched by keyword ('giá'/'price', 'diện tích'/'area', 'trả trước'/'cọc', ...).
     """
     facts: list[ExtractedFact] = []
     idx_price = _find_col(header, ("giá", "price", "value"))

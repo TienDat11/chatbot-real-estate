@@ -1,8 +1,7 @@
-"""Central application settings — the single source of truth for env config.
+"""Central app settings — the single source of truth for env config.
 
-Loads `.env` (base) then `.env.<APP_ENV>` (override) from the repo root, using
-absolute paths so behavior is independent of the process CWD. Every module
-(api, ingest, eval) imports Settings from here.
+Loads .env then .env.<APP_ENV> override from the repo root by absolute path,
+so behavior is independent of the process CWD; api, ingest, and eval import Settings from here.
 """
 
 from __future__ import annotations
@@ -27,11 +26,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- App ---
+    # App
     app_env: str = "dev"
     cors_origins: list[str] = ["http://localhost:3000"]
 
-    # --- Postgres (LightRAG reads POSTGRES_* directly) ---
+    # Postgres (LightRAG reads POSTGRES_* directly)
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_user: str = "ragre"
@@ -39,24 +38,24 @@ class Settings(BaseSettings):
     postgres_database: str = "ragre"
     postgres_max_connections: int = 10
 
-    # --- LightRAG storage ---
+    # LightRAG storage
     lightrag_workspace: str = "ragre_mvp"
 
-    # --- Embedding (LOCK: text-embedding-v4, dims 1024 — change = full re-embed) ---
+    # Embedding (LOCK: text-embedding-v4, dims 1024 — a change means a full re-embed)
     embedding_binding: str = "dashscope"  # dashscope | aibox | local
     embedding_api_key: str = ""
     embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     embedding_model: str = "text-embedding-v4"
     embedding_dim: int = 1024
 
-    # --- Rerank (app-side, single score source for confidence) ---
+    # Rerank (app-side; single score source for confidence)
     rerank_binding: str = "dashscope"  # dashscope | aibox | null
     rerank_api_key: str = ""
     rerank_base_url: str = ""
     rerank_model: str = "qwen3-rerank"
     enable_rerank: bool = True
 
-    # --- Geo (nearby places — THE CAMELLIA project area, brief §7) ---
+    # Geo (nearby places — THE CAMELLIA project area, brief §7)
     geo_binding: str = "static"  # static | google | off
     geo_api_key: str = ""
     geo_base_url: str = "https://maps.googleapis.com/maps/api/place"
@@ -65,7 +64,7 @@ class Settings(BaseSettings):
     geo_center_lat: float = 16.0558  # giao lộ Lê Văn Lương – Lê Đức Thọ, Sơn Trà (approx)
     geo_center_lng: float = 108.2455
 
-    # --- LLM gateway (OpenAI-compatible) ---
+    # LLM gateway (OpenAI-compatible)
     llm_api_key: str = ""
     llm_base_url: str = ""
     llm_model_rewrite: str = "deepseek-v4-flash"
@@ -75,21 +74,21 @@ class Settings(BaseSettings):
     llm_model_guard: str = "deepseek-v4-flash-0731"
     llm_model_nl2sql: str = "qwen3.7-flash"
 
-    # --- Query token budgets (RAG leg) ---
+    # Query token budgets (RAG leg)
     rag_max_entity_tokens: int = Field(default=2000, validation_alias="QUERY_MAX_ENTITY_TOKENS")
     rag_max_relation_tokens: int = Field(default=2000, validation_alias="QUERY_MAX_RELATION_TOKENS")
     rag_max_total_tokens: int = Field(default=6000, validation_alias="QUERY_MAX_TOTAL_TOKENS")
 
-    # --- Guard ---
+    # Guard
     guard_input_pg2_url: str | None = None  # optional Prompt Guard 2 endpoint
 
-    # --- Ingest ---
+    # Ingest
     chunk_cap: int = 1200  # hard cap per chunk (A1)
     extract_timeout: float = 90.0  # seconds per extraction call
     max_async_llm: int = 6
     max_parallel_workers: int = 2
 
-    # --- DSNs ---
+    # DSNs
     @property
     def pg_dsn(self) -> str:
         """asyncpg DSN for most queries (asyncpg driver)."""
@@ -130,10 +129,8 @@ def get_settings() -> Settings:
 def export_runtime_env(cfg: Settings | None = None) -> None:
     """Export Settings-backed values to os.environ for env-reading libraries.
 
-    LightRAG PG storages (PGKVStorage / PGTableGraphStorage / PGVectorStorage)
-    read POSTGRES_* from the process environment, not from pydantic Settings —
-    without this export they silently fall back to LightRAG defaults. setdefault
-    keeps a real shell env authoritative over .env values.
+    LightRAG PG storages read POSTGRES_* from the process environment, not from
+    Settings; setdefault keeps a real shell env authoritative over .env values.
     """
     resolved = cfg or get_settings()
     for key, value in {

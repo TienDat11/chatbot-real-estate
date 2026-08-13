@@ -1,8 +1,8 @@
-"""Placeholder ⟦FACT:key@subject[#policy]⟧ — ánh xạ chunk ↔ facts (logical ref, không row id).
+"""Placeholder tokens ⟦FACT:key@subject[#policy]⟧ link chunk text to facts by logical ref, not row id.
 
-Plan §3.5: token = logical ref; resolve() trong with_rls_identity; fact hết hiệu lực/không
-tồn tại → marker '[không có dữ liệu hiệu lực]' (KHÔNG silent drop). §3.2 step 2: sanitize
-forged token TRƯỚC khi thay span.
+(plan §3.5) Tokens are logical refs resolved inside with_rls_identity; an expired or missing fact
+yields the '[không có dữ liệu hiệu lực]' marker rather than a silent drop. (plan §3.2 step 2)
+Sanitize forged tokens before spans are replaced.
 """
 
 from __future__ import annotations
@@ -31,21 +31,21 @@ class FactRef:
 
 
 def sanitize_forged_tokens(text: str) -> str:
-    """Escapes literal ⟦ ⟧ có sẵn trong source (plan §3.2 step 2) để không lẫn với token thật."""
-    # Thay ⟦ → ⟪ và ⟧ → ⟫ (ký tự U+27EA/27EB) — an toàn, không đụng token ta tạo sau này.
+    """Escape literal ⟦ ⟧ in source text (plan §3.2 step 2) so they cannot collide with generated tokens."""
+    # Map ⟦→⟪ and ⟧→⟫ (U+27EA/27EB); safe because we never generate those characters.
     return text.replace(FACT_TOKEN_START, "⟪FACT:").replace(FACT_TOKEN_END, "⟫")
 
 
 def replace_fact_with_placeholder(text: str, spans: list[tuple[str, str, str | None]]) -> tuple[str, list[FactRef]]:
-    """Thay đoạn gốc (span) bằng token placeholder.
+    """Replace source spans with placeholder tokens.
 
     Args:
-        text: chunk text (đã sanitize forged token).
-        spans: list (subject_key, fact_key, policy_key).
+        text: chunk text (forged tokens already sanitized).
+        spans: list of (subject_key, fact_key, policy_key).
 
     Returns:
-        (text mới, list FactRef) — refs khớp 1:1 thứ tự span. Thêm prefix token ở đầu chunk
-        để tracker + integrity check (verify_ingest.sql) hoạt động đúng.
+        (new text, refs) — refs match spans 1:1 in order. A token prefix is prepended to the chunk
+        so trackers and verify_ingest.sql integrity checks see every referenced fact.
     """
     refs = [FactRef(subject_key=s, fact_key=fk, policy_key=p) for s, fk, p in spans]
     prefix = "".join(r.token for r in refs)
@@ -54,7 +54,7 @@ def replace_fact_with_placeholder(text: str, spans: list[tuple[str, str, str | N
 
 
 def extract_placeholders(text: str) -> list[FactRef]:
-    """Đọc token từ text (dùng verify_ingest + hydrate)."""
+    """Read tokens out of text (used by verify_ingest and hydration)."""
     return [
         FactRef(fact_key=m.group(1), subject_key=m.group(2), policy_key=m.group(3))
         for m in _PLACEHOLDER_RE.finditer(text)
@@ -62,7 +62,7 @@ def extract_placeholders(text: str) -> list[FactRef]:
 
 
 def has_dangling_placeholder(text: str) -> bool:
-    """Token mở mà không đóng (integrity test A13)."""
+    """True when a token opens without closing (integrity test A13)."""
     opens = text.count(FACT_TOKEN_START)
     closes = text.count(FACT_TOKEN_END)
     return opens > closes
@@ -72,9 +72,10 @@ Resolver = Callable[[str, str, str | None], str | None]  # (fact_key, subject_ke
 
 
 def resolve_placeholders(text: str, resolver: Resolver) -> str:
-    """Hydrate token → giá trị fact (format sẵn kèm ngày hiệu lực) qua resolver.
+    """Hydrate tokens to formatted fact values (with effective dates) via the resolver.
 
-    Fact hết hiệu lực / không tồn tại → resolver trả None → marker '[không có dữ liệu hiệu lực]'.
+    A missing or expired fact makes the resolver return None, yielding the
+    '[không có dữ liệu hiệu lực]' marker.
     """
 
     def _repl(m: re.Match[str]) -> str:
