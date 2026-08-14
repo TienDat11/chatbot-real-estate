@@ -166,7 +166,7 @@ _nl2sql_pool: asyncpg.Pool | None = None
 
 async def get_nl2sql_pool() -> asyncpg.Pool:
     global _nl2sql_pool
-    if _nl2sql_pool is None or _nl2sql_pool.is_closed():
+    if _nl2sql_pool is None or _nl2sql_pool.is_closing():
         _nl2sql_pool = await asyncpg.create_pool(
             build_dsn(),
             min_size=1,
@@ -181,7 +181,7 @@ async def get_nl2sql_pool() -> asyncpg.Pool:
 
 async def close_nl2sql_pool() -> None:
     global _nl2sql_pool
-    if _nl2sql_pool is not None and not _nl2sql_pool.is_closed():
+    if _nl2sql_pool is not None and not _nl2sql_pool.is_closing():
         await _nl2sql_pool.close()
     _nl2sql_pool = None
 

@@ -88,6 +88,18 @@ class Settings(BaseSettings):
     llm_model_guard: str = "deepseek-v4-flash-0731"
     llm_model_nl2sql: str = "qwen3.7-flash"
 
+    @property
+    def llm_base_url_v1(self) -> str:
+        """OpenAI-compatible base URL carrying the /v1 API path, whatever config holds.
+
+        aibox / Qwen compatible gateways serve /chat/completions under /v1; the
+        openai SDK 2.x turns a bare host into a plain-text response (no `.choices`),
+        so all clients must pass the /v1 form. Normalize once here instead of at
+        every call site, so both `.../v1` and bare-host config strings work.
+        """
+        base = (self.llm_base_url or "").strip()
+        return base if base.rstrip("/").endswith("/v1") else base.rstrip("/") + "/v1"
+
     # Query token budgets (RAG leg)
     rag_max_entity_tokens: int = Field(default=2000, validation_alias="QUERY_MAX_ENTITY_TOKENS")
     rag_max_relation_tokens: int = Field(default=2000, validation_alias="QUERY_MAX_RELATION_TOKENS")

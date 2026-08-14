@@ -90,19 +90,26 @@ FROM (
   WHERE s.subject_key LIKE 'unit:tower-b/%'
 ) t WHERE t.n = 0;
 
--- CHK-7 (bonus): active facts — policy units must have exactly 3 current facts each
--- (deposit_pct + term_months + interest_rate_pct).
+-- CHK-7 (bonus): active facts — every current loan policy must carry the full
+-- loan key set. Loan key = (deposit_pct | loan_ltv_pct) + term_months +
+-- interest_rate_pct. Payment-only methods (chuan/som95/thanh_thoi on Camellia)
+-- have no loan key and are intentionally out of scope; htls/bank_mb count as
+-- loan policies and need all three key roles.
 SELECT 'chk7_missing_policy_fact_for_policy_units' AS check_name,
        count(*)   AS count,
        CASE WHEN count(*) = 0 THEN 'OK' ELSE 'FAIL' END AS status
 FROM (
-  -- each current (unit, policy_key) must have exactly 3 facts: deposit_pct + term_months + interest_rate_pct
-  SELECT s.subject_key, f.policy_key, count(*) AS n
+  -- each current (UNIT, loan policy) must have exactly 3 distinct loan key roles;
+  -- project-level policy rows (subject_type='project') carry their own summary
+  -- facts and are not part of the per-unit v_unit_offers/v_loan_offers contract.
+  SELECT s.subject_key, f.policy_key
   FROM facts f
   JOIN fact_subjects s ON s.id = f.subject_id
-  WHERE f.policy_key IS NOT NULL
+  WHERE s.subject_type = 'unit'
+    AND f.policy_key IS NOT NULL
+    AND f.fact_key IN ('deposit_pct', 'loan_ltv_pct', 'term_months', 'interest_rate_pct')
     AND f.effective_from <= CURRENT_DATE
     AND (f.effective_to IS NULL OR f.effective_to > CURRENT_DATE)
   GROUP BY s.subject_key, f.policy_key
-  HAVING count(*) <> 3
+  HAVING count(DISTINCT f.fact_key) < 3  -- 3 is the minimum set; 4 (deposit+ltv+term+rate) is valid
 ) bad;

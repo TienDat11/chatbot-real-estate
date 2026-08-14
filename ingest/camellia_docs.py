@@ -6,7 +6,9 @@ Camellia corpus under data/_processed, aligned with docs/data-contract.md.
 Why not call load_document here: the loader replaces on re-ingest and would
 DELETE the seeded facts behind docs like `price-camellia-2026q3`
 (ingest/load.py, delete-before-insert). Story 2.2 only renders text, chunks
-and validates required fields; the real registry write is Story 2.3.
+and validates required fields; the real registry write is Story 2.3
+(ingest/run_camellia_ingest.py), which carries the seed facts through
+load_document(..., preserve_seed_facts=True).
 """
 
 from __future__ import annotations

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
 
@@ -34,7 +35,7 @@ class LoadResult:
 
 
 def _normalize_subject_key(key: str) -> str:
-    """Dedupe subject_key: strip dots/dashes and lowercase before the UNIQUE constraint (plan §3.2 step 4)."""
+    """Dedupe subject_key: strip dots/dashes and lowercase before the UNIQUE constraint."""
     return key.strip().lower().replace(".", "").replace("-", "")
 
 
@@ -42,10 +43,18 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-async def _upsert_campaign(conn, campaign_key: str, project_key: str, effective_from, effective_to, source_doc_id: str) -> None:
+async def _upsert_campaign(
+    conn,
+    campaign_key: str,
+    project_key: str,
+    effective_from,
+    effective_to,
+    source_doc_id: str,
+) -> None:
     await conn.execute(
         """
-        INSERT INTO campaigns (campaign_key, project_key, effective_from, effective_to, source_doc_id, status)
+        INSERT INTO campaigns
+          (campaign_key, project_key, effective_from, effective_to, source_doc_id, status)
         VALUES ($1, $2, $3, $4, $5, 'active')
         ON CONFLICT (campaign_key) DO UPDATE
           SET effective_from = EXCLUDED.effective_from,
@@ -114,17 +123,35 @@ async def _insert_fact(
     return int(row["id"])
 
 
-async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = None) -> LoadResult:
+async def load_document(
+    parsed: ParsedDoc,
+    facts: list[ExtractedFact] | None = None,
+    *,
+    preserve_seed_facts: bool = False,
+) -> LoadResult:
     """Persist the registry in one transaction, then ainsert into LightRAG.
 
     Args:
         parsed: ParsedDoc produced by the parser.
         facts: extracted facts (None persists chunks only; facts flow through another path).
+        preserve_seed_facts: keep facts whose source_chunk_id is NULL — rows seeded
+            outside ingest (Story 2.3: `price-camellia-2026q3`, db/seed/camellia_rumor.sql).
+            When True, on re-ingest we delete only the facts this loader created
+            (source_chunk_id IS NOT NULL); the seed rows stay and chunks are still
+            true-replaced. Cannot be combined with `facts`: the seed rows are the
+            single source of truth (data-contract §3.2), and a re-insert would collide
+            on the facts_no_overlap GiST exclusion.
 
     Raises:
         LoadError: transaction rolled back; the caller records review_queue/ingest_log.
+        ValueError: preserve_seed_facts combined with facts to insert.
     """
     chunks = parsed.sections
+    if preserve_seed_facts and facts:
+        raise ValueError(
+            f"preserve_seed_facts cannot combine with facts (doc={parsed.doc_id}): "
+            "seed rows already hold the campaign figures (data-contract §3.2)"
+        )
     conn = await asyncpg.connect(settings.pg_dsn)
     version = 1
     fact_rows: list[tuple[int, str]] = []  # (fact_id, chunk_id)
@@ -138,7 +165,7 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
                 INSERT INTO documents (
                   doc_id, kind, title, source_file, effective_from, effective_to,
                   status, content_hash, version, metadata
-                ) VALUES ($1,$2,$3,$4,$5,$6,'published',$7,1,$8)
+                ) VALUES ($1,$2,$3,$4,$5,$6,'published',$7,1,$8::jsonb)
                 ON CONFLICT (doc_id) DO UPDATE
                   SET status='published',
                       version = documents.version + 1,
@@ -148,14 +175,32 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
                 RETURNING version
                 """,
                 parsed.doc_id, parsed.kind, parsed.title, parsed.source_file,
-                eff_from, eff_to, parsed.content_hash, parsed.metadata,
+                eff_from, eff_to, parsed.content_hash,
+                json.dumps(parsed.metadata, ensure_ascii=False),
             )
             version = int(doc_row["version"])
             chunk_ids = [f"{parsed.doc_id}:{version}:{i}" for i in range(len(chunks))]
 
             # 2) true replace on re-ingest: drop the previous version's facts + chunks
-            #    (facts hold the source_chunk_id FK, so they must go first).
-            await conn.execute("DELETE FROM facts WHERE source_doc_id = $1", parsed.doc_id)
+            #    (facts hold the source_chunk_id FK, so they must go first). With
+            #    preserve_seed_facts we drop only loader-created rows (their
+            #    source_chunk_id is set); seeded rows keep source_chunk_id NULL and
+            #    stay — not orphans, because their chunks are re-created below.
+            #    Capture the old chunk_ids FIRST: LightRAG documents are keyed by
+            #    chunk_id, so a version>1 ainsert needs to adelete each old id.
+            old_chunk_ids = [
+                r["chunk_id"]
+                for r in await conn.fetch(
+                    "SELECT chunk_id FROM document_chunks WHERE doc_id = $1", parsed.doc_id
+                )
+            ]
+            if preserve_seed_facts:
+                await conn.execute(
+                    "DELETE FROM facts WHERE source_doc_id = $1 AND source_chunk_id IS NOT NULL",
+                    parsed.doc_id,
+                )
+            else:
+                await conn.execute("DELETE FROM facts WHERE source_doc_id = $1", parsed.doc_id)
             await conn.execute("DELETE FROM document_chunks WHERE doc_id = $1", parsed.doc_id)
 
             # 3) assign each unique fact to exactly one chunk (span → containing chunk,
@@ -186,7 +231,8 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
             for i, (chunk, cid) in enumerate(zip(chunks, chunk_ids)):
                 await conn.execute(
                     """
-                    INSERT INTO document_chunks (doc_id, chunk_id, chunk_index, content, text_hash, section)
+                    INSERT INTO document_chunks
+                      (doc_id, chunk_id, chunk_index, content, text_hash, section)
                     VALUES ($1,$2,$3,$4,$5,$6)
                     ON CONFLICT (chunk_id) DO UPDATE
                       SET content = EXCLUDED.content, text_hash = EXCLUDED.text_hash
@@ -202,7 +248,8 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
 
             for fact_id, cid in fact_rows:
                 await conn.execute(
-                    "INSERT INTO chunk_fact_refs (chunk_id, fact_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+                    "INSERT INTO chunk_fact_refs (chunk_id, fact_id) VALUES ($1,$2) "
+                    "ON CONFLICT DO NOTHING",
                     cid, fact_id,
                 )
 
@@ -223,13 +270,15 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
     # 6) ainsert after COMMIT — outside the transaction.
     lightrag_doc_id: str | None = None
     try:
-        from ingest.lightrag_init import ainsert_document, adelete_by_doc_id, get_lightrag
+        from ingest.lightrag_init import adelete_by_doc_id, ainsert_document, get_lightrag
 
         rag = get_lightrag()
         if version > 1:
-            # Re-ingest: LightRAG doc id equals doc_id for every version, so drop the
-            # old doc first or its chunks linger alongside the new ones.
-            await adelete_by_doc_id(rag, parsed.doc_id)
+            # Re-ingest: LightRAG docs are keyed by the previous version's
+            # chunk_ids (doc_id:version:index), so drop each old chunk's doc —
+            # deleting by doc_id would miss them (no document carries it).
+            for old_cid in old_chunk_ids:
+                await adelete_by_doc_id(rag, old_cid)
         # Annotate chunk text with ⟦FACT tokens (replaced by values at generation time).
         ainsert_texts = [
             replace_fact_with_placeholder(
