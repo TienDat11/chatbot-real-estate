@@ -31,7 +31,7 @@ logger = logging.getLogger("api.main")
 # Typed request/response models.
 class HistoryTurn(BaseModel):
     role: str = Field(..., pattern="^(user|assistant)$")
-    content: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1, max_length=MAX_QUERY_LENGTH)
 
 
 class QueryRequest(BaseModel):

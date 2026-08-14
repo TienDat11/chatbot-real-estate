@@ -10,7 +10,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +25,20 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # Known development-only value; production startup fails fast when it survives.
+    _KNOWN_DEFAULT_SECRETS = ("ragre_dev_password", "")
+
+    @model_validator(mode="after")
+    def _fail_fast_on_default_secrets(self) -> "Settings":
+        if self.app_env in ("prod", "production"):
+            if self.postgres_password in self._KNOWN_DEFAULT_SECRETS:
+                raise ValueError(
+                    "POSTGRES_PASSWORD must be set and distinct from the dev default in production"
+                )
+            if not self.llm_api_key:
+                raise ValueError("LLM_API_KEY is required in production")
+        return self
 
     # App
     app_env: str = "dev"

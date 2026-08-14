@@ -48,7 +48,8 @@ WITH (security_invoker = true) AS
 WITH cur AS (
   SELECT subject_id, policy_key, fact_key, value_num, range_min, range_max, quality
   FROM facts
-  WHERE effective_to IS NULL
+  WHERE effective_from <= CURRENT_DATE
+    AND effective_to IS NULL
 )
 SELECT s.subject_key,
        s.display_name,

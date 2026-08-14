@@ -189,7 +189,7 @@ def test_analyze_affordability_partitions_and_approx():
     assert res["has_approx"] is True
 
     res2 = analyze_affordability([cash_offer], 2_000_000_000)
-    assert res2["has_approx"] is False
+    assert res2["has_approx"] is True  # range bands cap confidence at MEDIUM (D6)
     assert res2["lowest_price_vnd"] == 1_900_000_000
 
 

@@ -180,12 +180,12 @@ def analyze_affordability(
 
     Keys: budget_vnd, lowest_price_vnd (across all offers/policies), cash
     (list of (offer, max_floor_index)), loan (list of Offer), has_approx
-    (any affordable offer is quality 'approx' -> confidence cap MEDIUM, D6).
+    (any affordable offer is quality 'range'/'approx' -> confidence cap MEDIUM, D6).
     """
     cash = cash_match(offers, budget_vnd, scenario_pct)
     loan = loan_match(offers, budget_vnd)
-    has_approx = any(o.price_quality == "approx" for o, _ in cash) or any(
-        o.price_quality == "approx" for o in loan
+    has_approx = any(o.price_quality in ("range", "approx") for o, _ in cash) or any(
+        o.price_quality in ("range", "approx") for o in loan
     )
     prices = [o.price_min_vnd for o in offers if o.price_min_vnd]
     return {
