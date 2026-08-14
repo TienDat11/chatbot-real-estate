@@ -1,28 +1,15 @@
--- =============================================================================
--- rag-real-estate — Seed: bảng giá + hồ sơ dự án (2 campaign, 29 căn)
--- Plan §3.3 + §3.4 + §3.6 + §10 Ngày 3-4 | Idempotent | UTF-8
---
--- ⚠️ MOCK/DEMO DATA — dữ liệu demo (giá/campaign dựng sẵn), chờ dữ liệu thật từ
---   chủ dữ liệu (plan §10). Chưa từng áp lên DB thật; KHÔNG dùng trong production.
---
--- Nội dung:
---   * documents kind='price': price-tower-a-2026q2 (active), price-tower-b-2026q1 (expired)
---   * documents kind='project': project-tower-a, project-tower-b
---   * campaigns: tower-a-2026q2 [2026-04-01, NULL) ACTIVE | tower-b-2026q1 [2026-01-01, 2026-03-31) EXPIRED
---   * fact_subjects: 29 unit (tower-a 21 + tower-b 8) + 2 project subjects
---   * facts: price_vnd + area_m2 cho mọi căn; policy facts (bank_a/bank_b mỗi căn,
---     support 0% cho A06-01; A04-03 KHÔNG policy)
---
--- Kỷ luật kiểu số (AD-14): tiền NUMERIC(20,0) nguyên đồng; % NUMERIC(5,2);
--- lãi suất NUMERIC(6,4); m2 NUMERIC(10,2). NULL ≠ 0.00.
--- =============================================================================
+-- rag-real-estate — Seed: price tables + project records (2 campaigns, 29 units).
+-- MOCK/DEMO DATA: sample prices/campaigns, awaiting real data (plan §10); not for production.
+-- Contents: 2 price docs (price-tower-a-2026q2 active, price-tower-b-2026q1 expired) + 2 project docs; 2 campaigns
+-- (tower-a-2026q2 [2026-04-01, NULL) ACTIVE, tower-b-2026q1 [2026-01-01, 2026-03-31) EXPIRED); 29 unit + 2 project subjects;
+-- price_vnd + area_m2 for every unit, plus policy facts per unit (support 0% for A06-01, none for A04-03).
+-- Numeric discipline (AD-14): money NUMERIC(20,0) VND, pct NUMERIC(5,2), interest NUMERIC(6,4), m2 NUMERIC(10,2); NULL != 0.00.
+-- Idempotent | UTF-8 | Plan §3.3 + §3.4 + §3.6 + §10 Days 3-4
 
 BEGIN;
 
--- ---------------------------------------------------------------------------
--- 1. documents — bảng giá + hồ sơ dự án
---    content_hash = placeholder sha256('seed:<doc_id>') — ingest thay bằng hash file thật.
--- ---------------------------------------------------------------------------
+-- 1. documents — price tables + project records; content_hash is placeholder
+--    sha256('seed:<doc_id>') until ingest replaces it with the real file hash
 INSERT INTO documents
   (doc_id, kind, title, source_file, effective_from, effective_to, status, content_hash, metadata)
 VALUES
@@ -44,9 +31,7 @@ VALUES
    '{"project_name":"Tower B","location":"Quận Hải Châu, Đà Nẵng","developer":"Công ty BĐS số 1","total_units":150,"handover_date":"2027-06-30","amenities":["hồ bơi","sân tennis"],"legal_status":"đã có sổ hồng"}')
 ON CONFLICT (doc_id) DO NOTHING;
 
--- ---------------------------------------------------------------------------
--- 2. campaigns — đợt giá (B7: giá/policy BẮT BUỘC gán campaign)
--- ---------------------------------------------------------------------------
+-- 2. campaigns — price periods (B7: price/policy MUST belong to a campaign)
 INSERT INTO campaigns
   (campaign_key, project_key, effective_from, effective_to, source_doc_id, status)
 VALUES
@@ -54,14 +39,12 @@ VALUES
   ('tower-b-2026q1', 'tower-b', '2026-01-01', '2026-03-31', 'price-tower-b-2026q1', 'expired')
 ON CONFLICT (campaign_key) DO NOTHING;
 
--- ---------------------------------------------------------------------------
--- 3. fact_subjects — 29 căn + 2 dự án (dedup theo subject_key)
--- ---------------------------------------------------------------------------
+-- 3. fact_subjects — 29 units + 2 projects (deduped by subject_key)
 INSERT INTO fact_subjects (subject_key, subject_type, display_name, project_key, attrs)
 SELECT t.subject_key, 'unit', t.display_name, t.project_key,
        jsonb_build_object('floor', t.floor)
 FROM (VALUES
-  -- Tower A (active) — 21 căn, giá 1.2 tỷ → 8 tỷ
+  -- Tower A (active) — 21 units, prices 1.2B VND → 8B VND
   ('unit:tower-a/A10-01', 'Căn A10-01', 'tower-a', 10),
   ('unit:tower-a/A10-02', 'Căn A10-02', 'tower-a', 10),
   ('unit:tower-a/A10-03', 'Căn A10-03', 'tower-a', 10),
@@ -83,7 +66,7 @@ FROM (VALUES
   ('unit:tower-a/A04-02', 'Căn A04-02', 'tower-a',  4),
   ('unit:tower-a/A04-03', 'Căn A04-03', 'tower-a',  4),
   ('unit:tower-a/A03-01', 'Căn A03-01', 'tower-a',  3),
-  -- Tower B (expired) — 8 căn, giá 5.3 tỷ → 9.5 tỷ
+  -- Tower B (expired) — 8 units, prices 5.3B VND → 9.5B VND
   ('unit:tower-b/B1-01', 'Căn B1-01', 'tower-b', 1),
   ('unit:tower-b/B1-02', 'Căn B1-02', 'tower-b', 1),
   ('unit:tower-b/B1-03', 'Căn B1-03', 'tower-b', 1),
@@ -103,10 +86,8 @@ VALUES
    '{"developer":"Công ty BĐS số 1","location":"Quận Hải Châu, Đà Nẵng","total_units":150}')
 ON CONFLICT (subject_key) DO NOTHING;
 
--- ---------------------------------------------------------------------------
--- 4. facts — price_vnd + area_m2 cho 29 căn (NUMERIC(20,0) vnd / NUMERIC(10,2) m2)
---    Idempotent: NOT EXISTS guard theo (subject, fact_key, effective_from).
--- ---------------------------------------------------------------------------
+-- 4. facts — price_vnd + area_m2 for 29 units (NUMERIC(20,0) VND / NUMERIC(10,2) m2).
+--    Idempotent: NOT EXISTS guard on (subject, fact_key, effective_from).
 INSERT INTO facts
   (subject_id, fact_key, policy_key, campaign_key, value_num, unit, quality,
    volatile, effective_from, effective_to, source_doc_id, extract_conf)
@@ -156,7 +137,7 @@ FROM (VALUES
   ('unit:tower-a/A04-03', 'area_m2',  44.00::NUMERIC(10,2), 'm2',  'tower-a-2026q2', 'price-tower-a-2026q2', '2026-04-01', NULL),
   ('unit:tower-a/A03-01', 'price_vnd', 1200000000::NUMERIC(20,0), 'vnd', 'tower-a-2026q2', 'price-tower-a-2026q2', '2026-04-01', NULL),
   ('unit:tower-a/A03-01', 'area_m2',  42.00::NUMERIC(10,2), 'm2',  'tower-a-2026q2', 'price-tower-a-2026q2', '2026-04-01', NULL),
-  -- Tower B (expired) — interval đã đóng [2026-01-01, 2026-03-31)
+  -- Tower B (expired) — closed interval [2026-01-01, 2026-03-31)
   ('unit:tower-b/B1-01', 'price_vnd', 9500000000::NUMERIC(20,0), 'vnd', 'tower-b-2026q1', 'price-tower-b-2026q1', '2026-01-01', '2026-03-31'),
   ('unit:tower-b/B1-01', 'area_m2',  95.00::NUMERIC(10,2), 'm2',  'tower-b-2026q1', 'price-tower-b-2026q1', '2026-01-01', '2026-03-31'),
   ('unit:tower-b/B1-02', 'price_vnd', 9000000000::NUMERIC(20,0), 'vnd', 'tower-b-2026q1', 'price-tower-b-2026q1', '2026-01-01', '2026-03-31'),
@@ -181,22 +162,20 @@ WHERE NOT EXISTS (
     AND f.policy_key IS NULL AND f.effective_from = d.effective_from
 );
 
--- ---------------------------------------------------------------------------
--- 5. facts — chính sách vay (policy facts) — 2 policy ngân hàng mỗi căn
+-- 5. facts — loan-policy facts, 2 bank policies per unit
 --    bank_a: deposit 25.00 / term 180 / interest 8.5000
 --    bank_b: deposit 30.00 / term 240 / interest 8.0000
---    A06-01: support  0.00 / term 120 / interest 0.0000  (0% trả trước — ÁP DỤNG thay vì ngân hàng)
---    A04-03: KHÔNG policy → không xuất hiện trong v_unit_offers (edge case §3.4)
---    CROSS JOIN unit × policy template; NOT EXISTS guard theo (subject, policy, fact_key, from).
--- ---------------------------------------------------------------------------
+--    A06-01: support 0.00 / term 120 / interest 0.0000 (0% down payment — applied instead of a bank)
+--    A04-03: no policy → absent from v_unit_offers (edge case §3.4)
+--    CROSS JOIN unit x policy template; NOT EXISTS guard on (subject, policy, fact_key, from).
 INSERT INTO facts
   (subject_id, fact_key, policy_key, campaign_key, value_num, unit, quality,
    volatile, effective_from, effective_to, source_doc_id, extract_conf)
 SELECT s.id, p.fact_key, p.policy_key, p.campaign_key, p.value_num, p.unit, 'exact',
        FALSE, p.effective_from, p.effective_to, p.source_doc_id, 0.95
 FROM (VALUES
-  -- Template policy theo từng căn (policy_key, fact_key, value_num, unit)
-  -- Tower A active — bank_a / bank_b cho mọi căn trừ A06-01 (support) và A04-03 (không policy)
+  -- Per-unit policy template (policy_key, fact_key, value_num, unit)
+  -- Tower A active — bank_a / bank_b for every unit except A06-01 (support) and A04-03 (no policy)
   ('unit:tower-a/A10-01', 'bank_a', 'deposit_pct',        25.00::NUMERIC(5,2), 'pct'),
   ('unit:tower-a/A10-01', 'bank_a', 'term_months',        180::NUMERIC, 'months'),
   ('unit:tower-a/A10-01', 'bank_a', 'interest_rate_pct',  8.5000::NUMERIC(6,4), 'pct'),
@@ -314,7 +293,7 @@ FROM (VALUES
   ('unit:tower-a/A03-01', 'bank_b', 'deposit_pct',        30.00::NUMERIC(5,2), 'pct'),
   ('unit:tower-a/A03-01', 'bank_b', 'term_months',        240::NUMERIC, 'months'),
   ('unit:tower-a/A03-01', 'bank_b', 'interest_rate_pct',  8.0000::NUMERIC(6,4), 'pct'),
-  -- Tower B (expired) — policy cùng interval đã đóng
+  -- Tower B (expired) — policies share the same closed interval
   ('unit:tower-b/B1-01', 'bank_a', 'deposit_pct',        25.00::NUMERIC(5,2), 'pct'),
   ('unit:tower-b/B1-01', 'bank_a', 'term_months',        180::NUMERIC, 'months'),
   ('unit:tower-b/B1-01', 'bank_a', 'interest_rate_pct',  8.5000::NUMERIC(6,4), 'pct'),

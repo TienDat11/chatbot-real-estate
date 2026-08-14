@@ -1,42 +1,30 @@
--- =============================================================================
--- rag-real-estate — Schema v2 (setup TRƯỚC khi có dữ liệu)
--- PostgreSQL 16.6+ | pgvector >= 0.8 | LightRAG 1.5.6
--- Plan: .claude/plans/rag-real-estate-final.plan.md §3.3 + §3.4 + §5 (L3 guardrails)
---
--- Nguyên tắc:
---  * Facts (giá/policy/diện tích) NGOÀI vector index — vector chứa nghĩa, SQL chứa số.
---  * Interval half-open [effective_from, effective_to) — NULL effective_to = còn hiệu lực.
---  * Kỷ luật kiểu số (AD-14): tiền NUMERIC(20,0); % điểm NUMERIC(5,2);
---    lãi suất NUMERIC(6,4); CẤM float/double. NULL ≠ 0.
---  * RLS ENABLE+FORCE trên registry tables; policy SELECT MVP STATIC (doc published).
---  * Bảng graph/vector của LightRAG (PGTableGraphStorage/PGVectorStorage) tự tạo.
--- =============================================================================
+-- rag-real-estate — Schema v2: run BEFORE any ingest. Requires PostgreSQL 16.6+,
+-- pgvector >= 0.8, LightRAG 1.5.6. Plan refs: .claude/plans/rag-real-estate-final.plan.md §3.3 + §3.4 + §5 (L3 guardrails).
+-- Why: facts (price/policy/area) live OUTSIDE the vector index (vector = meaning, SQL = numbers);
+-- intervals are half-open [effective_from, effective_to), NULL effective_to = open-ended;
+-- numeric discipline (AD-14): money NUMERIC(20,0), pct NUMERIC(5,2), interest NUMERIC(6,4), no float/double, NULL != 0;
+-- RLS ENABLE+FORCE on registry tables with a static published-doc SELECT policy; LightRAG graph/vector tables self-create.
 
--- ---------------------------------------------------------------------------
 -- 0. Extensions
--- ---------------------------------------------------------------------------
 CREATE EXTENSION IF NOT EXISTS vector;       -- pgvector (LightRAG vector storage)
 CREATE EXTENSION IF NOT EXISTS btree_gist;   -- interval exclusion constraint
 
--- ---------------------------------------------------------------------------
--- 1. documents — registry metadata contract (v2)
---    Mỗi dòng = 1 tài liệu/1 bảng giá/1 campaign document.
--- ---------------------------------------------------------------------------
+-- 1. documents — registry metadata contract (v2); one row per document/price table/campaign doc
 CREATE TABLE IF NOT EXISTS documents (
   id            BIGSERIAL PRIMARY KEY,
-  -- ID ổn định con người đọc được: 'ldd-2024' | 'price-tower-a-2026q3'
+  -- Stable human-readable id: 'ldd-2024' | 'price-tower-a-2026q3'
   doc_id        TEXT        NOT NULL UNIQUE,
   kind          TEXT        NOT NULL CHECK (kind IN ('legal', 'price', 'project')),
   title         TEXT        NOT NULL,
-  source_file   TEXT        NOT NULL,                 -- file gốc (PDF/Word/JSON)
+  source_file   TEXT        NOT NULL,                 -- original file (PDF/Word/JSON)
   effective_from DATE       NOT NULL,                 -- half-open [from, to)
-  effective_to   DATE,                                -- NULL = còn hiệu lực
+  effective_to   DATE,                                -- NULL = open-ended interval
   status        TEXT        NOT NULL DEFAULT 'published'
                 CHECK (status IN ('published', 'expired', 'deprecated')),
-  content_hash  TEXT        NOT NULL,                 -- sha256 file gốc (AD-7)
-  version       INT         NOT NULL DEFAULT 1,       -- tăng khi nạp lại bản mới
-  lightrag_doc_id TEXT,                               -- A2: id trong LightRAG (1:1 doc_id)
-  metadata      JSONB       NOT NULL DEFAULT '{}',    -- thuộc tính theo loại (data-contract.md)
+  content_hash  TEXT        NOT NULL,                 -- sha256 of original file (AD-7)
+  version       INT         NOT NULL DEFAULT 1,       -- bumped on re-import of a new version
+  lightrag_doc_id TEXT,                               -- A2: id in LightRAG (1:1 with doc_id)
+  metadata      JSONB       NOT NULL DEFAULT '{}',    -- per-kind attributes (data-contract.md)
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -45,42 +33,36 @@ CREATE INDEX IF NOT EXISTS idx_documents_effective
   ON documents (status, effective_from, effective_to);
 CREATE INDEX IF NOT EXISTS idx_documents_kind ON documents (kind);
 
--- ---------------------------------------------------------------------------
--- 2. document_chunks — provenance + text_hash (B3)
---    LightRAG tự quản vector; bảng này là bản đồ chunk -> doc để lọc hiệu lực.
--- ---------------------------------------------------------------------------
+-- 2. document_chunks — provenance + text_hash (B3); maps chunk -> doc so the
+--    validity filter can drop expired chunks (the vector store is LightRAG-managed)
 CREATE TABLE IF NOT EXISTS document_chunks (
   id          BIGSERIAL PRIMARY KEY,
   doc_id      TEXT NOT NULL REFERENCES documents (doc_id) ON DELETE CASCADE,
-  -- ID ổn định nội dung: doc_id:version:index — không đổi khi thêm chunk khác (AD-7)
+  -- Content-stable id: doc_id:version:index — unchanged when other chunks are added (AD-7)
   chunk_id    TEXT NOT NULL UNIQUE,
   chunk_index INT  NOT NULL,
   content     TEXT NOT NULL,
-  text_hash   TEXT NOT NULL,                          -- SHA-256 nội dung (B3)
-  section     TEXT,                                   -- điều/khoản (pháp lý) hoặc tầng/căn (giá)
+  text_hash   TEXT NOT NULL,                          -- SHA-256 of content (B3)
+  section     TEXT,                                   -- article/clause (legal) or floor/unit (price)
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (doc_id, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks (doc_id);
 
--- ---------------------------------------------------------------------------
--- 3. campaigns — đợt giá / đợt chính sách vay (B7: giá/policy BẮT BUỘC gán campaign)
--- ---------------------------------------------------------------------------
+-- 3. campaigns — price / loan-policy periods (B7: price & policy MUST belong to a campaign)
 CREATE TABLE IF NOT EXISTS campaigns (
   id            BIGSERIAL PRIMARY KEY,
   campaign_key  TEXT NOT NULL UNIQUE,                 -- 'tower-a-2026q3'
   project_key   TEXT NOT NULL,
   effective_from DATE NOT NULL,
-  effective_to   DATE,                                -- NULL = còn hiệu lực
-  source_doc_id TEXT NOT NULL REFERENCES documents(doc_id),  -- fail-loud khi xóa doc (A7)
+  effective_to   DATE,                                -- NULL = open-ended interval
+  source_doc_id TEXT NOT NULL REFERENCES documents(doc_id),  -- fail-loud when the doc is deleted (A7)
   status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired')),
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ---------------------------------------------------------------------------
--- 4. fact_subjects — chủ thể của fact (căn hộ/thửa đất/dự án/tax) dedup theo subject_key
--- ---------------------------------------------------------------------------
+-- 4. fact_subjects — fact subject (unit/parcel/project/taxon) deduped by subject_key
 CREATE TABLE IF NOT EXISTS fact_subjects (
   id           BIGSERIAL PRIMARY KEY,
   -- 'unit:tower-a/A10-01' | 'tax:le-phi-truoc-ba'
@@ -92,15 +74,13 @@ CREATE TABLE IF NOT EXISTS fact_subjects (
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ---------------------------------------------------------------------------
--- 5. facts — trái tim: interval-validity + policy_key + quality range/approx
--- ---------------------------------------------------------------------------
+-- 5. facts — core table: interval validity + policy_key + quality (exact/range/approx)
 CREATE TABLE IF NOT EXISTS facts (
   id            BIGSERIAL PRIMARY KEY,
   subject_id    BIGINT NOT NULL REFERENCES fact_subjects(id) ON DELETE CASCADE,
   fact_key      TEXT NOT NULL,              -- 'price_vnd'|'deposit_pct'|'term_months'|'interest_rate_pct'|...
-  policy_key    TEXT,                       -- 'bank_a'|'bank_b'|'support' (nhiều policy/căn)
-  campaign_key  TEXT REFERENCES campaigns(campaign_key),  -- giá/policy BẮT BUỘC gán campaign (B7)
+  policy_key    TEXT,                       -- 'bank_a'|'bank_b'|'support' (a unit may carry several policies)
+  campaign_key  TEXT REFERENCES campaigns(campaign_key),  -- price/policy MUST belong to a campaign (B7)
   value_num     NUMERIC,
   value_text    TEXT,
   unit          TEXT NOT NULL CHECK (unit IN ('vnd', 'm2', 'pct', 'months', 'days', 'enum')),
@@ -109,7 +89,7 @@ CREATE TABLE IF NOT EXISTS facts (
   range_max     NUMERIC,
   volatile      BOOLEAN NOT NULL DEFAULT true,
   effective_from DATE NOT NULL,
-  effective_to   DATE,                     -- NULL = còn hiệu lực; half-open '[)'
+  effective_to   DATE,                     -- NULL = open-ended interval; half-open '[)'
   source_doc_id   TEXT NOT NULL REFERENCES documents(doc_id),
   source_chunk_id TEXT REFERENCES document_chunks(chunk_id),
   extract_conf REAL,
@@ -118,7 +98,7 @@ CREATE TABLE IF NOT EXISTS facts (
   CONSTRAINT chk_vnd CHECK (unit <> 'vnd' OR value_num IS NULL OR value_num > 0)
 );
 
--- Chặn interval chồng: (subject, fact_key, policy_key) không được 2 bản ghi hiệu lực đè nhau
+-- Prevent overlapping validity intervals: same (subject, fact_key, policy_key) must not overlap in time
 ALTER TABLE facts DROP CONSTRAINT IF EXISTS facts_no_overlap;
 ALTER TABLE facts ADD CONSTRAINT facts_no_overlap
   EXCLUDE USING gist (
@@ -132,18 +112,14 @@ CREATE INDEX IF NOT EXISTS idx_facts_lookup
   ON facts (subject_id, fact_key, policy_key) WHERE effective_to IS NULL;
 CREATE INDEX IF NOT EXISTS idx_facts_value ON facts (fact_key, value_num);
 
--- ---------------------------------------------------------------------------
--- 6. chunk_fact_refs — chunk nào tham chiếu fact nào (placeholder tracking)
--- ---------------------------------------------------------------------------
+-- 6. chunk_fact_refs — which chunk references which fact (placeholder tracking)
 CREATE TABLE IF NOT EXISTS chunk_fact_refs (
   chunk_id TEXT NOT NULL REFERENCES document_chunks(chunk_id) ON DELETE CASCADE,
   fact_id  BIGINT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
   PRIMARY KEY (chunk_id, fact_id)
 );
 
--- ---------------------------------------------------------------------------
--- 7. fact_aliases — normalize categorical: 'còn hiệu lực' -> 'active', ...
--- ---------------------------------------------------------------------------
+-- 7. fact_aliases — normalize categorical values to canonicals (e.g. 'in effect' -> 'active')
 CREATE TABLE IF NOT EXISTS fact_aliases (
   alias     TEXT NOT NULL,
   canonical TEXT NOT NULL,
@@ -151,13 +127,10 @@ CREATE TABLE IF NOT EXISTS fact_aliases (
   PRIMARY KEY (field, alias)
 );
 
--- ---------------------------------------------------------------------------
--- 8. v_unit_offers — derived cross-row (AD-14), trái tim case "2 tỉ".
---    security_invoker=true: chạy với quyền người gọi, không bypass RLS (fix CRITICAL).
---    KHÔNG materialized view ở MVP.
---    Logic lives in v_unit_offers_as_of(as_of) so historical as_of binds; the view
---    keeps CURRENT_DATE for existing consumers.
--- ---------------------------------------------------------------------------
+-- 8. v_unit_offers — derived cross-row offer (AD-14), core "2 billion VND" case.
+--    security_invoker=true: runs as the caller, no RLS bypass (CRITICAL fix).
+--    Not a materialized view in MVP. Logic lives in v_unit_offers_as_of(as_of) so
+--    historical as_of binds; the view keeps CURRENT_DATE for existing consumers.
 CREATE OR REPLACE FUNCTION v_unit_offers_as_of(as_of date)
 RETURNS TABLE (
   subject_id bigint,
@@ -183,11 +156,11 @@ RETURN (
     price.value_num::NUMERIC(20,0) AS price_vnd,
     dep.value_num::NUMERIC(5,2)    AS deposit_pct,
     term.value_num::INTEGER        AS term_months,
-    int_pct.value_num::NUMERIC(6,4) AS interest_rate_pct,  -- NULL = chưa có (khác 0%)
+    int_pct.value_num::NUMERIC(6,4) AS interest_rate_pct,  -- NULL = not offered (distinct from 0%)
     CEIL(price.value_num * dep.value_num / 100.0)::NUMERIC(20,0) AS required_down_payment_vnd, -- CEIL
     ROUND(price.value_num * (100.0 - dep.value_num) / 100.0, 0)::NUMERIC(20,0) AS loan_amount_vnd,
     ROUND((price.value_num * (100.0 - dep.value_num) / 100.0) / NULLIF(term.value_num, 0), 0)::NUMERIC(20,0) AS monthly_principal_vnd,
-    ROUND((price.value_num * (100.0 - dep.value_num) / 100.0) * int_pct.value_num / 100.0 / 12.0, 0)::NUMERIC(20,0) AS monthly_interest_estimate_vnd -- ƯỚC TÍNH dư nợ gốc ban đầu
+    ROUND((price.value_num * (100.0 - dep.value_num) / 100.0) * int_pct.value_num / 100.0 / 12.0, 0)::NUMERIC(20,0) AS monthly_interest_estimate_vnd -- ESTIMATE on initial principal outstanding
   FROM (SELECT DISTINCT subject_id, policy_key FROM cur WHERE policy_key IS NOT NULL) pol
   JOIN cur dep   ON dep.subject_id = pol.subject_id AND dep.policy_key = pol.policy_key AND dep.fact_key = 'deposit_pct'
   JOIN cur term  ON term.subject_id = pol.subject_id AND term.policy_key = pol.policy_key AND term.fact_key = 'term_months'
@@ -199,9 +172,7 @@ CREATE OR REPLACE VIEW v_unit_offers
 WITH (security_invoker = true) AS
 SELECT * FROM v_unit_offers_as_of(CURRENT_DATE);
 
--- ---------------------------------------------------------------------------
--- 9. ingest_log — nhật ký nạp dữ liệu
--- ---------------------------------------------------------------------------
+-- 9. ingest_log — data-loading journal
 CREATE TABLE IF NOT EXISTS ingest_log (
   id          BIGSERIAL PRIMARY KEY,
   doc_id      TEXT NOT NULL,
@@ -212,25 +183,21 @@ CREATE TABLE IF NOT EXISTS ingest_log (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ---------------------------------------------------------------------------
--- 10. review_queue — fact extraction low-conf (fact_review_queue) + HIGH-stakes review
--- ---------------------------------------------------------------------------
+-- 10. review_queue — low-confidence fact extraction + high-stakes review
 CREATE TABLE IF NOT EXISTS review_queue (
   id          BIGSERIAL PRIMARY KEY,
   kind        TEXT NOT NULL CHECK (kind IN ('fact_extract', 'high_stakes')),
   doc_id      TEXT,
-  payload     JSONB NOT NULL DEFAULT '{}',   -- context + giá trị nghi ngờ
+  payload     JSONB NOT NULL DEFAULT '{}',   -- context + flagged values
   status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'dismissed')),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolved_at TIMESTAMPTZ
 );
 
--- =============================================================================
 -- ROLES + RLS (A4 + A9)
 --   ragre        : owner, ingest (DDL + write)
---   ro_query     : SELECT-only, chạy qua SET LOCAL ROLE trong with_rls_identity()
---   audit_append : INSERT-only audit (kiến trúc append-only)
--- =============================================================================
+--   ro_query     : SELECT-only, switched via SET LOCAL ROLE inside with_rls_identity()
+--   audit_append : INSERT-only audit (append-only architecture)
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'ro_query') THEN
@@ -239,7 +206,7 @@ BEGIN
 END
 $$;
 
--- RLS: ENABLE + FORCE trên toàn bộ registry tables
+-- RLS: ENABLE + FORCE on all registry tables
 ALTER TABLE documents       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE documents       FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_chunks ENABLE ROW LEVEL SECURITY;
@@ -253,7 +220,7 @@ ALTER TABLE facts           FORCE ROW LEVEL SECURITY;
 ALTER TABLE chunk_fact_refs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chunk_fact_refs FORCE ROW LEVEL SECURITY;
 
--- SELECT policy: chỉ thấy dữ liệu thuộc tài liệu published (MVP STATIC)
+-- SELECT policy: only rows backed by a published doc (MVP static)
 DROP POLICY IF EXISTS facts_pub_select ON facts;
 CREATE POLICY facts_pub_select ON facts FOR SELECT USING (
   EXISTS (SELECT 1 FROM documents d
@@ -281,7 +248,7 @@ CREATE POLICY refs_pub_select ON chunk_fact_refs FOR SELECT USING (
           JOIN documents d ON d.doc_id = c.doc_id
           WHERE c.chunk_id = chunk_fact_refs.chunk_id AND d.status = 'published'));
 
--- Write policies: chỉ role sở hữu / ingest (ragre) được ghi — FORCE vẫn áp cho owner
+-- Write policies: only the owner/ingest role (ragre) may write — FORCE still applies to the owner
 DROP POLICY IF EXISTS docs_write ON documents;
 CREATE POLICY docs_write ON documents FOR ALL TO ragre USING (true) WITH CHECK (true);
 DROP POLICY IF EXISTS chunks_write ON document_chunks;
@@ -295,9 +262,9 @@ CREATE POLICY facts_write ON facts FOR ALL TO ragre USING (true) WITH CHECK (tru
 DROP POLICY IF EXISTS refs_write ON chunk_fact_refs;
 CREATE POLICY refs_write ON chunk_fact_refs FOR ALL TO ragre USING (true) WITH CHECK (true);
 
--- Query role: grant SELECT trên registry + view (quyền gốc; policy RLS sẽ lọc tiếp).
--- GRANT ro_query TO ragre: cho phép SET LOCAL ROLE ro_query trong with_rls_identity()
--- (thiếu grant này → 'permission denied to set role' khi chạy query leg).
+-- Query role: base SELECT grants on registry + view; RLS policies still filter rows.
+-- GRANT ro_query TO ragre enables SET LOCAL ROLE ro_query inside with_rls_identity()
+-- (without it the query leg fails with 'permission denied to set role').
 DO $$
 BEGIN
   IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'ragre') THEN
@@ -311,13 +278,9 @@ GRANT SELECT ON documents, document_chunks, campaigns, fact_subjects, facts,
 GRANT EXECUTE ON FUNCTION v_unit_offers_as_of(date) TO ro_query;
 GRANT USAGE ON SCHEMA public TO ro_query;
 
--- =============================================================================
--- LƯU Ý TRIỂN KHAI:
--- 1. LightRAG 1.5.6 cần PostgreSQL 16.6+ (bắt buộc).
--- 2. Chạy schema này TRƯỚC khi ingest bất kỳ dữ liệu nào.
--- 3. Bảng graph (entity/relation) + vector (chunk embedding) do
---    PGTableGraphStorage / PGVectorStorage của LightRAG tự tạo — không đụng.
--- 4. Update bảng giá mới: expire facts cũ + insert mới + campaign mới CÙNG 1 transaction
---    (xem scripts/update_price.sh) — KHÔNG đụng vector.
+-- Deploy notes:
+-- 1. Requires PostgreSQL 16.6+ (hard requirement for LightRAG 1.5.6).
+-- 2. Run this schema BEFORE any ingest.
+-- 3. LightRAG's PGTableGraphStorage / PGVectorStorage self-create graph + vector tables — leave them alone.
+-- 4. Price updates: expire old facts + insert new facts + new campaign in ONE transaction (scripts/update_price.sh) — do not touch vectors.
 -- 5. Audit tables: db/audit.sql (append-only role).
--- =============================================================================

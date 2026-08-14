@@ -4,13 +4,13 @@ import type { Source } from "@rag-ragre/contracts";
 
 export interface SourcesListProps {
   sources: Source[];
-  /** Giới hạn số nguồn hiển thị (mặc định hiện hết). */
+  /** Cap the number of sources shown (default: all). */
   max?: number;
 }
 
 /**
- * Danh sách nguồn tài liệu trích dẫn của câu trả lời.
- * Mỗi nguồn hiển thị: tên văn bản, mục điều khoản, thời điểm hiệu lực, loại.
+ * Lists the cited source documents of the answer.
+ * Each source shows: document title, clause, effective date, kind.
  */
 export function SourcesList({ sources, max }: SourcesListProps) {
   if (!sources.length) return null;

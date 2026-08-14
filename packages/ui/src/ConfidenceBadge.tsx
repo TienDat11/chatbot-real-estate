@@ -1,7 +1,7 @@
 import { Tag } from "antd";
 import type { Confidence } from "@rag-ragre/contracts";
 
-/** Màu confidence 3-tier (plan AD-6 L4): HIGH / MEDIUM / LOW. */
+/** 3-tier confidence colors (AD-6 L4): HIGH / MEDIUM / LOW. */
 export const CONFIDENCE_STYLE: Record<Confidence, { color: string; bg: string; label: string; tone: string }> = {
   HIGH: {
     color: "#16A34A",
@@ -25,11 +25,11 @@ export const CONFIDENCE_STYLE: Record<Confidence, { color: string; bg: string; l
 
 export interface ConfidenceBadgeProps {
   confidence: Confidence;
-  /** Hiện nhãn chữ thay vì chỉ màu. */
+  /** Show a text label instead of just the color. */
   showLabel?: boolean;
 }
 
-/** Badge 3 cấp độ tin cậy — HIGH xanh lục, MEDIUM cam, LOW đỏ. */
+/** 3-tier confidence badge — HIGH green, MEDIUM amber, LOW red. */
 export function ConfidenceBadge({ confidence, showLabel = true }: ConfidenceBadgeProps) {
   const style = CONFIDENCE_STYLE[confidence];
   return (

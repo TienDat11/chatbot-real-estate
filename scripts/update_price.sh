@@ -1,33 +1,13 @@
 #!/usr/bin/env bash
-# =============================================================================
-# rag-real-estate — scripts/update_price.sh
-# Plan §3.6 (update 2 nhịp) + §10 Ngày 9 | Chạy OFF-BOX (máy dev)
-#
-# Cập nhật bảng giá/chính sách vay theo đợt:
-#   1. pg_dump backup (campaigns + facts + documents + refs)
-#   2. Python helper INLINE — CÙNG 1 transaction: expire facts cũ (campaign cũ)
-#      → upsert document price mới → campaign mới → insert facts mới từ CSV
-#   3. Golden-set regression (eval --subset) để xác nhận không tụt
-#   4. In note "0 re-embed" — vector KHÔNG bị chạm (facts ngoài index §3.1)
-#
-# Usage:
-#   ./scripts/update_price.sh \
-#       --old-campaign tower-a-2026q2 \
-#       --new-campaign tower-a-2026q3 \
-#       --project tower-a \
-#       --source-doc price-tower-a-2026q3 \
-#       --effective-from 2026-07-01 \
-#       --csv data/new_price.csv
-#
-# CSV (header bắt buộc): subject_key,fact_key,policy_key,value_num,unit
-#   policy_key rỗng = fact không policy (price_vnd/area_m2).
-#   value_num: số NGUYÊN đồng (vnd), 2 số lẻ (pct), 4 số lẻ (interest) — AD-14.
-#
-# Env: đọc từ .env (POSTGRES_*) — CẤM ghi secret vào file.
-# =============================================================================
+# Price/policy batch update (plan §3.6 dual-pace, §10 day 9) — run off-box.
+# One transaction: expire old-campaign facts -> upsert price doc -> new campaign -> insert CSV facts.
+# Zero re-embed: the vector index is untouched (facts live outside the index, §3.1).
+# Usage: ./scripts/update_price.sh --old-campaign <k> --new-campaign <k> --project <p> --source-doc <d> \
+#        --effective-from <date> --csv <file>
+# CSV columns: subject_key,fact_key,policy_key,value_num,unit (AD-14). Env: POSTGRES_* from .env.
 set -euo pipefail
 
-# --- load .env (root hoặc cwd) ---------------------------------------------
+# Load .env for POSTGRES_* credentials.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
@@ -38,7 +18,7 @@ fi
 : "${POSTGRES_HOST:=localhost}" "${POSTGRES_PORT:=5432}" "${POSTGRES_USER:=ragre}"
 : "${POSTGRES_PASSWORD:=}" "${POSTGRES_DATABASE:=ragre}"
 
-# --- args ------------------------------------------------------------------
+# CLI arguments.
 OLD_CAMPAIGN=""
 NEW_CAMPAIGN=""
 PROJECT=""
@@ -71,7 +51,7 @@ mkdir -p "${BACKUP_DIR}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 DUMP="${BACKUP_DIR}/price_${NEW_CAMPAIGN}_${STAMP}.dump"
 
-# --- 1. backup --------------------------------------------------------------
+# 1. Backup the affected tables.
 echo "==> backup pg_dump → ${DUMP}"
 PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
   -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" \
@@ -80,17 +60,18 @@ PGPASSWORD="${POSTGRES_PASSWORD}" pg_dump \
   -F c -f "${DUMP}"
 echo "    backup OK ($(du -h "${DUMP}" | cut -f1))"
 
-# --- 2. expire + insert CÙNG 1 transaction (python helper inline) ----------
+# 2. Expire old facts and insert the new batch in one transaction (inline Python helper).
 echo "==> expire facts cũ [${OLD_CAMPAIGN}] + insert đợt mới [${NEW_CAMPAIGN}]"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
-# normalize CSV sang UTF-8 (BOM-proof) rồi giao cho python
+# Strip a UTF-8 BOM from the CSV before handing it to Python.
 sed -e 's/^\xEF\xBB\xBF//' "${CSV_FILE}" > "${WORKDIR}/new_price.csv"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 "${PYTHON_BIN}" - "${OLD_CAMPAIGN}" "${NEW_CAMPAIGN}" "${PROJECT}" "${SOURCE_DOC}" "${EFFECTIVE_FROM}" "${WORKDIR}/new_price.csv" <<'PYEOF'
-"""Inline helper — expire cũ + thêm mới trong 1 transaction (asyncpg).
-Không crash giữa chừng: MỌI lỗi → rollback toàn bộ (atomic §3.6).
+"""Inline helper: expire old facts and insert a new batch atomically (asyncpg, §3.6).
+
+Any error rolls everything back — the batch never lands half-applied.
 """
 import asyncio
 import csv
@@ -112,10 +93,9 @@ async def main(old_campaign, new_campaign, project, source_doc, effective_from, 
     )
     try:
         async with conn.transaction():
-            # 2a. expire facts cũ của campaign cũ — half-open [old_from, effective_to)
-            #     default (--effective-from = hôm nay): effective_to = CURRENT_DATE (đúng spec §3.6);
-            #     nếu --effective-from là quá khứ/tương lai: LEAST() tránh chồng interval
-            #     với facts mới (facts_no_overlap exclusion constraint).
+            # 2a. Close open facts for the old campaign (half-open [old_from, effective_to)).
+            #     Default (--effective-from = today) yields effective_to = CURRENT_DATE (§3.6);
+            #     LEAST() guards against interval overlap with the new facts (facts_no_overlap).
             old = await conn.fetchval(
                 "UPDATE facts SET effective_to = LEAST($2::date, CURRENT_DATE) "
                 "WHERE campaign_key = $1 AND effective_to IS NULL",
@@ -123,7 +103,7 @@ async def main(old_campaign, new_campaign, project, source_doc, effective_from, 
             )
             print(f"    expired facts: {old}")
 
-            # 2b. upsert document price mới (cần published để RLS cho SELECT facts)
+            # 2b. Upsert the new price document (published so RLS permits fact SELECTs).
             content_hash = hashlib.sha256(f"seed:{source_doc}".encode()).hexdigest()
             await conn.execute(
                 """
@@ -137,7 +117,7 @@ async def main(old_campaign, new_campaign, project, source_doc, effective_from, 
                 effective_from, content_hash, project,
             )
 
-            # 2c. campaign mới (idempotent)
+            # 2c. Upsert the new campaign (idempotent).
             await conn.execute(
                 """
                 INSERT INTO campaigns (campaign_key, project_key, effective_from, source_doc_id, status)
@@ -148,7 +128,7 @@ async def main(old_campaign, new_campaign, project, source_doc, effective_from, 
                 new_campaign, project, effective_from, source_doc,
             )
 
-            # 2d. insert facts mới từ CSV (kỷ luật kiểu số giữ nguyên như CSV)
+            # 2d. Insert new facts from the CSV, keeping the CSV's numeric types.
             inserted = 0
             with open(csv_path, encoding="utf-8", newline="") as fh:
                 reader = csv.DictReader(fh)
@@ -178,7 +158,7 @@ async def main(old_campaign, new_campaign, project, source_doc, effective_from, 
                     )
                     inserted += 1
             print(f"    inserted facts: {inserted}")
-        # transaction commit tại đây (async with)
+        # The transaction commits here (async with).
         print("    COMMIT OK — answer sẽ đổi ngay sau transaction này")
     finally:
         await conn.close()
@@ -188,14 +168,14 @@ if __name__ == "__main__":
     asyncio.run(main(*sys.argv[1:]))
 PYEOF
 
-# --- 3. golden-set regression ----------------------------------------------
+# 3. Run a golden-set regression.
 echo "==> golden-set regression (eval --subset 20 — gồm legal + affordability + aggregate)"
 "${PYTHON_BIN}" eval/run_eval.py --subset 20 --fail-fast || {
   echo "    ❌ regression fail — xem eval log; rollback: pg_restore -F c ${DUMP}" >&2
   exit 1
 }
 
-# --- 4. note 0 re-embed -----------------------------------------------------
+# 4. Note: zero re-embed.
 echo "============================================================"
 echo "DONE. 0 re-embed: vector index KHÔNG bị chạm (facts ngoài vector §3.1)."
 echo "Optionally verify: psql -f scripts/verify_ingest.sql"

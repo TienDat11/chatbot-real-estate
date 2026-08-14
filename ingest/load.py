@@ -1,7 +1,7 @@
-"""Load — THE transaction: registry (1 tx) → LightRAG ainsert (SAU COMMIT).
+"""Load — the registry write happens in one transaction, then LightRAG ainsert runs after COMMIT.
 
-Plan §3.2 step 5-6: documents → fact_subjects → document_chunks → facts → chunk_fact_refs
-→ campaigns → COMMIT; ainsert SAU COMMIT (pool riêng), ids/file_paths 1:1, lightrag_doc_id.
+(plan §3.2 steps 5-6) documents → fact_subjects → document_chunks → facts → chunk_fact_refs
+→ campaigns → COMMIT; ainsert runs post-COMMIT with ids/file_paths mapping 1:1.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class LoadError(RuntimeError):
-    """Rollback đã xảy ra — context đính kèm để ghi ingest_log/review."""
+    """Rollback already happened — context kept for writing ingest_log/review records."""
 
 
 @dataclass
@@ -34,7 +34,7 @@ class LoadResult:
 
 
 def _normalize_subject_key(key: str) -> str:
-    """subject_key dedup: strip dấu chấm-gạch, lowercase trước UNIQUE (plan §3.2 step 4)."""
+    """Dedupe subject_key: strip dots/dashes and lowercase before the UNIQUE constraint (plan §3.2 step 4)."""
     return key.strip().lower().replace(".", "").replace("-", "")
 
 
@@ -115,14 +115,14 @@ async def _insert_fact(
 
 
 async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = None) -> LoadResult:
-    """Ghi registry trong 1 transaction, sau đó ainsert LightRAG.
+    """Persist the registry in one transaction, then ainsert into LightRAG.
 
     Args:
-        parsed: ParsedDoc từ parser.
-        facts: facts đã extract (None → chỉ ghi chunks, facts đi đường khác).
+        parsed: ParsedDoc produced by the parser.
+        facts: extracted facts (None persists chunks only; facts flow through another path).
 
     Raises:
-        LoadError: rollback + message (caller ghi review_queue/ingest_log).
+        LoadError: transaction rolled back; the caller records review_queue/ingest_log.
     """
     chunks = parsed.sections
     conn = await asyncpg.connect(settings.pg_dsn)
@@ -132,7 +132,7 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
     eff_to = _effective_to(parsed)
     try:
         async with conn.transaction():
-            # 1) documents upsert (version+1 nếu đã tồn tại)
+            # 1) documents upsert (version+1 when already present)
             doc_row = await conn.fetchrow(
                 """
                 INSERT INTO documents (
@@ -214,12 +214,12 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
                 parsed.doc_id, version, len(chunks),
                 f"facts={len(fact_rows)} kind={parsed.kind}",
             )
-        # COMMIT tại exit transaction
+        # COMMIT happens when the transaction block exits.
     except Exception as exc:  # noqa: BLE001
         await conn.close()
         raise LoadError(f"load_document rollback (doc={parsed.doc_id}): {exc}") from exc
 
-    # 6) ainsert SAU COMMIT — LightRAG (không block transaction)
+    # 6) ainsert after COMMIT — outside the transaction.
     lightrag_doc_id: str | None = None
     try:
         from ingest.lightrag_init import ainsert_document, adelete_by_doc_id, get_lightrag
@@ -253,7 +253,7 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
 
 
 async def expire_facts(subject_id: int, fact_key: str, policy_key: str | None, as_of) -> None:
-    """Đóng interval facts hiện tại tại as_of (update giá/policy — plan §3.6)."""
+    """Close the current fact interval at as_of (price/policy updates — plan §3.6)."""
     import datetime
 
     as_of = as_of or datetime.date.today()
@@ -273,7 +273,7 @@ async def expire_facts(subject_id: int, fact_key: str, policy_key: str | None, a
 
 
 def _effective_from(parsed: ParsedDoc):
-    """Ngày hiệu lực từ metadata docs — MVP: hôm nay nếu không set."""
+    """Day a document takes effect from its metadata — defaults to today in the MVP."""
     import datetime
 
     return getattr(parsed, "effective_from", None) or datetime.date.today()

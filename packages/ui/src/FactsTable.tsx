@@ -6,19 +6,16 @@ import { formatVND } from "@rag-ragre/contracts";
 
 export interface FactsTableProps {
   facts: FactEvidence[];
-  /** Nếu true, giá trị khớp chuỗi tiền VND sẽ được format qua formatVND. */
+  /** When true, VND-money-shaped values are formatted via formatVND. */
   formatMoney?: boolean;
   /**
-   * "table" (mặc định): bảng 3 cột — dùng trong bong bóng assistant.
-   * "cards": thẻ compact xếp dọc — dùng trong rail dẫn chứng hẹp.
+   * "table" (default): 3-column table — used in the assistant bubble.
+   * "cards": compact stacked cards — used in the narrow evidence rail.
    */
   variant?: "table" | "cards";
 }
 
-/**
- * Hiển thị các sự kiện pháp lý (fact) kèm dẫn chứng của câu trả lời.
- * Dùng tabular-nums để số liệu thẳng hàng; border mảnh, header nền nhạt.
- */
+/** Legal facts with citations, tabular-nums aligned. */
 export function FactsTable({ facts, formatMoney = true, variant = "table" }: FactsTableProps) {
   if (!facts.length) return null;
 
@@ -157,7 +154,7 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
   );
 }
 
-/** Format giá trị: kiểu chuỗi trông như số tiền VND -> formatVND; số -> formatVND. */
+/** Format field value: VND-like strings and numbers -> formatVND. */
 function formatField(
   key: string,
   value: number | string | null,
@@ -167,7 +164,7 @@ function formatField(
   if (typeof value === "number") {
     return formatMoney ? formatVND(value) : String(value);
   }
-  // Chuỗi dạng số thuần (từ backend JSON) -> coi như số tiền khi key gợi ý tiền.
+  // Numeric-looking string (from backend JSON) -> treat as price when key hints money.
   const looksLikeMoney = /(giá|tiền|phí|thuế|giá_trị)/i.test(key);
   if (formatMoney && looksLikeMoney && /^\d+(\.\d+)?$/.test(value)) {
     return formatVND(Number(value));

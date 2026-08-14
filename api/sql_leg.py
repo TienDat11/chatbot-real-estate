@@ -1,15 +1,10 @@
-"""Chân SQL — R1 spec-builder deterministic (PRIMARY) + route R2/NL2SQL (plan §4.4, §3.8).
+"""SQL leg — deterministic spec-builder (R1) plus the R2 NL2SQL route (plan §4.4, §3.8).
 
-R1: sql_spec JSON → validate closed-set (`validate_spec`) → build tham số hoá → chạy trong
-`with_rls_identity()` (BEGIN → SET LOCAL statement_timeout → SET LOCAL ROLE ro_query → COMMIT).
-Số liệu DKÔNG tự LLM tính — chỉ trích dẫn từ facts/view (AD-15).
-
-`match_semantics` xử lý range/approx (plan §4.4 A8): `<=` khớp khi range_min <= value;
-between = interval overlap; `in` chỉ categorical. SQL lọc superset, Python lọc chính xác.
-
-R2: `structured_path == 'nl2sql'` → delegate `api.nl2sql_guard.run_nl2sql` (validator AST + engine riêng).
-
-RO pool: kết nối owner (ragre) → `SET LOCAL ROLE ro_query` trong transaction (RLS FORCE giữ nguyên).
+R1 validates sql_spec against a closed set, builds a parameterized query, and runs
+it in a RLS transaction (SET LOCAL ROLE ro_query). Numbers are never computed by
+the LLM — only cited from facts/view (AD-15). match_semantics applies range/approx
+semantics (plan §4.4 A8); SQL yields a superset, Python filters exactly. R2
+delegates to api.nl2sql_guard when structured_path == 'nl2sql'.
 """
 
 from __future__ import annotations
@@ -28,9 +23,7 @@ from api import get_cfg
 
 logger = logging.getLogger("api.sql_leg")
 
-# ---------------------------------------------------------------------------
-# Allowlist closed-set (plan §4.4 — validate TRƯỚC build)
-# ---------------------------------------------------------------------------
+# Closed-set allowlist (plan §4.4 — validated before building).
 ALLOWED_SOURCES = ("facts", "v_unit_offers")
 
 ALLOWED_FIELDS: dict[str, tuple[str, ...]] = {
@@ -46,7 +39,7 @@ ALLOWED_FIELDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Field semantic (fact_key) trên source 'facts' — filter theo value_num/range
+# Semantic fact_key fields on 'facts' — filtered by value_num/range.
 SEMANTIC_FACT_FIELDS = {"price_vnd", "area_m2", "deposit_pct", "term_months", "interest_rate_pct"}
 
 ALLOWED_OPS = ("=", "!=", "<", "<=", ">", ">=", "between", "in")
@@ -61,11 +54,11 @@ OFFER_COLUMNS = (
 
 
 class SpecError(ValueError):
-    """Spec vi phạm closed-set — caller degrade RAG-only (§4.4)."""
+    """Spec violates the closed set — caller degrades to RAG-only (§4.4)."""
 
 
 class SqlLegError(Exception):
-    """Lỗi chạy SQL leg (timeout/DB) — caller degrade."""
+    """SQL leg execution failure (timeout/DB) — caller degrades."""
 
 
 @dataclass
@@ -75,14 +68,12 @@ class SqlLegResult:
     degraded: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Pool RO (owner connect → SET LOCAL ROLE ro_query trong tx)
-# ---------------------------------------------------------------------------
+# RO pool — owner connects; SET LOCAL ROLE ro_query runs inside each transaction.
 _ro_pool: asyncpg.Pool | None = None
 
 
 def build_dsn() -> str:
-    """DSN từ Settings (không hardcode)."""
+    """Build the DSN from Settings (no hardcoding)."""
     host = get_cfg("postgres_host", "localhost")
     port = get_cfg("postgres_port", 5432)
     user = get_cfg("postgres_user", "ragre")
@@ -92,7 +83,7 @@ def build_dsn() -> str:
 
 
 async def get_ro_pool() -> asyncpg.Pool:
-    """Lazy singleton RO pool (owner connect; role switch xảy ra trong transaction)."""
+    """Lazy singleton RO pool; role switching happens inside each transaction."""
     global _ro_pool
     if _ro_pool is None or _ro_pool.is_closed():
         _ro_pool = await asyncpg.create_pool(
@@ -114,9 +105,9 @@ async def with_rls_identity(
     role: str = "ro_query",
     pool: asyncpg.Pool | None = None,
 ) -> AsyncIterator[asyncpg.Connection]:
-    """Transaction helper 1 nơi (plan §3.5): BEGIN → SET LOCAL statement_timeout → SET LOCAL ROLE → yield → COMMIT.
+    """One-place transaction helper (plan §3.5): BEGIN, SET LOCAL statement_timeout,
 
-    Dùng cho cả SQL leg + hydrate + post-filter. RLS FORCE vẫn áp với role được set.
+    SET LOCAL ROLE, yield, COMMIT. Shares the SQL leg, hydrate, and post-filter paths.
     """
     pool = pool or await get_ro_pool()
     conn: asyncpg.Connection = await pool.acquire()
@@ -134,9 +125,7 @@ async def with_rls_identity(
         await pool.release(conn)
 
 
-# ---------------------------------------------------------------------------
-# R1 — validate + build + match semantics
-# ---------------------------------------------------------------------------
+# R1 — validate, build, match semantics.
 def _coerce_limit(limit: Any) -> int:
     if not isinstance(limit, int) or isinstance(limit, bool):
         raise SpecError(f"limit phải là int, got {type(limit).__name__}")
@@ -146,7 +135,7 @@ def _coerce_limit(limit: Any) -> int:
 
 
 def validate_spec(spec: dict | None) -> None:
-    """Validate closed-set TRƯỚC khi build SQL. Raise SpecError khi vi phạm."""
+    """Validate the closed set before building SQL; raise SpecError on violations."""
     if not isinstance(spec, dict):
         raise SpecError("spec phải là object")
     source = spec.get("source")
@@ -187,7 +176,7 @@ def validate_spec(spec: dict | None) -> None:
 
 
 def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
-    """Trả mệnh đề WHERE cho 1 filter + nạp params (asyncpg index 1-based)."""
+    """Return the WHERE clause for one filter, appending params (asyncpg is 1-based)."""
     field_name, op, value = f["field"], f["op"], f["value"]
     is_vnd = source == "v_unit_offers"
 
@@ -207,7 +196,7 @@ def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
     if op == "in":
         if is_vnd:
             return f"{field_name} = ANY({next_param(list(value))})"
-        # facts: categorical only (match_semantics sẽ loại row numeric không hợp)
+        # facts: categorical only — match_semantics drops non-matching numeric rows
         return f"f.value_text = ANY({next_param([str(v) for v in value])})"
 
     p = next_param(value)
@@ -217,7 +206,7 @@ def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
     # source = facts
     if field_name in SEMANTIC_FACT_FIELDS:
         if op in ("=", "!="):
-            # chỉ khớp exact row (range không khớp '='); thêm điều kiện value_num
+            # match exact rows only; '=' never matches a range, so also constrain value_num
             fk = next_param(field_name)
             return f"f.fact_key = {fk} AND f.value_num {op} {p} AND f.quality = 'exact'"
         if op in ("<", "<="):
@@ -245,10 +234,10 @@ def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
 
 
 def build_sql(spec: dict, as_of: date | None) -> tuple[str, list[Any]]:
-    """Build SQL tham số hoá. Raise SpecError nếu spec sai (đã validate trước)."""
+    """Build the parameterized SQL; raise SpecError for an invalid pre-validated spec."""
     source = spec["source"]
     params: list[Any] = []
-    as_of = as_of or date.today()  # as_of=None → hiện tại (tránh so sánh NULL)
+    as_of = as_of or date.today()  # None -> today, avoiding NULL comparisons
 
     if source == "v_unit_offers":
         cols = ", ".join(OFFER_COLUMNS)
@@ -261,8 +250,8 @@ def build_sql(spec: dict, as_of: date | None) -> tuple[str, list[Any]]:
         if where:
             sql += " WHERE " + " AND ".join(where)
     else:
-        # facts: join fact_subjects + interval validity tại as_of + doc published (defense-in-depth;
-        # RLS FORCE vẫn bảo vệ nếu quên).
+        # facts: join fact_subjects; enforce interval validity at as_of and a published
+        # doc (defense-in-depth; RLS FORCE still guards if ever forgotten).
         sql = (
             "SELECT f.id AS fact_id, fs.subject_key, fs.subject_type, fs.display_name, "
             "f.fact_key, f.policy_key, f.campaign_key, f.value_num, f.value_text, f.unit, f.quality, "
@@ -298,9 +287,7 @@ def _next(params: list[Any], v: Any) -> int:
     return len(params)
 
 
-# ---------------------------------------------------------------------------
-# match_semantics — range/approx (plan §4.4 A8) — thuần hàm, unit-test được
-# ---------------------------------------------------------------------------
+# match_semantics — range/approx semantics (plan §4.4 A8); pure, unit-testable.
 def _row_value(row: dict, field_name: str) -> Any:
     if field_name in row:
         return row[field_name]
@@ -325,7 +312,7 @@ def _apply_cmp(v: Any, op: str, target: Any) -> bool:
 
 
 def match_semantics(row: dict, field_name: str, op: str, value: Any) -> bool:
-    """Áp operator lên 1 row với ngữ nghĩa range/approx. `in` chỉ categorical."""
+    """Apply an operator to one row with range/approx semantics; `in` is categorical only."""
     quality = row.get("quality")
     if quality in ("range", "approx"):
         rmin, rmax = row.get("range_min"), row.get("range_max")
@@ -342,7 +329,7 @@ def match_semantics(row: dict, field_name: str, op: str, value: Any) -> bool:
             return rmax is not None and rmax >= value
         if op == ">":
             return rmax is not None and rmax > value
-        return False  # '=' / '!=' không khớp range
+        return False  # '=' / '!=' never match a range
 
     v = _row_value(row, field_name)
     if v is None:
@@ -359,11 +346,9 @@ def match_semantics(row: dict, field_name: str, op: str, value: Any) -> bool:
     return _apply_cmp(v, op, value)
 
 
-# ---------------------------------------------------------------------------
-# FACT_EVIDENCE blocks (plan §4.4: fe-001..)
-# ---------------------------------------------------------------------------
+# FACT_EVIDENCE blocks (plan §4.4: fe-001..).
 def _jsonable(v: Any) -> Any:
-    """Chuẩn hoá giá trị cho JSON: Decimal → int/float, date → ISO str."""
+    """Coerce values to JSON-safe types: Decimal -> int/float, date -> ISO string."""
     if isinstance(v, Decimal):
         if v == v.to_integral_value():
             return int(v)
@@ -389,7 +374,7 @@ def _facts_note(row: dict) -> str:
 
 
 def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> list[dict]:
-    """Chuyển raw rows → FACT_EVIDENCE blocks (fe-001..). Là nguồn số DUY NHẤT cho generation."""
+    """Convert raw rows into FACT_EVIDENCE blocks (fe-001..) — the sole numeric source for generation."""
     fe: list[dict] = []
     for i, row in enumerate(rows, start=1):
         if source == "v_unit_offers":
@@ -436,13 +421,12 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
     return fe
 
 
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
+# Runner.
 async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlLegResult:
-    """R1 PRIMARY (spec-builder) — hoặc R2 (nl2sql) khi `structured_path == 'nl2sql'`.
+    """Run R1 (spec-builder) or R2 (nl2sql) when structured_path == 'nl2sql'.
 
-    Mọi lỗi/timeout → SqlLegResult degraded (caller degrade RAG-only, không crash).
+    Any error/timeout returns a degraded SqlLegResult so the caller falls back to
+    RAG-only instead of crashing.
     """
     if spec is None:
         return SqlLegResult([], {"mode": "none", "error": "no spec"}, degraded=False)
@@ -468,11 +452,11 @@ async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlL
             recs = await conn.fetch(sql, *params)
             rows = [dict(r) for r in recs]
 
-        # match_semantics python — ngữ nghĩa chính xác range/approx (SQL chỉ là superset)
+        # match_semantics in Python — exact range/approx semantics (SQL already returns a superset).
         for f in spec.get("filters") or []:
             rows = [r for r in rows if match_semantics(r, f["field"], f["op"], f["value"])]
 
-        # view không có subject_key → map từ fact_subjects để hiển thị
+        # the view has no subject_key — map from fact_subjects for display
         if spec["source"] == "v_unit_offers" and rows:
             ids = [r["subject_id"] for r in rows]
             async with with_rls_identity(timeout_s=2.0) as conn:
