@@ -138,16 +138,17 @@ async def load_document(parsed: ParsedDoc, facts: list[ExtractedFact] | None = N
                 INSERT INTO documents (
                   doc_id, kind, title, source_file, effective_from, effective_to,
                   status, content_hash, version, metadata
-                ) VALUES ($1,$2,$3,$4,$5,$6,'published',$7,1,'{}')
+                ) VALUES ($1,$2,$3,$4,$5,$6,'published',$7,1,$8)
                 ON CONFLICT (doc_id) DO UPDATE
                   SET status='published',
                       version = documents.version + 1,
                       content_hash = EXCLUDED.content_hash,
+                      metadata = EXCLUDED.metadata,
                       updated_at = now()
                 RETURNING version
                 """,
                 parsed.doc_id, parsed.kind, parsed.title, parsed.source_file,
-                eff_from, eff_to, parsed.content_hash,
+                eff_from, eff_to, parsed.content_hash, parsed.metadata,
             )
             version = int(doc_row["version"])
             chunk_ids = [f"{parsed.doc_id}:{version}:{i}" for i in range(len(chunks))]
