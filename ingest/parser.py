@@ -6,6 +6,7 @@ long articles split on clause boundaries. MinerU is an optional fallback for poo
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -33,6 +34,12 @@ class ParsedDoc:
     source_file: str
     sections: list[ParsedSection]
     content_hash: str
+    # Half-open interval [effective_from, effective_to); None to = open-ended
+    # (schema.sql documents). Defaults mirror load_document: today / NULL.
+    effective_from: datetime.date | None = None
+    effective_to: datetime.date | None = None
+    # Per-kind attributes (docs/data-contract.md); top-level columns must NOT be duplicated here.
+    metadata: dict = field(default_factory=dict)
 
     @property
     def full_text(self) -> str:
