@@ -39,7 +39,7 @@ from api.constants import (
 from api.dependencies import get_geo, get_reranker
 from api.generate import stream_answer
 from api.guard_input import GuardResult as InputGuardResult
-from api.guard_input import guard_input
+from api.guard_input import guard_input, rule_screen
 from api.guard_output import GuardResult as OutputGuardResult
 from api.guard_output import guard_output
 from api.merge import Merged, merge_context
@@ -165,8 +165,17 @@ class RagQueryWorkflow(Workflow):
         await ctx.store.set("query", ev.query)
         await ctx.store.set("session_id", session_id)
         await ctx.store.set("as_of_date", parse_as_of(getattr(ev, "as_of", None)))
-        await ctx.store.set("history", getattr(ev, "history", None) or [])
         await ctx.store.set("degraded", [])
+        # Screen every user history turn with the same rule set as the query (L1);
+        # stored history is re-embedded verbatim into rewrite/generate prompts, so
+        # an injection smuggled via history must not reach the model.
+        history = getattr(ev, "history", None) or []
+        for turn in history:
+            if turn.get("role") == "user":
+                reason = rule_screen(turn["content"])
+                if reason:
+                    raise QueryRejected(f"L1 history: {reason}")
+        await ctx.store.set("history", history)
         await ctx.store.set(
             "audit",
             {"trace_id": trace_id, "session_id": session_id, "query": ev.query, "latency_ms": None},
@@ -342,7 +351,10 @@ class RagQueryWorkflow(Workflow):
             as_of=as_of.isoformat() if as_of else None,
             degraded=await ctx.store.get("degraded"),
             sql_row_count=len(sql_result.rows),
-            has_approx=any(e.get("quality") in ("range", "approx") for e in sql_result.rows),
+            has_approx=any(
+                e.get("quality") in ("range", "approx") or e.get("trust_level") == "estimate"
+                for e in sql_result.rows
+            ),
             strong_chunks=sum(1 for c in chunks if float(c.get("score", 0.0)) >= 0.8),
         )
         await ctx.store.set("merged", merged)

@@ -63,3 +63,16 @@ def test_slugify():
     assert slugify("a--b--c") == "a-b-c"
     assert slugify("") == ""
     assert slugify(None) == ""
+
+
+def test_settings_prod_fails_fast_on_default_secret():
+    from pydantic import ValidationError
+
+    from api.config import Settings
+
+    try:
+        Settings(app_env="production")
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("production with default secret must fail fast")
