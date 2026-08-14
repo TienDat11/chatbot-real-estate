@@ -256,7 +256,7 @@ def build_sql(spec: dict, as_of: date | None) -> tuple[str, list[Any]]:
             "SELECT f.id AS fact_id, fs.subject_key, fs.subject_type, fs.display_name, "
             "f.fact_key, f.policy_key, f.campaign_key, f.value_num, f.value_text, f.unit, f.quality, "
             "f.range_min, f.range_max, f.effective_from, f.effective_to, "
-            "f.source_doc_id, f.source_chunk_id "
+            "f.source_doc_id, f.source_chunk_id, f.trust_level "
             "FROM facts f JOIN fact_subjects fs ON fs.id = f.subject_id"
         )
         where = [f"f.effective_from <= ${_next(params, as_of)}",
@@ -409,6 +409,7 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
                 "fields": fields,
                 "note": _facts_note(row),
                 "quality": row.get("quality") or "exact",
+                "trust_level": row.get("trust_level") or "confirmed",
                 "range": {"min": _jsonable(row.get("range_min")), "max": _jsonable(row.get("range_max"))}
                 if row.get("quality") in ("range", "approx") else None,
                 "effective_from": _jsonable(row.get("effective_from")),

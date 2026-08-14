@@ -1,7 +1,4 @@
-# =============================================================================
-# rag-real-estate — Dev stack: PostgreSQL 16.6+ pgvector
-# Plan §10 Ngày 1-2 | LightRAG 1.5.6 cần PG >= 16.6
-# =============================================================================
+# Dev stack: PostgreSQL 16.6+ pgvector (LightRAG 1.5.6 requires PG >= 16.6).
 services:
   postgres:
     image: pgvector/pgvector:pg16

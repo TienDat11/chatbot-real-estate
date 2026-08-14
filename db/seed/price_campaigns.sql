@@ -92,7 +92,7 @@ INSERT INTO facts
   (subject_id, fact_key, policy_key, campaign_key, value_num, unit, quality,
    volatile, effective_from, effective_to, source_doc_id, extract_conf)
 SELECT s.id, d.fact_key, NULL, d.campaign_key, d.value_num, d.unit, 'exact',
-       FALSE, d.effective_from, d.effective_to, d.source_doc_id, 0.99
+       FALSE, d.effective_from::date, d.effective_to::date, d.source_doc_id, 0.99
 FROM (VALUES
   -- Tower A (active) — price_vnd / area_m2
   ('unit:tower-a/A10-01', 'price_vnd', 8000000000::NUMERIC(20,0), 'vnd', 'tower-a-2026q2', 'price-tower-a-2026q2', '2026-04-01', NULL),
@@ -159,7 +159,7 @@ JOIN fact_subjects s ON s.subject_key = d.subject_key
 WHERE NOT EXISTS (
   SELECT 1 FROM facts f
   WHERE f.subject_id = s.id AND f.fact_key = d.fact_key
-    AND f.policy_key IS NULL AND f.effective_from = d.effective_from
+    AND f.policy_key IS NULL AND f.effective_from = d.effective_from::date
 );
 
 -- 5. facts — loan-policy facts, 2 bank policies per unit
@@ -171,8 +171,8 @@ WHERE NOT EXISTS (
 INSERT INTO facts
   (subject_id, fact_key, policy_key, campaign_key, value_num, unit, quality,
    volatile, effective_from, effective_to, source_doc_id, extract_conf)
-SELECT s.id, p.fact_key, p.policy_key, p.campaign_key, p.value_num, p.unit, 'exact',
-       FALSE, p.effective_from, p.effective_to, p.source_doc_id, 0.95
+SELECT s.id, p.fact_key, p.policy_key, d.campaign_key, p.value_num, p.unit, 'exact',
+       FALSE, d.effective_from::date, d.effective_to::date, d.source_doc_id, 0.95
 FROM (VALUES
   -- Per-unit policy template (policy_key, fact_key, value_num, unit)
   -- Tower A active — bank_a / bank_b for every unit except A06-01 (support) and A04-03 (no policy)
@@ -345,8 +345,9 @@ FROM (VALUES
 ) AS p(subject_key, policy_key, fact_key, value_num, unit)
 JOIN fact_subjects s ON s.subject_key = p.subject_key
 CROSS JOIN LATERAL (
-  SELECT d2.campaign_key, d2.effective_from, d2.effective_to, d2.source_doc_id
+  SELECT c.campaign_key, d2.effective_from, d2.effective_to, d2.doc_id AS source_doc_id
   FROM documents d2
+  JOIN campaigns c ON c.source_doc_id = d2.doc_id
   WHERE d2.doc_id = CASE WHEN p.subject_key LIKE 'unit:tower-b/%'
                          THEN 'price-tower-b-2026q1' ELSE 'price-tower-a-2026q2' END
 ) AS d

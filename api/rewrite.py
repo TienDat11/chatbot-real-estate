@@ -31,11 +31,8 @@ AGGREGATE_KEYWORDS = (
     "giá trung bình", "trung bình giá", "cao nhất", "thấp nhất", "nhiều nhất", "ít nhất",
 )
 
-# VN unit -> vnd multipliers (incl. variants "tỉ"/"ngàn"/"nghìn").
-_VN_UNITS = {"tỷ": 1_000_000_000, "tỉ": 1_000_000_000, "triệu": 1_000_000, "ngàn": 1_000, "nghìn": 1_000}
-
-_BUDGET_RE = re.compile(r"có\s+([\d.,]+)\s*(tỷ|tỉ|triệu|ngàn|nghìn)?\s*(?:tiền|đồng|vnd)?", re.IGNORECASE)
-_NUMBER_RE = re.compile(r"(\d[\d.,]*)\s*(tỷ|tỉ|triệu|ngàn|nghìn)?")
+# Canonical VN money parser (also used by guard/extract) — one implementation.
+from api.price_calc import extract_budget, parse_vn_number
 
 # Deterministic geo intent — ORed with the LLM routing decision so the maps leg
 # fires on amenity/location queries even when the router omits needs_geo.
@@ -63,41 +60,6 @@ def detect_aggregate_intent(query: str) -> bool:
     """Deterministic aggregate/compare intent detector — the only NL2SQL gate."""
     q = (query or "").lower()
     return any(k in q for k in AGGREGATE_KEYWORDS)
-
-
-def parse_vn_number(text: str) -> int | None:
-    """Parse a Vietnamese money literal: '2,85 tỷ' -> 2_850_000_000; plain digits -> int.
-
-    Conventions: comma is the decimal separator, dot the thousand separator.
-    """
-    t = (text or "").strip().lower().replace(" ", " ")
-    m = _NUMBER_RE.search(t)
-    if not m:
-        return None
-    num_part, unit = m.group(1), (m.group(2) or "")
-    # Strip thousand separators (dots), convert decimal comma to dot.
-    if "," in num_part and "." in num_part:
-        # "2.850.000,50" — dot is thousand, comma is decimal.
-        num_part = num_part.replace(".", "").replace(",", ".")
-    elif "," in num_part:
-        num_part = num_part.replace(",", ".")  # "2,85" -> 2.85
-    else:
-        num_part = num_part.replace(".", "")  # "2.850.000.000" -> 2850000000
-    try:
-        value = float(num_part)
-    except ValueError:
-        return None
-    value *= _VN_UNITS.get(unit, 1)
-    return int(round(value))
-
-
-def extract_budget(query: str) -> int | None:
-    """Extract a declared budget ('tôi có 2 tỉ...') mapped to required_down_payment_vnd."""
-    m = _BUDGET_RE.search((query or "").lower())
-    if not m:
-        return None
-    raw = f"{m.group(1)} {m.group(2) or ''}".strip()
-    return parse_vn_number(raw)
 
 
 # Few-shot prompt, read once at import.
@@ -235,8 +197,8 @@ def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> Ro
             "needs_rag": needs_rag,
             "needs_sql": needs_sql,
             "structured_path": path,
-            "high_stakes": high_stakes,  # để L4 guard + audit + payload §16.2 dùng chung
-            "needs_geo": needs_geo,  # maps leg — geo step tự gate, không chặn pipeline
+            "high_stakes": high_stakes,  # shared by L4 guard, audit, and payload §16.2
+            "needs_geo": needs_geo,  # maps leg — geo step self-gates; never blocks the pipeline
         },
         sql_spec=spec,
         hl_keywords=hl,
