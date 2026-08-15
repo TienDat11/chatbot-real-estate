@@ -67,6 +67,13 @@ async def _ingest_one(doc) -> str:
                 doc.doc_id, exc,
             )
     result = await load_document(doc, facts, preserve_seed_facts=preserve)
+    if result.lightrag_doc_id is None:
+        # load_document swallows ainsert/adelete errors and returns None here, so
+        # the registry would be committed while the vector store stays empty and
+        # verify_ingest.sql still passes — fail closed instead of a silent PASS.
+        raise RuntimeError(
+            f"{doc.doc_id}: LightRAG ainsert did not complete (lightrag_doc_id=None)"
+        )
     return (
         f"{result.doc_id} v{result.version} chunks={result.chunk_count} "
         f"facts={result.fact_count} extracted={len(facts or [])} "
