@@ -25,14 +25,14 @@ _LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\b\d+(?:\.\d+)?\b")
 
 async def get_audit_pool() -> asyncpg.Pool:
     global _audit_pool
-    if _audit_pool is None or _audit_pool.is_closed():
+    if _audit_pool is None or _audit_pool.is_closing():
         _audit_pool = await asyncpg.create_pool(build_dsn(), min_size=1, max_size=2)
     return _audit_pool
 
 
 async def close_audit_pool() -> None:
     global _audit_pool
-    if _audit_pool is not None and not _audit_pool.is_closed():
+    if _audit_pool is not None and not _audit_pool.is_closing():
         await _audit_pool.close()
     _audit_pool = None
 

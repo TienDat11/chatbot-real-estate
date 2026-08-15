@@ -24,7 +24,7 @@ class ExtractedFact(BaseModel):
     """A single fact extracted from text or a table — Pydantic v2, validated at the boundary."""
     fact_key: str = Field(min_length=1)          # price_vnd | deposit_pct | term_months | interest_rate_pct | area_m2 | ...
     subject_key: str = Field(min_length=1)       # 'unit:tower-a/A10-01' | 'tax:le-phi-truoc-ba'
-    subject_type: str = Field(pattern="|".join(FACT_SUBJECT_TYPES))
+    subject_type: str = Field(default="")       # enforced in model_post_init after derivation
     subject_display: str = ""                     # human-readable name
     value_num: Decimal | None = None
     value_text: str | None = None
@@ -38,6 +38,14 @@ class ExtractedFact(BaseModel):
     span: str | None = None                       # verbatim span in the source text
 
     def model_post_init(self, __context: Any) -> None:
+        # The LLM may omit subject_type — derive it from the subject_key namespace
+        # ('unit:camellia/studio' → 'unit', 'project:camellia' → 'project');
+        # anything unrecognized falls back to 'taxon' instead of losing the fact.
+        if not self.subject_type:
+            prefix = self.subject_key.split(":", 1)[0] if ":" in self.subject_key else ""
+            self.subject_type = prefix if prefix in FACT_SUBJECT_TYPES else "taxon"
+        if self.subject_type not in FACT_SUBJECT_TYPES:
+            raise ValueError(f"subject_type unknown: {self.subject_type!r}")
         # Loose boundary checks: pct in [0,100]; vnd > 0 — fail at the input edge.
         if self.unit == "pct" and self.value_num is not None and not (0 <= self.value_num <= 100):
             raise ValueError(f"pct ngoài [0,100]: {self.value_num}")
@@ -160,7 +168,11 @@ async def extract_facts(text: str, doc_id: str, kind: str) -> list[ExtractedFact
 
     import openai
 
-    client = openai.AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
+    client = openai.AsyncOpenAI(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url_v1,
+        timeout=settings.extract_timeout,
+    )
     payload = _EXTRACT_USER.format(text=text[:12000])
 
     last_err: Exception | None = None

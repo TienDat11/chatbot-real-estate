@@ -1,8 +1,12 @@
 """RAG leg — LightRAG hybrid retrieval with post-filter for document validity.
 
-Retrieves context via `get_lightrag().aquery(...)`, then filters every chunk
+Retrieves context via `get_lightrag().aquery_data(...)`, then filters every chunk
 against the documents registry (status='published' + effective interval at as_of)
 so expired legal texts never reach the LLM. Timeout/error degrades gracefully.
+
+1.5.6 note: `aquery()` is a backward-compat wrapper that returns only the LLM
+response string — the structured retrieval result (entities/chunks with
+file_path) lives in `aquery_data()`, which we call here.
 """
 
 from __future__ import annotations
@@ -27,6 +31,9 @@ logger = logging.getLogger("api.rag_leg")
 # Flag for GET /ready (main.py) — set once get_lightrag succeeds.
 LIGHTRAG_READY = False
 
+# PG storages initialized once per process (ingest side uses the same helper).
+_api_storages_ready = False
+
 
 @dataclass
 class RagLegResult:
@@ -44,13 +51,20 @@ def _get_rag_budget() -> tuple[int, int, int]:
 
 
 async def _get_rag():
-    """Lazy LightRAG instance — accepts both sync and async factories (defensive)."""
-    global LIGHTRAG_READY
+    """Lazy LightRAG instance — accepts both sync and async factories (defensive).
+
+    1.5.6: aquery_data raises PipelineNotInitializedError until initialize_storages
+    has run in this process, so the query side mirrors the ingest side's flag once.
+    """
+    global LIGHTRAG_READY, _api_storages_ready
     from ingest.lightrag_init import get_lightrag  # noqa: PLC0415
 
     rag = get_lightrag()
     if inspect.isawaitable(rag):
         rag = await rag
+    if not _api_storages_ready:
+        await rag.initialize_storages()
+        _api_storages_ready = True
     LIGHTRAG_READY = True
     return rag
 
@@ -85,14 +99,19 @@ def _make_query_param(hl: list[str], ll: list[str]) -> Any:
 
 
 def _normalize_chunks(raw_chunks: list | None) -> list[dict]:
-    """Normalize raw_data.chunks to {id, score, content, file_path} dicts."""
+    """Normalize aquery_data chunks to {id, score, content, file_path} dicts.
+
+    The registry joins on document_chunks.chunk_id, which equals the ingest
+    leg's file_path (ids/file_paths 1:1). The 1.5.6 chunk key ('<file_path>-chunk-000')
+    must NOT be used as id or the post-filter drops every chunk.
+    """
     out: list[dict] = []
     for c in raw_chunks or []:
         if not isinstance(c, dict):
             continue
         out.append(
             {
-                "id": c.get("id") or c.get("chunk_id"),
+                "id": c.get("file_path") or c.get("id") or c.get("chunk_id"),
                 "score": float(c.get("score", 0.0) or 0.0),
                 "content": c.get("content", "") or "",
                 "file_path": c.get("file_path"),
@@ -130,9 +149,9 @@ async def _post_filter(chunks: list[dict], as_of: date | None) -> list[dict]:
 
 async def run_rag_leg(rewritten: str, hl: list[str], ll: list[str], as_of: date | None) -> RagLegResult:
     """Run LightRAG hybrid + validity post-filter; any error degrades (never crashes)."""
-    # 1. Get instance (lazy).
+    # 1. Get instance (lazy) — first call also runs initialize_storages (0.3-3s).
     try:
-        rag = await asyncio.wait_for(_get_rag(), timeout=2.0)
+        rag = await asyncio.wait_for(_get_rag(), timeout=8.0)
     except Exception as exc:  # noqa: BLE001
         logger.warning("rag_leg: lightrag init failed: %s", exc)
         return RagLegResult([], degraded=True, error=f"lightrag init: {exc}")
@@ -144,15 +163,16 @@ async def run_rag_leg(rewritten: str, hl: list[str], ll: list[str], as_of: date 
         logger.warning("rag_leg: QueryParam build failed: %s", exc)
         return RagLegResult([], degraded=True, error=f"QueryParam: {exc}")
 
-    # 3. aquery (context only — generation is a separate step).
+    # 3. aquery_data — structured retrieval (1.5.6's aquery() returns only the LLM
+    #    string; chunks + file_paths live here). Generation is a separate step.
     try:
-        result = await asyncio.wait_for(rag.aquery(rewritten, param=qparam), timeout=6.0)
+        result = await asyncio.wait_for(rag.aquery_data(rewritten, param=qparam), timeout=8.0)
     except Exception as exc:  # noqa: BLE001 — timeout/provider error -> degrade
-        logger.warning("rag_leg: aquery failed: %s", exc)
-        return RagLegResult([], degraded=True, error=f"aquery: {exc}")
+        logger.warning("rag_leg: aquery_data failed: %s", exc)
+        return RagLegResult([], degraded=True, error=f"aquery_data: {exc}")
 
-    raw_data = getattr(result, "raw_data", None) or {}
-    chunks = _normalize_chunks(raw_data.get("chunks"))
+    payload = result.get("data") or {} if isinstance(result, dict) else {}
+    chunks = _normalize_chunks(payload.get("chunks"))
     if not chunks:
         return RagLegResult([], degraded=False, error=None)  # no chunks — not an error
 

@@ -85,7 +85,7 @@ def build_dsn() -> str:
 async def get_ro_pool() -> asyncpg.Pool:
     """Lazy singleton RO pool; role switching happens inside each transaction."""
     global _ro_pool
-    if _ro_pool is None or _ro_pool.is_closed():
+    if _ro_pool is None or _ro_pool.is_closing():
         _ro_pool = await asyncpg.create_pool(
             build_dsn(), min_size=1, max_size=int(get_cfg("postgres_max_connections", 5) or 5),
         )
@@ -94,7 +94,7 @@ async def get_ro_pool() -> asyncpg.Pool:
 
 async def close_ro_pool() -> None:
     global _ro_pool
-    if _ro_pool is not None and not _ro_pool.is_closed():
+    if _ro_pool is not None and not _ro_pool.is_closing():
         await _ro_pool.close()
     _ro_pool = None
 

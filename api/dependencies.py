@@ -43,7 +43,7 @@ def get_llm() -> LLMChatPort:
         s = get_settings()
         _llm = OpenAICompatibleLLM(
             api_key=s.llm_api_key or "",
-            base_url=s.llm_base_url or "",
+            base_url=s.llm_base_url_v1 or "",
             default_model=s.llm_model_answer or DEFAULT_MODEL_ANSWER,
         )
     return _llm
