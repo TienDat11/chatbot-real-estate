@@ -52,11 +52,11 @@ logger = logging.getLogger("api.workflow")
 
 STEP_TIMEOUTS = {
     "guard": 1.0,
-    "rewrite": 4.0,
-    "rag": 6.0,
+    "rewrite": 25.0,
+    "rag": 45.0,
     "sql": 2.0,
     "sql_nl2sql": 8.0,
-    "rerank": 3.0,
+    "rerank": 5.0,
     "geo": 3.0,
     "output_guard": 2.0,
 }
@@ -128,7 +128,7 @@ class GeneratedEv(Event):
 class RagQueryWorkflow(Workflow):
     """LlamaIndex Workflows re-implementation of the 8-step pipeline (AD-18)."""
 
-    def __init__(self, timeout: float = 45.0, on_event: EventCallback | None = None):
+    def __init__(self, timeout: float = 180.0, on_event: EventCallback | None = None):
         super().__init__(timeout=timeout)
         self.on_event: EventCallback = on_event or (lambda event, data: None)
 

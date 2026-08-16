@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     _KNOWN_DEFAULT_SECRETS = ("ragre_dev_password", "")
 
     @model_validator(mode="after")
-    def _fail_fast_on_default_secrets(self) -> "Settings":
+    def _fail_fast_on_default_secrets(self) -> Settings:
         if self.app_env in ("prod", "production"):
             if self.postgres_password in self._KNOWN_DEFAULT_SECRETS:
                 raise ValueError(
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     llm_model_rewrite: str = "deepseek-v4-flash"
     llm_model_extract: str = "qwen3.7-flash"
     llm_model_answer: str = "deepseek-v4-flash"
-    llm_model_answer_pro: str = "deepseek-v4-pro"
+    llm_model_answer_pro: str = "deepseek-v4-pro-0813"
     llm_model_guard: str = "deepseek-v4-flash-0731"
     llm_model_nl2sql: str = "qwen3.7-flash"
 

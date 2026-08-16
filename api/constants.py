@@ -25,9 +25,10 @@ SSE_EVENT_ERROR = "error"
 
 # --- Default model names ---
 DEFAULT_MODEL_ANSWER = "deepseek-v4-flash"
-DEFAULT_MODEL_ANSWER_PRO = "deepseek-v4-pro"
+# Same available channel as config default (code review f10).
+DEFAULT_MODEL_ANSWER_PRO = "deepseek-v4-flash"
 DEFAULT_MODEL_EXTRACT = "qwen3.7-flash"
-DEFAULT_MODEL_GUARD = "deepseek-v4-flash-0731"
+DEFAULT_MODEL_GUARD = "deepseek-v4-flash"
 DEFAULT_MODEL_NL2SQL = "qwen3.7-flash"
 DEFAULT_MODEL_REWRITE = "deepseek-v4-flash"
 
