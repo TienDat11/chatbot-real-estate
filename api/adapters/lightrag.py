@@ -26,9 +26,9 @@ class LightRag(RagPort):
         ll_keywords: list[str] | None = None,
     ) -> RagResult:
         try:
-            rag = await asyncio.wait_for(_get_rag(), timeout=2.0)
+            rag = await asyncio.wait_for(_get_rag(), timeout=20.0)
             param = _make_query_param(hl_keywords, ll_keywords)
-            result = await asyncio.wait_for(rag.aquery(query, param=param), timeout=6.0)
+            result = await asyncio.wait_for(rag.aquery(query, param=param), timeout=8.0)
         except Exception as exc:  # noqa: BLE001 — provider failure degrades
             logger.warning("lightrag retrieve failed: %s", exc)
             return RagResult([], degraded=True, error=str(exc))

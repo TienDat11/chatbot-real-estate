@@ -151,7 +151,7 @@ async def run_rag_leg(rewritten: str, hl: list[str], ll: list[str], as_of: date 
     """Run LightRAG hybrid + validity post-filter; any error degrades (never crashes)."""
     # 1. Get instance (lazy) — first call also runs initialize_storages (0.3-3s).
     try:
-        rag = await asyncio.wait_for(_get_rag(), timeout=8.0)
+        rag = await asyncio.wait_for(_get_rag(), timeout=20.0)
     except Exception as exc:  # noqa: BLE001
         logger.warning("rag_leg: lightrag init failed: %s", exc)
         return RagLegResult([], degraded=True, error=f"lightrag init: {exc}")
@@ -166,7 +166,7 @@ async def run_rag_leg(rewritten: str, hl: list[str], ll: list[str], as_of: date 
     # 3. aquery_data — structured retrieval (1.5.6's aquery() returns only the LLM
     #    string; chunks + file_paths live here). Generation is a separate step.
     try:
-        result = await asyncio.wait_for(rag.aquery_data(rewritten, param=qparam), timeout=8.0)
+        result = await asyncio.wait_for(rag.aquery_data(rewritten, param=qparam), timeout=15.0)
     except Exception as exc:  # noqa: BLE001 — timeout/provider error -> degrade
         logger.warning("rag_leg: aquery_data failed: %s", exc)
         return RagLegResult([], degraded=True, error=f"aquery_data: {exc}")

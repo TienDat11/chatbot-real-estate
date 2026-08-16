@@ -177,6 +177,11 @@ def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> Ro
     if path == "nl2sql":
         needs_sql, needs_rag = True, needs_rag
 
+    # Grounding safety net (§4.4): RAG always runs so a degraded/failed SQL spec
+    # never leaves the answer without cited sources (SQL success still wins via
+    # the merge; RAG-only is the designed fallback path).
+    needs_rag = True
+
     # Budget injection: declared budget without an LLM spec -> build an affordability spec.
     # Only for budget >= 1M VND (avoids "có 2 ngủ" being parsed as a 2 VND budget).
     if spec is None and needs_sql and path != "nl2sql":
