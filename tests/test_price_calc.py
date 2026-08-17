@@ -5,10 +5,6 @@ Covers ADR-0002 fixes FIX-2 (floor math), FIX-3 (bare-price intent), FIX-4
 unit->type resolution (Plan-check M2). No DB/network.
 """
 
-import math
-
-import pytest
-
 from api.price_calc import (
     HIGHEST_SALE_INDEX,
     Offer,
@@ -21,7 +17,6 @@ from api.price_calc import (
     parse_vn_number,
     resolve_unit_type_key,
 )
-
 
 # ---------------------------------------------------------------------------
 # VN money parser (shared canonical — also used by rewrite/guard/extract)
@@ -215,3 +210,73 @@ def test_resolve_unit_type_key_fallback_for_type_row():
     # Type rows carry no unit_type_key -> fall back to their own key.
     assert resolve_unit_type_key({}, "unit:camellia/2pn-goc") == "unit:camellia/2pn-goc"
     assert resolve_unit_type_key(None, "unit:camellia/3pn") == "unit:camellia/3pn"
+
+# ---------------------------------------------------------------------------
+# Extra edge coverage (Story 3.1 acceptance — mirror-verified)
+# ---------------------------------------------------------------------------
+
+
+def test_loan_match_ceil_boundary_exact_fit():
+    # CEIL(3_333_333_333 * 0.30) = 1_000_000_000 -> exactly within budget.
+    offers = [_offer(price_min=3_333_333_333, deposit_pct=30.0)]
+    assert loan_match(offers, 1_000_000_000) == offers
+
+
+def test_loan_match_ceil_boundary_one_vnd_over():
+    # CEIL(3_333_333_334 * 0.30) = 1_000_000_001 -> one VND over, excluded.
+    offers = [_offer(price_min=3_333_333_334, deposit_pct=30.0)]
+    assert loan_match(offers, 1_000_000_000) == []
+
+
+def test_loan_match_zero_deposit_is_a_policy():
+    # deposit_pct 0.0 is a real policy (NULL != 0, D6) -> eligible.
+    offers = [_offer(price_min=3_000_000_000, deposit_pct=0.0)]
+    assert loan_match(offers, 1_000_000_000) == offers
+
+
+def test_cash_match_clamps_floor_at_lowest_when_budget_equals_min():
+    # budget == price_min -> only base floor (index 1) is affordable.
+    offers = [_offer(price_min=2_000_000_000)]
+    assert cash_match(offers, 2_000_000_000, 0.003) == [(offers[0], 1)]
+
+
+def test_cash_match_clamps_floor_at_top_when_budget_huge():
+    # Budget far above the top-floor price clamps to the highest sale floor.
+    offers = [_offer(price_min=2_000_000_000)]
+    assert cash_match(offers, 100_000_000_000, 0.003) == [(offers[0], HIGHEST_SALE_INDEX)]
+
+
+def test_analyze_affordability_below_lowest_floor_keeps_lowest():
+    # Cash leg empty but lowest_price_vnd still reported; HTLS deposit fits.
+    cash_offer = _offer(price_min=1_900_000_000, deposit_pct=30.0)
+    res = analyze_affordability([cash_offer], 1_000_000_000)
+    assert res["cash"] == []
+    assert res["loan"] == [cash_offer]  # 570M <= 1B budget via loan leg
+    assert res["lowest_price_vnd"] == 1_900_000_000
+    assert res["has_approx"] is True
+
+
+def test_parse_vn_number_dot_decimal_is_not_thousands():
+    # '3.5 tỷ' (Western dot decimal) must be 3.5 tỷ, never 35 tỷ.
+    assert parse_vn_number("3.5 tỷ") == 3_500_000_000
+    assert parse_vn_number("1.5 tỷ") == 1_500_000_000
+    # Dot-thousands in real 3-digit groups is unchanged.
+    assert parse_vn_number("2.500.000.000") == 2_500_000_000
+
+
+def test_parse_vn_number_rejects_malformed_dot_grouping():
+    # First group >3 digits is neither thousands nor a clean Western decimal:
+    # reject rather than fabricate a rounded value (review finding).
+    assert parse_vn_number("1234.567") is None
+    assert parse_vn_number("1234.567 tỷ") is None
+    # Valid 2+3 grouping IS thousands by VN convention (12.345 -> 12,345).
+    assert parse_vn_number("12.345 tỷ") == 12_345_000_000_000
+
+
+def test_extract_price_intent_does_not_merge_counts_as_millions():
+    # FIX-3: '2 ngủ'/'3 phòng'/'2 người' after 'tỷ' are counts, not money.
+    assert extract_price_intent("4 tỷ 2 ngủ có căn không") == 4_000_000_000
+    assert extract_price_intent("3 tỷ 2 người thì được căn nào") == 3_000_000_000
+    assert extract_price_intent("4 tỷ 3 phòng ngủ") == 4_000_000_000
+    # 100..999 unitless follow-up still merges as millions (3 tỷ 500 = 3,5 tỷ).
+    assert extract_price_intent("mua 3 tỷ 500 được không") == 3_500_000_000
