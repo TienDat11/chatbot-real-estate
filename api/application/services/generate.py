@@ -71,6 +71,7 @@ async def stream_answer(merged: Merged, history: list[dict] | None, high_stakes:
     )
     messages = build_messages(merged, history)
     merged.meta["model"] = model
+    merged.meta["prompt_version"] = "v2"  # story 4.2: sales voice system prompt
     merged.meta["prompt_hash"] = sha256_hex(json.dumps(messages, ensure_ascii=False))
 
     try:
