@@ -8,6 +8,7 @@ Plan-check M2.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass, field
@@ -201,4 +202,147 @@ def analyze_affordability(
         "cash": cash,
         "loan": loan,
         "has_approx": has_approx,
+    }
+
+
+def offer_from_row(row: dict) -> Offer:
+    """Map one v_unit_estimates row to an Offer; asyncpg types -> plain values.
+
+    NUMERIC columns arrive as Decimal, jsonb attrs as str: coerce both here so
+    the rest of the module stays pure ints/floats/dicts. NULL deposit_pct stays
+    None (no loan policy, D6); M2 resolves concrete units to their type band.
+    """
+    raw_attrs = row.get("attrs")
+    if isinstance(raw_attrs, str):
+        try:
+            attrs = json.loads(raw_attrs)
+        except (ValueError, TypeError):
+            attrs = {}
+    elif isinstance(raw_attrs, dict):
+        attrs = raw_attrs
+    else:
+        attrs = {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    subject_key = resolve_unit_type_key(attrs, str(row.get("subject_key") or ""))
+    price_min_raw = row.get("price_min_vnd")
+    if price_min_raw is None:
+        # NULL price is a data defect, never a 0-VND offer (fabrication).
+        raise ValueError(f"price_min_vnd missing for {subject_key}")
+    price_min = int(price_min_raw)
+    price_max_raw = row.get("price_max_vnd")
+    # Inverted band (max < min) clamps to min rather than emitting nonsense.
+    price_max = max(int(price_max_raw), price_min) if price_max_raw is not None else price_min
+
+    deposit_raw = row.get("deposit_pct")
+    rate_raw = row.get("interest_rate_pct")
+    term_raw = row.get("term_months")
+
+    # Deposit outside [0, 100] is corrupt policy -> None (no loan policy, D6);
+    # loan_match already skips deposit None, so such offers are cash-only.
+    deposit_pct = float(deposit_raw) if deposit_raw is not None else None
+    if deposit_pct is not None and not 0 <= deposit_pct <= 100:
+        deposit_pct = None
+
+    return Offer(
+        subject_key=subject_key,
+        display_name=str(row.get("display_name") or subject_key),
+        policy_key=str(row.get("policy_key") or ""),
+        price_min_vnd=price_min,
+        price_max_vnd=price_max,
+        price_quality=str(row.get("price_quality") or "range"),
+        deposit_pct=deposit_pct,
+        interest_rate_pct=float(rate_raw) if rate_raw is not None else None,
+        term_months=int(term_raw) if term_raw is not None else None,
+        attrs=attrs,
+    )
+
+
+def affordability_rows(result: dict, scenario_pct: float = 0.003) -> list[dict]:
+    """Format analyze_affordability() as FACT_EVIDENCE blocks (one per match).
+
+    Cash rows carry the top affordable sale floor + its band price; loan rows
+    carry the required down payment (FIX-4). quality/trust_level feed the merge's
+    has_approx confidence cap (D6). Ids are sequential — cash first, then loan.
+    """
+    fe: list[dict] = []
+    n = 0
+    for offer, floor_index in result["cash"]:
+        n += 1
+        band_price = floor_price_vnd(offer.price_min_vnd, floor_index, scenario_pct)
+        fe.append(
+            {
+                "fe_id": f"fe-{n:03d}",
+                "subject": offer.display_name or offer.subject_key,
+                "policy_key": offer.policy_key,
+                "fields": {
+                    "leg": "cash",
+                    "price_min_vnd": offer.price_min_vnd,
+                    "price_max_vnd": offer.price_max_vnd,
+                    "price_quality": offer.price_quality,
+                    "deposit_pct": offer.deposit_pct,
+                    "term_months": offer.term_months,
+                    "interest_rate_pct": offer.interest_rate_pct,
+                    "max_affordable_floor_index": floor_index,
+                    "highest_affordable_price_vnd": band_price,
+                    # attrs facts (mã căn / m² / tầng) — the PO verify sentence
+                    # needs them; all three are DB facts, never LLM (ADR-0002 D2).
+                    "unit_codes": (offer.attrs or {}).get("units"),
+                    "area_m2": (offer.attrs or {}).get("area_m2"),
+                    "floor_rule": (offer.attrs or {}).get("floor_rule"),
+                },
+                "note": (
+                    f"mua được đến tầng {floor_index} (giá {band_price:,} VND), "
+                    f"giá gốc từ {offer.price_min_vnd:,} VND"
+                ),
+                "quality": offer.price_quality,
+                "trust_level": "estimate",
+            }
+        )
+    for offer in result["loan"]:
+        n += 1
+        down_payment = (
+            math.ceil(offer.price_min_vnd * offer.deposit_pct / 100)
+            if offer.deposit_pct is not None
+            else None
+        )
+        fe.append(
+            {
+                "fe_id": f"fe-{n:03d}",
+                "subject": offer.display_name or offer.subject_key,
+                "policy_key": offer.policy_key,
+                "fields": {
+                    "leg": "loan",
+                    "price_min_vnd": offer.price_min_vnd,
+                    "price_max_vnd": offer.price_max_vnd,
+                    "price_quality": offer.price_quality,
+                    "deposit_pct": offer.deposit_pct,
+                    "term_months": offer.term_months,
+                    "interest_rate_pct": offer.interest_rate_pct,
+                    "required_down_payment_vnd": down_payment,
+                    "unit_codes": (offer.attrs or {}).get("units"),
+                    "area_m2": (offer.attrs or {}).get("area_m2"),
+                    "floor_rule": (offer.attrs or {}).get("floor_rule"),
+                },
+                "note": (
+                    f"trả trước {down_payment:,} VND (deposit {offer.deposit_pct:g}%), "
+                    f"giá gốc {offer.price_min_vnd:,} VND"
+                ),
+                "quality": offer.price_quality,
+                "trust_level": "estimate",
+            }
+        )
+    return fe
+
+
+def affordability_summary(result: dict) -> dict:
+    """Meta summary for the affordability leg (counterpart to build_fact_evidence)."""
+    return {
+        "mode": "affordability",
+        "budget_vnd": result["budget_vnd"],
+        "lowest_price_vnd": result["lowest_price_vnd"],
+        "cash_count": len(result["cash"]),
+        "loan_count": len(result["loan"]),
+        "has_approx": result["has_approx"],
     }

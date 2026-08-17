@@ -55,7 +55,7 @@ export interface NearbyPlace {
 
 export type Confidence = "HIGH" | "MEDIUM" | "LOW";
 
-export type StructuredPath = "spec" | "nl2sql" | "none";
+export type StructuredPath = "spec" | "nl2sql" | "affordability" | "none";
 
 export interface QueryResponseRouting {
   needs_rag: boolean;

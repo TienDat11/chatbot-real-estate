@@ -32,7 +32,7 @@ AGGREGATE_KEYWORDS = (
 )
 
 # Canonical VN money parser (also used by guard/extract) — one implementation.
-from api.price_calc import extract_budget, parse_vn_number
+from api.price_calc import extract_budget, extract_price_intent
 
 # Deterministic geo intent — ORed with the LLM routing decision so the maps leg
 # fires on amenity/location queries even when the router omits needs_geo.
@@ -129,6 +129,48 @@ def _clean_json(text: str) -> str:
     return t
 
 
+def _is_budget_only_spec(spec: dict | None) -> bool:
+    """A spec that is exactly one down-payment budget filter (fewshot Example-1 shape).
+
+    Such a spec is the affordability intent itself — the deterministic leg may
+    upgrade it. Anything else (inverted op, multi-filter, area/price/etc.) is a
+    compound query we never hijack. Malformed filters (non-list, non-dict) are
+    never budget-only and never crash.
+    """
+    if not isinstance(spec, dict):
+        return False
+    if spec.get("source") != "v_unit_offers":
+        return False
+    filters = spec.get("filters")
+    if not isinstance(filters, list) or len(filters) != 1:
+        return False
+    f = filters[0]
+    return (
+        isinstance(f, dict)
+        and f.get("field") == "required_down_payment_vnd"
+        and f.get("op") in ("<", "<=")
+    )
+
+
+# Relational/compare price phrasings are NOT a budget — the force must not fire:
+# 'trên X' / 'X trở lên' (above, inverted), 'từ X đến Y' (range), 'X và Y'
+# (same-unit compare). 'dưới X' / 'đến X' (below/ceiling) stay budget-consistent
+# ('affordable up to X') and are deliberately not suppressed, like 'hơn' (BH-1).
+_RELATIONAL_PRICE_RE = re.compile(
+    r"trên\s*[\d.,]+\s*(?:tỷ|tỉ|triệu|ngàn|nghìn)"
+    r"|[\d.,]+\s*(?:tỷ|tỉ|triệu|ngàn|nghìn)\s*trở\s+lên"
+    r"|(?:từ|giá\s+từ)\s*[\d.,]+\s*(?:tỷ|tỉ|triệu|ngàn|nghìn)\s*đến\s*[\d.,]+\s*(?:tỷ|tỉ|triệu|ngàn|nghìn)"
+    r"|[\d.,]+\s*(?:tỷ|tỉ)\s+và\s+[\d.,]+\s*(?:tỷ|tỉ)"
+    r"|[\d.,]+\s*triệu\s+và\s+[\d.,]+\s*triệu",
+    re.IGNORECASE,
+)
+
+
+def _has_relational_price(query: str) -> bool:
+    """True when a price literal is relational/compare, not a plain budget."""
+    return bool(_RELATIONAL_PRICE_RE.search(query or ""))
+
+
 def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> RoutedResult:
     """Coerce and constrain the LLM routing output to a canonical shape."""
     routing_raw = data.get("routing") or {}
@@ -139,7 +181,7 @@ def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> Ro
     else:
         needs_rag, needs_sql, path = True, False, "none"
 
-    if path not in ("spec", "nl2sql", "none"):
+    if path not in ("spec", "nl2sql", "affordability", "none"):
         path = "none"
 
     needs_geo = _geo_flag(routing_raw, data, query)
@@ -182,19 +224,46 @@ def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> Ro
     # the merge; RAG-only is the designed fallback path).
     needs_rag = True
 
-    # Budget injection: declared budget without an LLM spec -> build an affordability spec.
-    # Only for budget >= 1M VND (avoids "có 2 ngủ" being parsed as a 2 VND budget).
-    if spec is None and needs_sql and path != "nl2sql":
-        budget = extract_budget(query)
-        if budget is not None and budget >= 1_000_000:
-            spec = {
-                "subject_type": "unit",
-                "source": "v_unit_offers",
-                "filters": [{"field": "required_down_payment_vnd", "op": "<=", "value": budget}],
-                "order_by": {"field": "required_down_payment_vnd", "dir": "asc"},
-                "limit": 10,
-            }
-            degraded.append("budget_injected")
+    # Affordability (ADR-0002 D2): a price-intent amount forces the deterministic
+    # leg — LLM proposes, the detector confirms (same pattern as NL2SQL). The 1M
+    # VND floor keeps counts/floors ('có 2 ngủ', 'tầng 10') out (FIX-3); compound
+    # LLM specs, high-stakes/aggregate queries, and relational/compare phrasings
+    # are never overridden. Budget takes the max of the declared 'có X' amount
+    # and the bare price intent so compound budgets ('2 tỉ 500 triệu') keep the
+    # full amount (extract_budget alone loses the follow-up — BH-6).
+    budget = max(extract_budget(query) or 0, extract_price_intent(query) or 0) or None
+    forced = False
+    if (
+        budget is not None
+        and budget >= 1_000_000
+        and path != "nl2sql"
+        and not aggregate
+        and not high_stakes
+        and not _has_relational_price(query)
+        and (spec is None or _is_budget_only_spec(spec))
+    ):
+        spec = {
+            "subject_type": "unit",
+            "source": "v_unit_estimates",
+            "budget_vnd": budget,
+            "limit": 20,
+        }
+        path = "affordability"
+        needs_sql = True
+        degraded.append("budget_injected")
+        forced = True
+
+    # LLM-declared 'affordability' the deterministic detector did NOT confirm
+    # (no budget >= 1M, or a compound spec the leg cannot drive) must not reach
+    # the deterministic leg — it would only degrade with spec_invalid. Demote to
+    # the path the spec can honor: the LLM spec when present, else RAG-only
+    # (VG-4/BH-3).
+    if not forced and path == "affordability":
+        degraded.append("affordability_unconfirmed")
+        if spec is not None:
+            path = "spec"
+        else:
+            path, needs_rag, needs_sql = "none", True, False
 
     return RoutedResult(
         rewritten=rewritten,

@@ -271,6 +271,9 @@ class RagQueryWorkflow(Workflow):
         if routed.routing.get("structured_path") == "nl2sql":
             spec = dict(spec)
             spec["structured_path"] = "nl2sql"
+        elif routed.routing.get("structured_path") == "affordability":
+            spec = dict(spec)
+            spec["structured_path"] = "affordability"
         timeout = (
             STEP_TIMEOUTS["sql_nl2sql"]
             if routed.routing.get("structured_path") == "nl2sql"
