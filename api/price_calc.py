@@ -49,8 +49,12 @@ def parse_vn_number(text: str) -> int | None:
         num_part = num_part.replace(".", "").replace(",", ".")  # 2.850.000,50
     elif "," in num_part:
         num_part = num_part.replace(",", ".")  # 2,85 -> 2.85
-    else:
-        num_part = num_part.replace(".", "")  # 2.850.000.000 -> 2850000000
+    elif re.fullmatch(r"\d{1,3}(\.\d{3})+", num_part):
+        num_part = num_part.replace(".", "")  # 2.500.000.000 -> 2500000000
+    elif re.fullmatch(r"\d{1,2}\.\d+", num_part):
+        pass  # Western decimal ('3.5' -> 3.5): keep as-is for float() below.
+    elif "." in num_part:
+        return None  # malformed dot grouping ('1234.567') - reject, not fabricated.
     try:
         value = float(num_part)
     except ValueError:
@@ -91,7 +95,10 @@ def extract_price_intent(query: str) -> int | None:
                 nxt = matches[i + 1]
                 if nxt.start() - m.end() <= 4:
                     extra = parse_vn_number(nxt.group(0))
-                    if extra is not None and (nxt.group(2) is None and extra < 1_000):
+                    # Unitless follow-up must be a 100..999 money shorthand
+                    # ('3 tỷ 500' = 3,5 tỷ); counts like '4 tỷ 2 ngủ' are < 100
+                    # and must not fabricate a price (FIX-3).
+                    if extra is not None and nxt.group(2) is None and 100 <= extra < 1_000:
                         amount += extra * 1_000_000
                         i += 1
                     elif extra is not None and nxt.group(2) == "triệu" and extra < 1_000_000_000:
