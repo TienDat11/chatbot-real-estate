@@ -20,6 +20,12 @@ from typing import Any, AsyncIterator
 import asyncpg
 
 from api import get_cfg
+from api.price_calc import (
+    affordability_rows,
+    affordability_summary,
+    analyze_affordability,
+    offer_from_row,
+)
 
 logger = logging.getLogger("api.sql_leg")
 
@@ -422,9 +428,93 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
     return fe
 
 
+# Affordability leg (story 3.2) — deterministic numbers from v_unit_estimates only.
+ESTIMATE_COLUMNS = (
+    "subject_key", "display_name", "project_key", "attrs", "policy_key",
+    "price_min_vnd", "price_max_vnd", "price_quality", "deposit_pct",
+    "term_months", "interest_rate_pct",
+)
+
+
+async def _fetch_estimates(pool: asyncpg.Pool | None = None) -> list[dict]:
+    """Current v_unit_estimates rows — the view pins CURRENT_DATE, so no as_of."""
+    cols = ", ".join(ESTIMATE_COLUMNS)
+    async with with_rls_identity(pool=pool) as conn:
+        recs = await conn.fetch(f"SELECT {cols} FROM v_unit_estimates")
+    return [dict(r) for r in recs]
+
+
+async def run_affordability(spec: dict, as_of: date | None, fetch=None) -> SqlLegResult:
+    """Deterministic affordability leg: estimates -> analyze -> fe evidence + meta.
+
+    Numbers come only from v_unit_estimates via analyze_affordability (ADR-0002
+    D2). The fetch is injectable so tests never touch the pool. budget_vnd below
+    the 1M VND floor (FIX-3) is a spec violation -> degraded, never fabricated.
+    """
+    budget = spec.get("budget_vnd")
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1_000_000:
+        return SqlLegResult(
+            [],
+            {
+                "mode": "affordability",
+                "error": "budget_vnd invalid",
+                "degraded_reason": "spec_invalid",
+            },
+            degraded=True,
+        )
+    fetch_fn = fetch or _fetch_estimates
+    try:
+        rows = await fetch_fn()
+        if not rows:
+            # No estimates at all is a data problem, not an answer: degrade so
+            # the pipeline falls back to RAG + audit instead of reporting
+            # 'nothing affordable' (BH-9). Rows that exist but match nothing are
+            # a legitimate 'nothing fits this budget' and stay non-degraded.
+            return SqlLegResult(
+                [],
+                {
+                    "mode": "affordability",
+                    "source": "v_unit_estimates",
+                    "degraded_reason": "no_estimates",
+                },
+                degraded=True,
+            )
+        # Skip rows without a price (F7 contract) — never fabricate a 0 offer.
+        offers = [offer_from_row(r) for r in rows if r.get("price_min_vnd") is not None]
+        # Deterministic cheapest-first order -> stable fe-001.. ids (EH-10).
+        offers = sorted(offers, key=lambda o: o.price_min_vnd)
+        result = analyze_affordability(offers, budget)
+        evidence = affordability_rows(result)
+        # Evidence bounded by the spec limit (default 20) — never unbounded.
+        limit = int(spec.get("limit") or 20)
+        if limit > 0:
+            evidence = evidence[:limit]
+    except Exception as exc:  # noqa: BLE001 — fetch/parse failure degrades, never crashes
+        logger.warning("sql_leg: affordability data failed: %s", exc)
+        return SqlLegResult([], {"mode": "affordability", "error": str(exc)}, degraded=True)
+    meta = {
+        "mode": "affordability",
+        "source": "v_unit_estimates",
+        "row_count": len(evidence),
+        "sql_query": f"SELECT {', '.join(ESTIMATE_COLUMNS)} FROM v_unit_estimates",
+        # The view pins CURRENT_DATE (camellia_estimate.sql) — the requested
+        # as_of is intentionally not applied; surface that to the audit (BH-16).
+        "as_of_applied": False,
+        **affordability_summary(result),
+    }
+    # Merge rule (workflow.py:357): any 'range'/'approx' quality OR
+    # trust_level='estimate' caps confidence — fe rows are always estimate, so
+    # has_approx must mirror the merge, not the quality-only summary (BH-10).
+    meta["has_approx"] = any(
+        e.get("quality") in ("range", "approx") or e.get("trust_level") == "estimate"
+        for e in evidence
+    )
+    return SqlLegResult(evidence, meta, degraded=False)
+
+
 # Runner.
 async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlLegResult:
-    """Run R1 (spec-builder) or R2 (nl2sql) when structured_path == 'nl2sql'.
+    """Run R1 (spec-builder), R2 (nl2sql), or the affordability leg when routed.
 
     Any error/timeout returns a degraded SqlLegResult so the caller falls back to
     RAG-only instead of crashing.
@@ -440,6 +530,15 @@ async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlL
         except Exception as exc:  # noqa: BLE001 — SQlnl2sqlError → degrade RAG-only + audit
             logger.warning("sql_leg: nl2sql degraded: %s", exc)
             return SqlLegResult([], {"mode": "nl2sql", "error": str(exc)}, degraded=True)
+
+    # Affordability dispatch: v_unit_estimates is NOT in ALLOWED_SOURCES, so it
+    # must run before validate_spec (mirrors nl2sql placement).
+    if spec.get("structured_path") == "affordability":
+        try:
+            return await run_affordability(spec, as_of)
+        except Exception as exc:  # noqa: BLE001 — leg failure degrades, never crashes
+            logger.warning("sql_leg: affordability degraded: %s", exc)
+            return SqlLegResult([], {"mode": "affordability", "error": str(exc)}, degraded=True)
 
     try:
         validate_spec(spec)

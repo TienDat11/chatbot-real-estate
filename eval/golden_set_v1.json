@@ -107,16 +107,25 @@
       "id": "afford-01",
       "question": "Tôi có 2 tỉ, mua được nhà nào?",
       "category": "fact_affordability",
-      "expected_routing": {"needs_rag": false, "needs_sql": true, "structured_path": "spec"},
-      "expected_facts": {
-        "price_vnd": 8000000000,
-        "deposit_pct": 25.0,
-        "required_down_payment_vnd": 2000000000,
-        "loan_amount_vnd": 6000000000,
-        "term_months": 180
-      },
-      "expected_answer_contains": ["A10-01", "25%", "2.000.000.000", "8 tỷ"],
-      "notes": "Success signal 1: căn 8 tỉ × 25% → required 2.000.000.000 = budget. Số PHẢI từ SQL."
+      "expected_routing": {"needs_rag": true, "needs_sql": true, "structured_path": "affordability"},
+      "expected_answer_contains": ["Studio", "trả trước", "30%", "m2"],
+      "notes": "Budget 2 tỷ → deterministic affordability leg (v_unit_estimates, camellia range/estimate facts): Studio cash ≤ 2 tỷ (4 policy rows), 1p1/2pn/3pn qua trả trước 30% (htls). Số PHẢI từ v_unit_estimates, never LLM (ADR-0002 D2). A10-01 (exact quality) không nằm trong views range/approx nên không xuất hiện ở câu này."
+    },
+    {
+      "id": "afford-forced-01",
+      "question": "4 tỷ mua nhà nào?",
+      "category": "fact_affordability",
+      "expected_routing": {"needs_rag": true, "needs_sql": true, "structured_path": "affordability"},
+      "expected_answer_contains": ["tỷ", "trả trước"],
+      "notes": "Bare-price intent (no 'có'): FIX-3 force fires with budget 4 tỷ — affordability even though the LLM router would not declare it. Numbers only from v_unit_estimates."
+    },
+    {
+      "id": "afford-agg-01",
+      "question": "Tổng giá căn hộ 4 tỷ là bao nhiêu căn?",
+      "category": "aggregate",
+      "expected_routing": {"needs_rag": false, "needs_sql": true, "structured_path": "nl2sql"},
+      "expected_answer_contains": ["căn"],
+      "notes": "Aggregate intent (tổng) beats the budget force: the deterministic detector must NOT hijack an aggregate into affordability (F1) — route stays nl2sql."
     },
     {
       "id": "afford-02",
