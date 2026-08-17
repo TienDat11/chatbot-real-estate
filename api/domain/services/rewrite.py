@@ -63,7 +63,7 @@ def detect_aggregate_intent(query: str) -> bool:
 
 
 # Few-shot prompt, read once at import.
-_REWRITE_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "rewrite_fewshot.md"
+_REWRITE_PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "rewrite_fewshot.md"  # parents[2]=api/ (HF-0: canonical api/prompts/)
 
 _FEWSHOT: str = ""
 if _REWRITE_PROMPT_PATH.exists():

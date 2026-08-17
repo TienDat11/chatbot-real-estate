@@ -19,7 +19,7 @@ from .merge import Merged
 
 logger = logging.getLogger("api.generate")
 
-_SYSTEM_PATH = Path(__file__).resolve().parents[1] / "prompts" / "system_policy.md"
+_SYSTEM_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system_policy.md"  # parents[2]=api/ (HF-0: canonical api/prompts/)
 
 _SYSTEM_PROMPT: str = ""
 if _SYSTEM_PATH.exists():
