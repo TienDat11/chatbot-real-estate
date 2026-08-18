@@ -77,6 +77,9 @@ class QueryResponse(BaseModel):
     routing: dict
     trace_id: str
     latency_ms: int
+    conv_state: str | None = None
+    conversation_directive: str | None = None
+    slots_prefill: str | None = None
 
 
 # SSE helpers.
