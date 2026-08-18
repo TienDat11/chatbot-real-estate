@@ -19,7 +19,8 @@ from typing import Any, AsyncIterator
 
 import asyncpg
 
-from api.infrastructure.config.config import get_settings as get_cfg, settings
+from api.infrastructure.config.config import settings
+from api import get_cfg
 from api.domain.entities.price_calc import (
     affordability_rows,
     affordability_summary,

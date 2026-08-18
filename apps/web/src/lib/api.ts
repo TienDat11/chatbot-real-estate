@@ -1,4 +1,4 @@
-import type { Confidence, FactEvidence, Source } from "@rag-ragre/contracts";
+import type { Confidence, FactEvidence, Source, SseRoutingPayload } from "@rag-ragre/contracts";
 import { API_QUERY_ENDPOINT, API_SSE_EVENTS } from "@rag-ragre/contracts";
 
 /** Metadata delivered on the `done` SSE event (besides the streamed answer). */
@@ -11,6 +11,8 @@ export interface DoneMeta {
 
 /** Callbacks for each event type in the POST /api/query SSE stream. */
 export interface QueryStreamHandlers {
+  /** Story 4.5 — routing metadata emitted before the answer legs start. */
+  onRouting?: (payload: SseRoutingPayload) => void;
   onSources?: (sources: Source[]) => void;
   onFacts?: (facts: FactEvidence[]) => void;
   onToken?: (text: string) => void;
@@ -148,6 +150,11 @@ function dispatchChunk(chunk: string, handlers: QueryStreamHandlers): void {
 
 function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
   switch (evt.event) {
+    case API_SSE_EVENTS.ROUTING:
+      if (evt.data && typeof evt.data === "object") {
+        handlers.onRouting?.(evt.data as SseRoutingPayload);
+      }
+      break;
     case API_SSE_EVENTS.SOURCES:
       handlers.onSources?.(asArray<Source>(evt.data));
       break;

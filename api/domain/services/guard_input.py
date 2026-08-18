@@ -12,7 +12,8 @@ from dataclasses import dataclass
 
 import httpx
 
-from api.infrastructure.config.config import get_settings as get_cfg, settings
+from api.infrastructure.config.config import settings
+from api import get_cfg
 
 logger = logging.getLogger("api.guard_input")
 

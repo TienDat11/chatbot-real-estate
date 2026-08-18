@@ -18,7 +18,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from api.infrastructure.config.config import get_settings as get_cfg, settings
+from api.infrastructure.config.config import settings
+from api import get_cfg
 from api.domain.value_objects.constants import (
     DEFAULT_MAX_ENTITY_TOKENS,
     DEFAULT_MAX_RELATION_TOKENS,
