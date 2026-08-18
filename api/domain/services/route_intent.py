@@ -33,10 +33,16 @@ class ClassifyResult:
 
 
 # Human-contact / phone-lead signals (Epic 6 target) — strongest short-circuit.
+# "tư vấn" ALONE is too loose: "chi phí tư vấn pháp lý" is a price/legal question, not
+# a contact request. Require a contact-desire form (regex-vs-llm safety: narrow the
+# deterministic trigger so a false positive never sends a real question to the lead
+# form). Strong signals still always match.
 _HANDOFF_KEYWORDS = (
-    "gọi điện", "gọi lại", "liên hệ", "tư vấn", "gặp sales", "gặp tư vấn",
+    "gọi điện", "gọi lại", "liên hệ", "gặp sales", "gặp tư vấn", "gặp trực tiếp",
     "nhân viên kinh doanh", "số điện thoại", "sđt", "hotline", "để lại số",
-    "tôi muốn đặt cọc", "đặt cọc", "mua liền", "ký hợp đồng", "gặp trực tiếp",
+    "nhờ tư vấn", "cần tư vấn", "muốn tư vấn", "nhận tư vấn", "tư vấn trực tiếp",
+    "chuyên viên tư vấn", "từ chuyên viên",
+    "tôi muốn đặt cọc", "đặt cọc", "mua liền", "ký hợp đồng",
     "hẹn xem", "xem thực tế", "xem nhà", "báo giá", "gửi bảng giá",
 )
 
@@ -56,6 +62,14 @@ _PRICE_KEYWORDS = (
 # Politeness/closure vocabulary (FIX-7).
 _CLOSURE_WORDS = ("cảm ơn", "ok", "okey", "okê", "ừ", "uh", "được rồi", "thế thôi", "hết")
 _FOLLOWUP_MARKERS = ("?", "hỏi", "cho hỏi", "bao nhiêu", "giá", "nào", "là gì", "còn không", "thì sao", "sao?")
+# Words/phrases meaning the user is NOT done — they want to act/continue/deliberate.
+# "ok để em xem thực tế" / "ok về bàn với chồng" / "cảm ơn để tôi suy nghĩ" are not
+# closure: they carry an onward action. FIX-7 must never drop these as closing.
+_CLOSURE_BLOCKERS = (
+    "xem thực tế", "xem nhà", "hẹn", "bàn", "bàn với", "suy nghĩ", "đi xem",
+    "gọi", "liên hệ", "đặt cọc", "ký", "tư vấn", "hỏi", "giá", "còn", "thì",
+    "cho em", "giúp em",
+)
 # Location questions phrased as a suffix ("ở đâu", "chỗ nào") that the static
 # GEO_INTENT_KEYWORDS list does not cover.
 _LOCATION_SUFFIXES = ("ở đâu", "chỗ nào", "vị trí", "khu nào")
@@ -83,7 +97,11 @@ def classify_intent(query: str, history: list[dict] | None = None) -> ClassifyRe
         combined = (q + " " + " ".join(
             str(t.get("content", "")) for t in (history or []) if t.get("role") == "user"
         )).lower()
-        if not _contains(combined, _FOLLOWUP_MARKERS) and _contains(q, _CLOSURE_WORDS):
+        if (
+            not _contains(combined, _FOLLOWUP_MARKERS)
+            and not _contains(q, _CLOSURE_BLOCKERS)
+            and _contains(q, _CLOSURE_WORDS)
+        ):
             return ClassifyResult(Intent.CLOSURE, "closure:no_followup")
 
     if _contains(q, _HANDOFF_KEYWORDS):

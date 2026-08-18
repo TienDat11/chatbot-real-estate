@@ -25,7 +25,11 @@ SSE_EVENT_ERROR = "error"
 
 # --- Default model names ---
 DEFAULT_MODEL_ANSWER = "deepseek-v4-flash"
-# Same available channel as config default (code review f10).
+# Same gateway channel as config default (code review f10).
+# Story 4.6 §7.3: 'swap to a stronger model' needs a live call to verify the
+# exact name on the active gateway (aibox) BEFORE enabling pro tier — guessing a
+# name risks a 400 on every conversion turn. Override at runtime via
+# LLM_MODEL_ANSWER_PRO env; verify + pin the value when quota is available.
 DEFAULT_MODEL_ANSWER_PRO = "deepseek-v4-flash"
 DEFAULT_MODEL_EXTRACT = "qwen3.7-flash"
 DEFAULT_MODEL_GUARD = "deepseek-v4-flash"

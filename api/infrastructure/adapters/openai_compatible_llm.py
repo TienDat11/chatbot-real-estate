@@ -72,13 +72,20 @@ class OpenAICompatibleLLM(LLMChatPort):
             raise LLMError(f"LLM complete failed model={model}: {exc}") from exc
         return resp.choices[0].message.content or ""
 
-    async def stream(self, messages: Sequence[dict], *, model: str | None = None) -> AsyncIterator[str]:
+    async def stream(
+        self,
+        messages: Sequence[dict],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
         """Yield content deltas from a streaming chat completion."""
         model = model or self.default_model
+        kwargs: dict = {"model": model, "messages": list(messages), "stream": True}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         try:
-            stream = await self._client.chat.completions.create(
-                model=model, messages=list(messages), stream=True
-            )
+            stream = await self._client.chat.completions.create(**kwargs)
             async for chunk in stream:
                 if not chunk.choices:
                     continue

@@ -19,6 +19,14 @@ from api.infrastructure.dependencies import llm
 from .merge import Merged
 from .sales_kit import inject_sales_context, sales_kit_block
 from api.domain.services.route_intent import classify_intent
+from api.application.services.conv_state import CONVERSION_STATES
+
+# Story 4.6 (§7.2): pro tier fires when the turn is at a conversion stage or
+# is high-stakes. A lead CTA hint is already gated to the conversion states, so
+# it needs no separate branch here (single source: CONVERSION_STATES in
+# conv_state.py). Lookup/dry queries (greet, handoff_done, legal) stay flash.
+_TIER_TO_MODEL_KEY = {"pro": "llm_model_answer_pro", "flash": "llm_model_answer"}
+_ANSWER_MAX_TOKENS = {"pro": 6000, "flash": 4000}
 
 logger = logging.getLogger("api.generate")
 
@@ -75,21 +83,43 @@ def build_messages(merged: Merged, history: list[dict] | None) -> list[dict]:
     return messages
 
 
+def select_answer_tier(merged: Merged, high_stakes: bool) -> str:
+    """Story 4.6 (§7.2) selection matrix.
+
+    pro when: is high-stakes, or conv_state is a conversion stage
+    ({qualify, recommend, nurture} from CONVERSION_STATES). A lead CTA hint only
+    ever fires inside a conversion stage, so state membership is the single
+    signal. Otherwise flash (lookup / legal dry / greet / handoff_done).
+    """
+    if high_stakes:
+        return "pro"
+    state = merged.meta.get("conv_state") or "greet"
+    if state in CONVERSION_STATES:
+        return "pro"
+    return "flash"
+
+
 async def stream_answer(merged: Merged, history: list[dict] | None, high_stakes: bool) -> AsyncIterator[str]:
-    """Stream answer tokens; records model + prompt_hash in merged.meta."""
-    model = (
-        get_cfg("llm_model_answer_pro", DEFAULT_MODEL_ANSWER_PRO)
-        if high_stakes
-        else get_cfg("llm_model_answer", DEFAULT_MODEL_ANSWER)
-    )
+    """Stream answer tokens; records model + tier + prompt_hash in merged.meta."""
+    tier = select_answer_tier(merged, high_stakes)
+    model_key = _TIER_TO_MODEL_KEY[tier]
+    model = get_cfg(model_key, DEFAULT_MODEL_ANSWER_PRO if tier == "pro" else DEFAULT_MODEL_ANSWER)
+    max_tokens = _ANSWER_MAX_TOKENS[tier]
     messages = build_messages(merged, history)
     merged.meta["model"] = model
-    merged.meta["prompt_version"] = "v2"  # story 4.2: sales voice system prompt
+    merged.meta["answer_tier"] = tier  # story 4.6 audit: which tier was used
+    merged.meta["prompt_version"] = "v2"
     merged.meta["prompt_hash"] = sha256_hex(json.dumps(messages, ensure_ascii=False))
 
+    # §7.5: max_tokens là target — log khi vượt để quan sát budget (không cắt ngang).
     try:
-        async for token in llm.stream(messages, model=model):
+        acc = 0
+        async for token in llm.stream(messages, model=model, max_tokens=max_tokens):
+            acc += max(1, len(token.split()))
             yield token
+        if acc > max_tokens:
+            logger.warning("answer tier=%s vượt max_tokens budget (%d > %d tokens ~)", tier, acc, max_tokens)
+            merged.meta["budget_exceeded"] = True
     except Exception as exc:  # noqa: BLE001 — LLM failure degrades in workflow
         logger.warning("generate.stream fail: %s", exc)
         yield f"\n\n[Lỗi hạ tầng LLM — vui lòng thử lại. {exc}]"

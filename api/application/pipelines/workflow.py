@@ -352,9 +352,11 @@ class RagQueryWorkflow(Workflow):
         merged: Merged = await merge_context(guard.clean, chunks, sql_result.rows, as_of)
         session_id = await ctx.store.get("session_id")
         conv_dir = None
+        conv_state_str = None
         if session_id:
             ctx_conv = get_context(session_id)
             conv_dir = conv_directive(ctx_conv.state)
+            conv_state_str = ctx_conv.state
         merged.meta.update(
             query=guard.clean,
             rewritten=routed.rewritten,
@@ -367,6 +369,7 @@ class RagQueryWorkflow(Workflow):
             ),
             strong_chunks=sum(1 for c in chunks if float(c.get("score", 0.0)) >= 0.8),
             conversation_directive=conv_dir,
+            conv_state=conv_state_str,  # story 4.6: answer tier selector signal
         )
         await ctx.store.set("merged", merged)
 
@@ -402,6 +405,8 @@ class RagQueryWorkflow(Workflow):
         audit = await ctx.store.get("audit")
         audit.update(
             model=merged.meta.get("model"),
+            answer_tier=merged.meta.get("answer_tier"),  # story 4.6 §7.4: audit tier
+            conv_state=merged.meta.get("conv_state"),
             prompt_hash=merged.meta.get("prompt_hash"),
             answer_hash=sha256_hex(answer),
         )

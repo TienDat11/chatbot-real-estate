@@ -24,6 +24,11 @@ from api.domain.services.route_intent import Intent
 SESSIONS_MAX = 512
 TTL_SECONDS = 2 * 3600  # 2h
 
+# Conversion stages — a turn in one of these gets the pro answer tier (Story 4.6 §7.2).
+# Single source of truth, reused by generate.select_answer_tier so a rename cannot
+# silently desync tier selection.
+CONVERSION_STATES = ("qualify", "recommend", "nurture")
+
 # Constant-time eviction: insertion-ordered dict + move-to-end on touch.
 class _LRU(dict):
     def touch(self, key: str) -> None:
@@ -177,7 +182,7 @@ def register_interest(ctx: ConvContext, unit_key: "str | None") -> None:
 
 
 __all__ = [
-    "ConvContext", "CTA_VARIANTS", "SESSIONS_MAX", "TTL_SECONDS",
+    "ConvContext", "CTA_VARIANTS", "SESSIONS_MAX", "TTL_SECONDS", "CONVERSION_STATES",
     "get_context", "mark_phone_given", "transition", "maybe_lead_cta_hint",
     "note_useful_turn", "conv_directive", "register_interest",
 ]
