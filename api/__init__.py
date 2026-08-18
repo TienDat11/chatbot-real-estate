@@ -143,6 +143,7 @@ from .application.services.audit import (
 )
 from .application.pipelines.workflow import (
     RagQueryWorkflow,
+    RagQueryPipeline,
     QueryRejected,
     STEP_TIMEOUTS,
     GuardedEv,
@@ -155,6 +156,31 @@ from .application.pipelines.workflow import (
     MergedEv,
     GeneratedEv,
     parse_as_of,
+)
+from .application.pipelines.conv_workflow import (
+    RagRgreConvWorkflow,
+    RagQueryPipelineConv,
+    SSE_EVENT_ROUTING,
+)
+from .application.services.conv_state import (
+    ConvContext,
+    get_context,
+    mark_phone_given,
+    transition,
+    maybe_lead_cta_hint,
+    note_useful_turn,
+    conv_directive,
+    register_interest,
+    CTA_VARIANTS,
+)
+from .domain.services.conv_slots import (
+    extract_bedrooms,
+    extract_view,
+    extract_timeline,
+    extract_purpose,
+    extract_slots_deterministic,
+    extract_slots,
+    lead_prefill_note,
 )
 
 # Infrastructure exports

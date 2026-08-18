@@ -7,7 +7,7 @@ Routes:
   GET  /sources/{doc_id}— registry metadata + validity status
 
 Lifespan: no eager LightRAG init (pools are lazy; closed on shutdown).
-SSE event order: places -> sources -> facts -> token -> done (error before done on failure).
+SSE event order: routing -> places -> sources -> facts -> token -> done (error before done on failure).
 """
 
 from __future__ import annotations
@@ -77,6 +77,9 @@ class QueryResponse(BaseModel):
     routing: dict
     trace_id: str
     latency_ms: int
+    conv_state: str | None = None
+    conversation_directive: str | None = None
+    slots_prefill: str | None = None
 
 
 # SSE helpers.
@@ -197,18 +200,19 @@ def create_app() -> FastAPI:
 
     @app.post("/query", response_model=QueryResponse)
     async def query(req: QueryRequest, request: Request) -> "StreamingResponse | dict":
-        from api.application.pipelines.workflow import QueryRejected, RagQueryPipeline  # noqa: PLC0415
+        from api.application.pipelines.workflow import QueryRejected  # noqa: PLC0415
+        from api.application.pipelines.conv_workflow import RagQueryPipelineConv  # noqa: PLC0415
 
         accept = request.headers.get("accept") or ""
         if "text/event-stream" in accept:
-            pipe = RagQueryPipeline()
+            pipe = RagQueryPipelineConv()
             return StreamingResponse(
                 _sse_stream(pipe, req, req.as_of),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
         # JSON mode
-        pipe = RagQueryPipeline()
+        pipe = RagQueryPipelineConv()
         try:
             payload = await pipe.run(
                 req.query, req.session_id, req.as_of,

@@ -28,7 +28,7 @@ from llama_index.core.workflow import (
     step,
 )
 
-from api.infrastructure.config.config import get_settings as get_cfg
+from api import get_cfg
 from api.domain.services.utils import sha256_hex
 from api.application.services.audit import write_audit
 from api.domain.value_objects.constants import (
@@ -39,6 +39,7 @@ from api.domain.value_objects.constants import (
 )
 from api.infrastructure.dependencies import get_geo, get_reranker
 from api.application.services.generate import stream_answer
+from api.application.services.conv_state import conv_directive, get_context
 from api.domain.services.guard_input import GuardResult as InputGuardResult
 from api.domain.services.guard_input import guard_input, rule_screen
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
@@ -349,6 +350,11 @@ class RagQueryWorkflow(Workflow):
         await ctx.store.set("reranked_chunks", chunks)
 
         merged: Merged = await merge_context(guard.clean, chunks, sql_result.rows, as_of)
+        session_id = await ctx.store.get("session_id")
+        conv_dir = None
+        if session_id:
+            ctx_conv = get_context(session_id)
+            conv_dir = conv_directive(ctx_conv.state)
         merged.meta.update(
             query=guard.clean,
             rewritten=routed.rewritten,
@@ -360,6 +366,7 @@ class RagQueryWorkflow(Workflow):
                 for e in sql_result.rows
             ),
             strong_chunks=sum(1 for c in chunks if float(c.get("score", 0.0)) >= 0.8),
+            conversation_directive=conv_dir,
         )
         await ctx.store.set("merged", merged)
 

@@ -76,7 +76,22 @@ export interface QueryResponse {
   latency_ms: number;
 }
 
-export type SseEventName = "places" | "sources" | "facts" | "token" | "done" | "error";
+/** Payload of the SSE `routing` event (Story 4.5) — intent/panel + optional CTA hint. */
+export interface SseRoutingPayload {
+  intent: string;
+  conv_state: string;
+  panel_hint: "map" | "company" | "affordability" | "lead" | "none";
+  lead_cta_hint: string | null;
+}
+
+export type SseEventName =
+  | "routing"
+  | "places"
+  | "sources"
+  | "facts"
+  | "token"
+  | "done"
+  | "error";
 
 /** A single event in the SSE stream of `POST /api/query`. */
 export interface SseEvent {

@@ -261,8 +261,12 @@ async def guard_output(
     has_approx = bool(meta.get("has_approx", False))
     confidence = _confidence_3tier(numeric_pass, sql_row_count, strong_chunks, degraded, has_approx)
 
-    # (d) high_stakes flag (routing carries it for high-stakes legal answers)
+    # (d) high_stakes flag (routing carries it for high-stakes legal answers).
+    # Defensive: also accept a dict with attribute access / nested meta so a
+    # routing object from any path still escalates high-stakes correctly.
     high_stakes = bool((routing or {}).get("high_stakes"))
+    if not high_stakes and isinstance(routing, dict):
+        high_stakes = bool(routing.get("high_stakes") or meta.get("high_stakes"))
 
     # (e) story 4.2: contextual disclosure + robot-phrase (style checks, non-confidence)
     verdicts["disclosure"] = _contextual_disclosure_verdict(answer, has_approx, high_stakes)
