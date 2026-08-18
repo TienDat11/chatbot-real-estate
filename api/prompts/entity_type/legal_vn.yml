@@ -1,0 +1,42 @@
+# LightRAG entity extraction profile — Legal bất động sản Việt Nam (HF-0)
+# Schema: LightRAG 1.5.6 (prompt.py) — entity_types_guidance + entity_extraction_examples
+# (+ entity_extraction_json_examples for JSON mode). Resolved as <PROMPT_DIR>/entity_type/legal_vn.yml
+# (PROMPT_DIR defaults to api/prompts — see api/infrastructure/config/config.py export_runtime_env).
+# Chỉ định qua addon_params: {"language": "Vietnamese", "entity_type_prompt_file": "legal_vn.yml"}
+
+entity_types_guidance: |
+  Phân loại mỗi entity theo MỘT trong các loại sau. Nếu không loại nào khớp, dùng `Other`.
+
+  - VĂN_BẢN_PHÁP_LUẬT: văn bản quy phạm pháp luật — Luật, Nghị định, Thông tư, Nghị quyết, Quyết định (vd: Luật Đất đai 2024)
+  - ĐIỀU_KHOẢN: điều/khoản/điểm cụ thể trong văn bản (vd: Điều 123 Bộ luật Dân sự 2015)
+  - CƠ_QUAN_NHÀ_NƯỚC: cơ quan công quyền — Bộ, Sở, Tòa án, UBND, Văn phòng đăng ký đất đai, Chi cục thuế
+  - CHỦ_THỂ: cá nhân/tổ chức nắm quyền — chủ đầu tư, người mua, khách hàng, môi giới, pháp nhân
+  - TÀI_SẢN_BẤT_ĐỘNG_SẢN: thửa đất, căn hộ, nhà ở, dự án, sổ đỏ/Giấy chứng nhận (vd: căn A04-03, Tower A, THE CAMELLIA)
+  - GIAO_DỊCH: hành vi pháp lý — mua bán, chuyển nhượng, thế chấp, cầm cố, tặng cho, cho thuê, đặt cọc
+  - QUY_CHẾ: quy hoạch, hạn mức, thuế, phí, lệ phí trước bạ, điều kiện kinh doanh bất động sản
+  - TỔ_CHỨC_TÀI_CHÍNH: ngân hàng, tổ chức tín dụng, quỹ đầu tư, công ty bảo hiểm (nguồn chính sách vay)
+  - CHÍNH_SÁCH_VAY: lãi suất, thời hạn vay, tỷ lệ cho vay tối đa, ân hạn, phí trả nợ trước hạn
+  - THỜI_ĐIỂM: thời điểm pháp lý có ý nghĩa — ngày hiệu lực, thời hạn vay, ngày ra sổ, thời điểm bàn giao
+
+  Nguyên tắc: entity là danh từ riêng hoặc khái niệm pháp lý có định danh. KHÔNG trích số liệu
+  (giá/diện tích/lãi suất) làm entity — số nằm ở SQL facts layer, không đưa vào graph.
+
+entity_extraction_examples:
+  - |-
+    entity<|>Luật Đất đai 2024<|>VĂN_BẢN_PHÁP_LUẬT<|>Luật số 31/2024/QH15 điều chỉnh quyền sử dụng đất, hiệu lực từ 01/01/2025
+    relation<|>Luật Đất đai 2024<|>Giấy chứng nhận quyền sử dụng đất<|>quy-dinh<|>Luật quy định trình tự cấp Giấy chứng nhận
+    <DONE>
+  - |-
+    entity<|>Agribank<|>TỔ_CHỨC_TÀI_CHÍNH<|>Ngân hàng Nông nghiệp, tài trợ chính sách vay dự án THE CAMELLIA
+    entity<|>gói vay ưu đãi 0% 24 tháng<|>CHÍNH_SÁCH_VAY<|>lãi suất 0% trong 24 tháng, sau đó thả nổi theo lãi suất huy động
+    relation<|>Agribank<|>gói vay ưu đãi 0% 24 tháng<|>cung-cap<|>Agribank cung cấp gói vay ưu đãi
+    <DONE>
+  - |-
+    entity<|>căn A04-03<|>TÀI_SẢN_BẤT_ĐỘNG_SẢN<|>Căn hộ tầng 3 tòa A, diện tích 2PN, thuộc dự án THE CAMELLIA
+    entity<|>THE CAMELLIA<|>TÀI_SẢN_BẤT_ĐỘNG_SẢN<|>Dự án căn hộ tại Sơn Trà, Đà Nẵng
+    relation<|>căn A04-03<|>THE CAMELLIA<|>thuoc-du-an<|>căn hộ thuộc dự án THE CAMELLIA
+    <DONE>
+
+entity_extraction_json_examples:
+  - |-
+    {"entities": [{"name": "Luật Đất đai 2024", "type": "VĂN_BẢN_PHÁP_LUẬT", "description": "Luật số 31/2024/QH15 điều chỉnh quyền sử dụng đất"}, {"name": "Giấy chứng nhận quyền sử dụng đất", "type": "TÀI_SẢN_BẤT_ĐỘNG_SẢN", "description": "Sổ đỏ cấp cho người sử dụng đất"}], "relationships": [{"source": "Luật Đất đai 2024", "target": "Giấy chứng nhận quyền sử dụng đất", "keywords": "quy-dinh", "description": "Luật quy định trình tự cấp Giấy chứng nhận"}]}

@@ -132,11 +132,11 @@ def is_rejected(payload: dict) -> bool:
 
 
 # Vietnamese number parsing for numeric exact-match.
-    # Handles "2.000.000.000" / "2,000,000,000" / "2000000000" / "2 tỷ" / "1,2 tỷ" / "8,5%".
-    _VND_UNIT = {"nghìn": 1e3, "k": 1e3, "triệu": 1e6, "tr": 1e6, "tỷ": 1e9, "tỉ": 1e9}
-    # No \s: a space in the class lets the greedy match swallow adjacent numbers
-    # ("2.000.000.000 25%" merges into one token). Thousand separators are dot/comma, never space.
-    _NUM_TOKEN = r"[0-9][0-9\,\.]*[0-9]|[0-9]"
+# Handles "2.000.000.000" / "2,000,000,000" / "2000000000" / "2 tỷ" / "1,2 tỷ" / "8,5%".
+_VND_UNIT = {"nghìn": 1e3, "k": 1e3, "triệu": 1e6, "tr": 1e6, "tỷ": 1e9, "tỉ": 1e9}
+# No \s: a space in the class lets the greedy match swallow adjacent numbers
+# ("2.000.000.000 25%" merges into one token). Thousand separators are dot/comma, never space.
+_NUM_TOKEN = r"[0-9][0-9\,\.]*[0-9]|[0-9]"
 
 
 def _raw_to_float(raw: str) -> float:

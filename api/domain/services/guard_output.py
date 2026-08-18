@@ -27,6 +27,25 @@ _VN_UNITS = {
     "nghìn": Decimal("1e3"),
 }
 
+# --- Story 4.2: contextual disclosure + robot-phrase style checks (L4, non-confidence) ---
+# Disclosure keyword set for price/estimate answers (prompt §DISCLOSURE THEO NGỮ CẢNH).
+_PRICE_DISCLOSURE_KEYS = ("định hướng", "bảng hàng chính thức", "chưa xác nhận chính thức", "ước lượng")
+# High-stakes answers must steer to a specialist (prompt §DISCLOSURE rule 3).
+_HIGH_STAKES_DISCLOSURE_KEY = "chuyên viên"
+# Robot phrases banned by prompt §GIỌNG VĂN — flag style_warn only (never lowers confidence).
+_ROBOT_PHRASES = (
+    "dựa trên thông tin được cung cấp",
+    "như đã nêu ở trên",
+    "theo yêu cầu của bạn",
+    "tôi là ai",
+    "tôi là trợ lý ảo",
+    "hy vọng thông tin hữu ích",
+)
+# Em-dash banned in answers (prompt §GIỌNG VĂN) — style warning, not confidence.
+_EM_DASH = "—"
+# Price/estimate answer indicator: value words OR has_approx meta flag (set by workflow).
+_PRICE_HINT_RE = re.compile("(giá|tỷ đồng|triệu đồng|đồng\\s*\\(|định hướng|m²|m2)", re.IGNORECASE)
+
 
 @dataclass
 class GuardResult:
@@ -163,6 +182,56 @@ def _confidence_3tier(
     return "MEDIUM"
 
 
+def _contextual_disclosure_verdict(
+    answer: str,
+    has_approx: bool,
+    high_stakes: bool,
+) -> dict:
+    """Story 4.2 contextual disclosure (replaces always-on AI line check).
+
+    price/estimate answer -> must carry a disclosure keyword ("định hướng" ...);
+    high-stakes (cầm cố/công chứng/thuế) -> must steer to "chuyên viên";
+    normal answers -> no disclosure required (FE footer owns the always-on line).
+
+    Returns a verdict dict; never affects confidence (L4 grounding owns that).
+    """
+    low = (answer or "").lower()
+    is_price = has_approx or bool(_PRICE_HINT_RE.search(low))
+    missing: list[str] = []
+    if is_price:
+        if not any(k in low for k in _PRICE_DISCLOSURE_KEYS):
+            missing.append("price_disclosure")
+    if high_stakes and _HIGH_STAKES_DISCLOSURE_KEY not in low:
+        missing.append("specialist_steer")
+    verdict: dict = {
+        "status": "pass" if not missing else "fail",
+        "style_warn": bool(missing),  # compliance flag — does NOT lower confidence
+        "disclosure_scope": "price/estimate"
+        if is_price and not high_stakes
+        else "high_stakes"
+        if high_stakes
+        else "none",
+        "missing": missing,
+    }
+    return verdict
+
+
+def _robot_phrase_verdict(answer: str) -> dict:
+    """Story 4.2 robot-phrase scan (prompt §GIỌNG VĂN banned clusters) + em-dash check.
+
+    Flags style_warn only — confidence stays = numeric/citation grounding (plan §3.3.2).
+    """
+    low = (answer or "").lower()
+    hit = [p for p in _ROBOT_PHRASES if p in low]
+    em_dash = _EM_DASH in (answer or "")
+    return {
+        "status": "pass" if not hit and not em_dash else "warn",
+        "style_warn": bool(hit) or em_dash,
+        "robot_phrases": hit,
+        "em_dash": em_dash,
+    }
+
+
 async def guard_output(
     answer: str,
     facts: list[dict],
@@ -192,8 +261,14 @@ async def guard_output(
     has_approx = bool(meta.get("has_approx", False))
     confidence = _confidence_3tier(numeric_pass, sql_row_count, strong_chunks, degraded, has_approx)
 
-    # (d) requires_review: LOW + high_stakes keywords
+    # (d) high_stakes flag (routing carries it for high-stakes legal answers)
     high_stakes = bool((routing or {}).get("high_stakes"))
+
+    # (e) story 4.2: contextual disclosure + robot-phrase (style checks, non-confidence)
+    verdicts["disclosure"] = _contextual_disclosure_verdict(answer, has_approx, high_stakes)
+    verdicts["robot_phrase"] = _robot_phrase_verdict(answer)
+
+    # (f) requires_review: LOW + high_stakes keywords
     requires_review = confidence == "LOW" or high_stakes
     verdicts["high_stakes"] = high_stakes
     verdicts["confidence"] = confidence

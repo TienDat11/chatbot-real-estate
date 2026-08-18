@@ -13,7 +13,7 @@ from pathlib import Path
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[3]  # parents[3] = repo root (HF-0: stale parents[1] pointed at api/infrastructure, breaking .env load)
 _APP_ENV = os.getenv("APP_ENV", "dev")
 
 
@@ -54,6 +54,10 @@ class Settings(BaseSettings):
 
     # LightRAG storage
     lightrag_workspace: str = "ragre_mvp"
+
+    # Prompt assets — canonical api/prompts/ dir (HF-0). Exported as PROMPT_DIR so
+    # LightRAG 1.5.6 resolves entity_type/<file> under it (bare filename contract).
+    prompt_dir: str = str(_REPO_ROOT / "api" / "prompts")
 
     # Embedding (LOCK: text-embedding-v4, dims 1024 — a change means a full re-embed)
     embedding_binding: str = "dashscope"  # dashscope | aibox | local
@@ -166,6 +170,7 @@ def export_runtime_env(cfg: Settings | None = None) -> None:
         "POSTGRES_PASSWORD": resolved.postgres_password,
         "POSTGRES_DATABASE": resolved.postgres_database,
         "POSTGRES_MAX_CONNECTIONS": str(resolved.postgres_max_connections),
+        "PROMPT_DIR": resolved.prompt_dir,
     }.items():
         os.environ.setdefault(key, value)
 

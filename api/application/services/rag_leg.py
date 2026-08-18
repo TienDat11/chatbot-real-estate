@@ -86,7 +86,7 @@ def _make_query_param(hl: list[str], ll: list[str]) -> Any:
             max_total_tokens=tot,
             addon_params={
                 "language": "Vietnamese",
-                "entity_type_prompt_file": "prompts/entity_type/legal_vn.yml",
+                "entity_type_prompt_file": "legal_vn.yml",  # LightRAG 1.5.6: bare name under PROMPT_DIR/entity_type (HF-0)
             },
             entity_extraction_use_json=True,
         )
