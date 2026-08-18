@@ -11,10 +11,12 @@ import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
 import type { FactEvidence, Source } from "@rag-ragre/contracts";
 import { streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
-import type { ChatMessage } from "./MessageBubble";
+import type { ChatMessage } from "@/components/MessageBubble";
+import { AccessibilityControls } from "@/components/AccessibilityControls";
+import { warmPrefetchCache } from "@/lib/prefetch";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
-import { EvidencePanel } from "./EvidencePanel";
+import { EvidencePanel } from "@/components/EvidencePanel";
 
 const SESSION_KEY = "ragre.session_id";
 const MAX_TURNS = 4;
@@ -55,6 +57,8 @@ function ChatCanvas() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const sessionIdRef = useRef<string>("");
+  const tokenBufferRef = useRef("");
+  const flushTimerRef = useRef<number | null>(null);
   const [evidence, setEvidence] = useState<{ sources: Source[]; facts: FactEvidence[]; messageId?: string }>({
     sources: [],
     facts: [],
@@ -62,6 +66,7 @@ function ChatCanvas() {
 
   useEffect(() => {
     sessionIdRef.current = getSessionId();
+    warmPrefetchCache();
   }, []);
 
   const patchMessage = useCallback(
@@ -100,21 +105,43 @@ function ChatCanvas() {
       setStreaming(true);
       setInput("");
 
+      const flushTokens = () => {
+        if (tokenBufferRef.current) {
+          const chunk = tokenBufferRef.current;
+          tokenBufferRef.current = "";
+          patchMessage(assistantId, (m) => ({ content: m.content + chunk }));
+        }
+        flushTimerRef.current = null;
+      };
       void streamQuery(
         { query, session_id: sessionIdRef.current, history },
         {
+          onAck: () => {
+            patchMessage(assistantId, { acknowledged: true });
+          },
+          onRouting: () => {
+            patchMessage(assistantId, { progressStep: 0 });
+          },
           onSources: (sources) => {
-            patchMessage(assistantId, { sources });
+            patchMessage(assistantId, { sources, progressStep: 1 });
             setEvidence((e) => ({ sources, facts: e.facts, messageId: assistantId }));
           },
           onFacts: (facts) => {
-            patchMessage(assistantId, { facts });
+            patchMessage(assistantId, { facts, progressStep: 2 });
             setEvidence((e) => ({ sources: e.sources, facts, messageId: assistantId }));
           },
           onToken: (token) => {
-            patchMessage(assistantId, (m) => ({ content: m.content + token }));
+            tokenBufferRef.current += token;
+            patchMessage(assistantId, { progressStep: 3 });
+            if (flushTimerRef.current === null) {
+              flushTimerRef.current = window.setTimeout(flushTokens, 60);
+            }
           },
           onDone: (meta) => {
+            if (flushTimerRef.current !== null) {
+              window.clearTimeout(flushTimerRef.current);
+              flushTokens();
+            }
             patchMessage(assistantId, {
               streaming: false,
               confidence: meta.confidence,
@@ -125,6 +152,10 @@ function ChatCanvas() {
             setStreaming(false);
           },
           onError: (err) => {
+            if (flushTimerRef.current !== null) {
+              window.clearTimeout(flushTimerRef.current);
+              flushTokens();
+            }
             patchMessage(assistantId, { streaming: false, error: true, content: err.message });
             message.error(err.message);
             setStreaming(false);
@@ -209,6 +240,9 @@ function ChatCanvas() {
               AI hỗ trợ
             </span>
           </Typography.Text>
+        </div>
+        <div style={{ marginLeft: "auto" }}>
+          <AccessibilityControls />
         </div>
       </header>
 

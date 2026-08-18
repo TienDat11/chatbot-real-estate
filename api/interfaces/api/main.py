@@ -108,6 +108,8 @@ async def _sse_stream(pipe, req: QueryRequest, as_of: str | None) -> AsyncIterat
             logger.exception("sse pipeline crashed")
             await q.put(("__crashed__", {"message": str(exc)}))
 
+    # Emit ack immediately so FE shows zero-latency feedback (< 100ms)
+    yield _frame("ack", {"received": True, "ts": int(asyncio.get_event_loop().time() * 1000)})
     task = asyncio.create_task(run_pipe())
     try:
         while True:
