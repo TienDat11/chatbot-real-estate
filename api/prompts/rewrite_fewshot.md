@@ -92,6 +92,68 @@ Query: "căn A10-01 vay bank nào được trả trước 25%?"
 }
 ```
 
+## Example 6 — Khẩu ngữ + typo (người 45-70): "nhà 2 ngủ buzview biển còn không con"
+History: []
+Query: "nhà 2 ngủ buzview biển còn không con"
+```json
+{
+  "rewritten_query": "Căn hộ 2 phòng ngủ view biển còn căn nào không?",
+  "routing": {"needs_rag": true, "needs_sql": false, "structured_path": "none"},
+  "sql_spec": null,
+  "hl_keywords": ["2PN", "view biển"], "ll_keywords": ["2 phòng ngủ", "view biển", "còn căn"],
+  "high_stakes": false, "as_of": null
+}
+```
+
+## Example 7 — Khẩu ngữ budget: "tụi tui có 3 tỉ thôi mua được gì hông"
+History: []
+Query: "tụi tui có 3 tỉ thôi mua được gì hông"
+```json
+{
+  "rewritten_query": "Với ngân sách 3 tỷ đồng, có thể mua được căn hộ nào?",
+  "routing": {"needs_rag": false, "needs_sql": true, "structured_path": "spec"},
+  "sql_spec": {
+    "subject_type": "unit", "source": "v_unit_offers",
+    "filters": [{"field": "required_down_payment_vnd", "op": "<=", "value": 3000000000}],
+    "order_by": {"field": "required_down_payment_vnd", "dir": "asc"},
+    "limit": 10
+  },
+  "hl_keywords": [], "ll_keywords": ["3 tỷ", "ngân sách"],
+  "high_stakes": false, "as_of": null
+}
+```
+
+## Example 8 — Khẩu ngữ financing (KHÔNG high-stakes): "trả góp 0% là sao, có bị lừa hông"
+History: []
+Query: "trả góp 0% là sao, có bị lừa hông"
+```json
+{
+  "rewritten_query": "Chính sách trả góp 0% của dự án là gì, có rủi ro gì không?",
+  "routing": {"needs_rag": true, "needs_sql": false, "structured_path": "none"},
+  "sql_spec": null,
+  "hl_keywords": ["HTLS", "0%"], "ll_keywords": ["trả góp 0%", "rủi ro"],
+  "high_stakes": false, "as_of": null
+}
+```
+
+## Example 9 — Khẩu ngữ pricing tier: "tầng mấy đẹp nhất giá tốt"
+History: []
+Query: "tầng mấy đẹp nhất giá tốt"
+```json
+{
+  "rewritten_query": "Tầng nào của dự án có view đẹp nhất và giá tốt nhất?",
+  "routing": {"needs_rag": true, "needs_sql": true, "structured_path": "spec"},
+  "sql_spec": {
+    "subject_type": "unit", "source": "facts",
+    "filters": [],
+    "order_by": {"field": "price_vnd", "dir": "asc"},
+    "limit": 10
+  },
+  "hl_keywords": [], "ll_keywords": ["tầng", "view đẹp", "giá tốt"],
+  "high_stakes": false, "as_of": null
+}
+```
+
 ## LUẬT CHƠI
 - Nếu không thể route → `structured_path: "none"`, `needs_rag: true` (fallback an toàn).
 - Số luôn là số nguyên (vnd) hoặc float (pct); KHÔNG để chữ "tỷ" trong value.

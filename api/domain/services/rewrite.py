@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..value_objects.constants import LLM_CALL_TIMEOUT_S
+from .synonyms import enrich_hl_keywords
 from api.infrastructure.dependencies import llm, model_for_role
 
 logger = logging.getLogger("api.rewrite")
@@ -198,6 +199,11 @@ def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> Ro
         ll = [ll]
     hl = [str(k) for k in hl if k]
     ll = [str(k) for k in ll if k]
+
+    # Story 4.4 (R7): enrich hl_keywords with canonical sales synonyms so
+    # colloquial phrasings ("nhà 2 ngủ", "hướng biển", "trả góp 0%") still
+    # drive the RAG hybrid retrieval. ADD-only — never replaces LLM output.
+    hl = enrich_hl_keywords(query, hl)
 
     high_stakes = bool(data.get("high_stakes", False)) or _has_high_stakes(query)
 

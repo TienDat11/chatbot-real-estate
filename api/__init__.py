@@ -182,6 +182,10 @@ from .domain.services.conv_slots import (
     extract_slots,
     lead_prefill_note,
 )
+from .domain.services.synonyms import (
+    SALES_SYNONYMS,
+    enrich_hl_keywords,
+)
 
 # Infrastructure exports
 from .infrastructure.config.config import (
