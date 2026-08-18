@@ -1,0 +1,37 @@
+{
+  "version": "persona_v1",
+  "created": "2026-08-18",
+  "gate": "persona 15/15 PASS (hoac 14/15 + waiver) la dieu kien done cua 5.4 FE integration",
+  "note": "Story 4.7 §8.1. Chay voi run_eval.py --persona (regex/structure, KHONG can LLM-judge de dry PASS). 1/3 case co history 2 turn. History [[user, assistant]] la 1 cap luot truoc.",
+  "expect_schema": {
+    "has_direct_answer": "bool - tra loi truc tiep thu khach hoi",
+    "has_citation": "bool - co citation [fe-xxx]",
+    "next_step_questions": "0|1 - dung MOT cau tien trien/luot",
+    "no_em_dash": "bool - khong em-dash —",
+    "no_robot_phrase": "bool - khong cum may moc (Dua tren thong tin..., Nhu da neu o tren..., Toi la AI...)",
+    "disclosure_type": "price|estimate|high_stakes|none",
+    "cta_allowed": "bool - CTA du dieu kien B1/B5"
+  },
+  "questions": [
+    {"id": "per-01", "category": "objection", "question": "giá căn hộ đắt quá, có dự án nào rẻ hơn không", "history": [], "note": "objection #1 gia cao -> gtri vi tri + HTLS; KHONG hua giam gia ngoai CK", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "price", "cta_allowed": false}},
+    {"id": "per-02", "category": "objection", "question": "tôi sợ pháp lý, dự án đã có sổ chưa", "history": [], "note": "objection #2 so phap ly -> GCN CT09441 + QD 254; high-stakes steer nhe; KHONG '100% an toan'", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "high_stakes", "cta_allowed": false}},
+    {"id": "per-03", "category": "objection", "question": "để tôi suy nghĩ thêm đã", "history": [], "note": "objection #3 de suy nghi -> dong cam + moi xem thuc te; KHONG ep deadline bia", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "none", "cta_allowed": false}},
+    {"id": "per-04", "category": "objection", "question": "vốn tôi có ít, chỉ khoảng 500 triệu có mua được không", "history": [], "note": "objection #4 von it -> HTLS vay 70% hoac thảnh thơi 50%; cọc 100tr", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "estimate", "cta_allowed": false}},
+    {"id": "per-05", "category": "objection", "question": "mua đầu tư cho thuê thì có lời không", "history": [], "note": "objection #7 dau tu cho thue -> Studio/1.5PN, CBRE/PMC; KHONG hua suat thue/ty le sinh loi", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "none", "cta_allowed": false}},
+
+    {"id": "per-06", "category": "affordability", "question": "2 phòng ngủ view biển giá bao nhiêu", "history": [], "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "price", "cta_allowed": false}},
+    {"id": "per-07", "category": "affordability", "question": "tôi có 3 tỷ mua được căn nào", "history": [], "note": "affordability deterministic leg -> v_unit_estimates", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "price", "cta_allowed": false}},
+    {"id": "per-08", "category": "affordability", "question": "căn studio trả trước bao nhiêu", "history": [], "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "price", "cta_allowed": false}},
+    {"id": "per-09", "category": "affordability", "question": "trả góp 0% 18 tháng vay tối đa bao nhiêu %", "history": [], "note": "HTLS 0%/18th, vay toi da 70%", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "estimate", "cta_allowed": false}},
+
+    {"id": "per-10", "category": "legal", "question": "cầm cố sổ đỏ để vay mua có được không", "history": [], "note": "high-stakes -> recommend xac nhan voi chuyen vien phap ly + steer nhe", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "high_stakes", "cta_allowed": false}},
+    {"id": "per-11", "category": "legal", "question": "khách nước ngoài có mua được dự án này không", "history": [], "note": "QnA P4 Q7: khong ban cho nguoi nuoc ngoai", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "none", "cta_allowed": false}},
+    {"id": "per-12", "category": "legal", "question": "sau bàn giao bao lâu có sổ", "history": [], "note": "50 ngay la han CDT gui ho so (K3 D17 LKDBDS 2023)", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "high_stakes", "cta_allowed": false}},
+
+    {"id": "per-13", "category": "greeting", "question": "chào bạn, dự án có gì hot không", "history": [], "note": "chao/small-talk -> chao am + tra loi gan + 1 cau hoi mo", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "none", "cta_allowed": false}},
+    {"id": "per-14", "category": "greeting", "question": "xin chào, cho em hỏi chút", "history": [["chào bạn", "Chào anh/chị, em là chuyên viên tư vấn dự án The Camellia. Anh/chị cần em hỗ trợ gì ạ?"]], "note": "2-turn history: anaphora 'cho em hoi chut' -> mo cau nhu cau", "expect": {"has_direct_answer": true, "has_citation": true, "next_step_questions": 1, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "none", "cta_allowed": false}},
+
+    {"id": "per-15", "category": "refusal", "question": "bạn có biết tin tức chứng khoán không", "history": [], "note": "off-topic -> tu choi nhe nhang, khong bia", "expect": {"has_direct_answer": true, "has_citation": false, "next_step_questions": 0, "no_em_dash": true, "no_robot_phrase": true, "disclosure_type": "none", "cta_allowed": false}}
+  ]
+}
+

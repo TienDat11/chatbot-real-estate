@@ -74,11 +74,19 @@ except Exception:  # noqa: BLE001
     RagQueryPipeline = None
 
 
-async def run_pipeline(pipeline: Any, question: str, as_of: Optional[str], settings: EvalSettings) -> dict:
+async def run_pipeline(
+    pipeline: Any,
+    question: str,
+    as_of: Optional[str],
+    settings: EvalSettings,
+    history: Optional[list] = None,
+) -> dict:
     """Invoke the pipeline across several calling shapes (spike: verify the real signature)."""
     kwargs: dict[str, Any] = {"query": question}
     if as_of:
         kwargs["as_of"] = as_of
+    if history:
+        kwargs["history"] = history
     if hasattr(pipeline, "query"):
         try:
             return await pipeline.query(**kwargs)
@@ -554,6 +562,186 @@ async def evaluate_question(
     return res
 
 
+# --- Persona eval (Story 4.7 §8.2): regex/structure, no LLM-judge ---
+_ROBOT_PHRASES = (
+    "dựa trên thông tin được cung cấp",
+    "như đã nêu ở trên",
+    "theo yêu cầu của bạn",
+    "tôi là ai/trợ lý ảo",
+    "tôi là ai",
+    "trợ lý ảo",
+    "hy vọng thông tin hữu ích",
+)
+_EM_DASH = "—"
+
+
+# Disclosure markers keyed by expected disclosure_type (answer text heuristics).
+_DISCLOSURE_MARKERS = {
+    "price": ("giá định hướng", "bảng giá", "giá bán"),
+    "estimate": ("ước lượng", "chưa xác nhận chính thức", "khoảng"),
+    "high_stakes": ("xác nhận với chuyên viên pháp lý", "chuyên viên pháp lý", "cầm cố", "pháp luật"),
+    "none": (),
+}
+# CTA invite heuristics: a soft consult invite (Epic 5.7 touchpoint "~5 phút").
+_CTA_INVITE = ("để lại số", "gọi lại", "gọi tư vấn", "chuyên viên gọi", "nhận tư vấn", "tư vấn phù hợp")
+_HARD_CLOSE = ("ký ngay", "chốt ngay", "mua ngay", "đặt cọc ngay")
+
+
+def _persona_checks(answer: str, expect: dict) -> list[str]:
+    """Return failing persona rules for one answer against its expect block."""
+    fails: list[str] = []
+    low = (answer or "").lower()
+
+    if expect.get("has_direct_answer") and not answer.strip():
+        fails.append("has_direct_answer: answer rỗng")
+
+    if expect.get("has_citation") and "[fe-" not in answer:
+        fails.append("has_citation: thiếu [fe-xxx]")
+    if expect.get("has_citation") is False and "[fe-" in answer:
+        # off-topic refusal must not fabricate citations
+        fails.append("has_citation=False: refusal lại có citation")
+
+    if expect.get("no_em_dash") and _EM_DASH in answer:
+        fails.append("no_em_dash: xuất hi em-dash —")
+
+    if expect.get("no_robot_phrase"):
+        for p in _ROBOT_PHRASES:
+            if p in low:
+                fails.append(f"no_robot_phrase: '{p}'")
+
+    # next_step_questions: 0|1 — đếm câu hỏi thật (kết thúc bằng '?', không đếm '? bên trong câu trích/lãi suất '?0%').
+    nq = expect.get("next_step_questions")
+    if nq is not None:
+        q_count = _count_likely_questions(answer)
+        if nq == 0 and q_count > 0:
+            fails.append(f"next_step_questions=0 nhưng có {q_count} dấu hỏi")
+        if nq == 1 and q_count > 1:
+            fails.append(f"next_step_questions=1 nhưng có {q_count} dấu hỏi (>1)")
+
+    # Story 4.7 gate: answer must carry the expected disclosure marker (if any).
+    want_dt = expect.get("disclosure_type")
+    if want_dt == "none":
+        for dt, markers in _DISCLOSURE_MARKERS.items():
+            if dt == "none":
+                continue
+            if any(m in low for m in markers):
+                fails.append(f"disclosure_type: want=none nhưng thấy marker {dt}")
+                break
+    elif want_dt and any(m in low for m in _DISCLOSURE_MARKERS.get(want_dt, ())) is False:
+        fails.append(f"disclosure_type: thiếu marker cho {want_dt}")
+
+    # CTA policy: cta_allowed=True cần lời mời mềm; cta_allowed=False không được hard-close.
+    has_invite = any(m in low for m in _CTA_INVITE)
+    has_hard = any(m in low for m in _HARD_CLOSE)
+    cta = expect.get("cta_allowed")
+    if cta is True and not has_invite:
+        fails.append("cta_allowed=True nhưng không có lời mời mềm")
+    if cta is False and has_hard:
+        fails.append("cta_allowed=False nhưng có hard-close")
+
+    return fails
+
+
+def _count_likely_questions(answer: str) -> int:
+    """Count trailing-? question marks, ignoring '?0%' style (percent) occurrences."""
+    import re as _re
+
+    stripped = _re.sub(r"\?\s*%", "", answer or "")  # "?0%" / "? 5%" are not questions
+    return stripped.count("?")
+
+
+_MOCK_DISCLOSURE = {
+    "price": "(giá định hướng)",
+    "estimate": "(ước lượng)",
+    "high_stakes": "(xác nhận với chuyên viên pháp lý)",
+    "none": "",
+}
+
+
+def _persona_mock_answer(q: dict) -> str:
+    """Deterministic hint answer that satisfies a persona expect (--dry only)."""
+    expect = q.get("expect") or {}
+    none = expect.get("disclosure_type") == "none"
+    if expect.get("has_citation") is False:
+        # refusal: no citation and no disclosure marker (disclosure_type must be none)
+        a = "Chào anh/chị, việc này nằm ngoài phạm vi tư vấn dự án của em."
+        if expect.get("next_step_questions") == 1:
+            a += " Anh/chị có thắc mắc gì về dự án là em hỗ trợ nhé?"
+        return a
+    marker = _MOCK_DISCLOSURE.get(expect.get("disclosure_type"), "") if not none else ""
+    a = f"Chào anh/chị, em xin thông tin chính xác theo hồ sơ dự án {marker} [fe-0001]. "
+    if expect.get("next_step_questions") == 1:
+        # marker-neutral (tránh từ 'khoảng' khi disclosure_type=none, vì là estimate marker)
+        a += " Anh/chị cho em biết ngân sách dự kiến thì em tư vấn kỹ hơn nhé?"
+    if expect.get("cta_allowed"):
+        a += " Anh/chị để lại số để chuyên viên gọi lại tư vấn nhé."
+    return a
+
+
+async def eval_persona(pipeline: Any, settings: EvalSettings, dry: bool) -> dict:
+    """Story 4.7: run golden_persona_v1.json, regex/structure checks, no judge.
+
+    Gate §8.4: pass khi 15/15, hoặc 14/15 + waiver (waiver do người chạy quyết
+    định — ghi rõ trong kết quả để người duyệt chấp nhận).
+    """
+    path = REPO_ROOT / "eval" / "golden_persona_v1.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    rows: list[dict] = []
+    for q in data["questions"]:
+        start = time.perf_counter()
+        if dry:
+            payload = {"answer": _persona_mock_answer(q)}
+        else:
+            try:
+                payload = await asyncio.wait_for(
+                    run_pipeline(
+                        pipeline,
+                        q["question"],
+                        q.get("as_of"),
+                        settings,
+                        history=_persona_history(q),
+                    ),
+                    timeout=settings.pipeline_timeout_s,
+                )
+            except Exception as exc:  # noqa: BLE001
+                payload = {"answer": "", "error": str(exc)}
+        answer = str(payload.get("answer") or "")
+        latency = (time.perf_counter() - start) * 1000.0
+        fails = _persona_checks(answer, q.get("expect") or {})
+        if payload.get("error"):
+            fails.append(payload["error"])
+        rows.append({
+            "id": q["id"],
+            "category": q.get("category", ""),
+            "question": q["question"],
+            "pass": not fails,
+            "fails": fails,
+            "latency_ms": round(latency, 1),
+        })
+    n_ok = sum(1 for r in rows if r["pass"])
+    # Gate §8.4: 15/15 pass, hoặc 14/15 + waiver (waiver do người duyệt chấp nhận).
+    waiver = n_ok == len(rows) - 1 and len(rows) >= 15
+    return {
+        "rows": rows,
+        "pass_count": n_ok,
+        "total": len(rows),
+        "pass": n_ok == len(rows) or waiver,
+        "waiver": waiver,
+    }
+
+
+def _persona_history(q: dict) -> Optional[list]:
+    """Convert golden [[user, assistant], ...] history to pipeline history dicts."""
+    raw = q.get("history") or []
+    out: list[dict] = []
+    for pair in raw:
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            out.append({"role": "user", "content": str(pair[0])})
+            out.append({"role": "assistant", "content": str(pair[1])})
+    return out or None
+
+
+
 def _pass_rate(results: list[QuestionResult]) -> dict[str, float]:
     total = len(results)
     if total == 0:
@@ -669,6 +857,25 @@ def _print_failures(results: list[QuestionResult]) -> None:
 # Main
 async def amain(args: argparse.Namespace, settings: EvalSettings) -> int:
     dry = args.dry
+    if getattr(args, "persona", False):
+        pipeline: Any = MockPipeline({"questions": []}) if dry else _build_pipeline(settings)
+        result = await eval_persona(pipeline, settings, dry)
+        for row in result["rows"]:
+            mark = "PASS" if row["pass"] else "FAIL"
+            print(
+                f"  {mark} [{row['id']}] {row['category']:<16} "
+                f"{round(row['latency_ms']):>6}ms {row['question'][:44]}"
+            )
+            for f in row["fails"]:
+                print(f"        - {f}")
+        print(
+            f"\npersona: {result['pass_count']}/{result['total']} PASS "
+            f"(gate §8.4: 15/15 hoặc 14/15 + waiver) → {'PASS' if result['pass'] else 'FAIL'}"
+        )
+        if args.json_out:
+            Path(args.json_out).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0 if result["pass"] else 1
+
     if args.inject:
         pipeline: Any = MockPipeline({"questions": []}) if dry else _build_pipeline(settings)
         result = await eval_injection(pipeline, settings, dry)
@@ -771,6 +978,7 @@ def main() -> int:
     parser.add_argument("--only-category", default=None, help="chỉ chạy 1 category (legal/fact_affordability/...)")
     parser.add_argument("--dry", action="store_true", help="mock pipeline + mock judge (CI, định thức)")
     parser.add_argument("--inject", action="store_true", help="chạy injection_test_vn.json thay cho golden set")
+    parser.add_argument("--persona", action="store_true", help="chạy golden_persona_v1.json (Story 4.7, regex/structure, ko LLM-judge)")
     parser.add_argument("--json-out", default=None, help="ghi kết quả JSON")
     parser.add_argument("--fail-fast", action="store_true", help="exit code 1 nếu có câu fail")
     args = parser.parse_args()

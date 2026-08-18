@@ -24,6 +24,7 @@ class LLMChatPort(Protocol):
         messages: Sequence[dict],
         *,
         model: str | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[str]: ...
 
     async def aclose(self) -> None: ...
