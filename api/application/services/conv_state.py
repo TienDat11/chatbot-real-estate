@@ -37,6 +37,7 @@ class _LRU(dict):
 
 
 _LRU_CACHE: _LRU = _LRU()
+_ANON_SEQ = [0]  # monotonic counter for anonymous session keys
 
 
 @dataclass
@@ -67,8 +68,16 @@ _PURPOSE_INVEST = ("đầu tư", "cho thuê", "kinh doanh", "lướt sóng", "mu
 
 # --- LRU access -------------------------------------------------------------
 
-def get_context(session_id: str) -> ConvContext:
-    """Return the live context, creating a fresh one when absent/expired."""
+def get_context(session_id: "str | None") -> ConvContext:
+    """Return the live context, creating a fresh one when absent/expired.
+
+    Guards against None/empty session_id (edge-case): a missing id must never
+    collapse into a shared cache key — each anonymous caller gets its own
+    context, so no cross-session state bleed.
+    """
+    if not session_id:
+        _ANON_SEQ[0] += 1
+        session_id = f"anon-{_ANON_SEQ[0]}-{time.time_ns()}"
     now = time.time()
     _LRU_CACHE.touch(session_id)
     ctx = _LRU_CACHE.get(session_id)

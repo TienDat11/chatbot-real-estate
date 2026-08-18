@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from api.domain.entities.price_calc import extract_budget
+from api.infrastructure.dependencies import get_llm, model_for_role
 
 
 def _clean_json(text: str) -> str:
@@ -29,12 +30,11 @@ def _clean_json(text: str) -> str:
     if start >= 0 and end > start:
         return t[start : end + 1]
     return t
-from api.infrastructure.dependencies import get_llm, model_for_role
 
 logger = logging.getLogger("api.conv_slots")
 
 # Plan §6.3 keyword sets (conv-specific; budget reuses price_calc).
-_BEDROOM_RE = re.compile(r"(studio|1\s?pn|1\s?phòng ngủ|2\s?pn|2\s?phòng ngủ|3\s?pn|3\s?phòng ngủ)", re.IGNORECASE)
+_BEDROOM_RE = re.compile(r"(\bstudio\b|\b[123]\s?pn\b|\b[123]\s?phòng ngủ\b)", re.IGNORECASE)
 _VIEW_KEYWORDS = ("view biển", "view hồ bơi", "view hồ", "view núi", "view sông", "hồ bơi", "biển", "công viên", "nội khu")
 _TIMELINE_KEYWORDS = ("gấp", "tháng này", "cuối năm", "sau tết", "trong năm nay", "năm sau", "sang năm")
 _PURPOSE_STAY = ("ở thật", "an cư", "để ở", "tự ở", "làm nhà", "gia đình ở", "để gia đình")
@@ -69,12 +69,17 @@ def extract_timeline(query: str) -> "str | None":
 
 def extract_purpose(query: str) -> "str | None":
     q = (query or "").lower()
-    for kw in _PURPOSE_INVEST:
-        if kw in q:
-            return "invest"
+    # Negation-aware: "không đầu tư" must never produce invest.
+    if re.search(r"không\s+(đầu tư|mua đầu tư)", q):
+        q_clean = re.sub(r"không\s+(đầu tư|mua đầu tư)\s*", " ", q)
+    else:
+        q_clean = q
     for kw in _PURPOSE_STAY:
-        if kw in q:
+        if kw in q_clean:
             return "stay"
+    for kw in _PURPOSE_INVEST:
+        if kw in q_clean:
+            return "invest"
     return None
 
 
@@ -154,8 +159,13 @@ def lead_prefill_note(slots: "dict[str, Any]") -> str:
     """§6.3 note for POST /api/lead prefill, e.g. Ngân sách: 4 tỷ · Quan tâm: 2PN."""
     parts: list[str] = []
     budget = slots.get("budget_vnd")
-    if budget:
-        parts.append(f"Ngân sách: {budget/1e9:.0f} tỷ" if budget >= 1e9 else f"Ngân sách: {budget/1e6:.0f} triệu")
+    if isinstance(budget, (int, float)) and budget > 0:
+        if budget >= 1e9:
+            val = f"{budget/1e9:.1f}".rstrip("0").rstrip(".")
+            parts.append(f"Ngân sách: {val} tỷ")
+        else:
+            val = f"{budget/1e6:.0f}"
+            parts.append(f"Ngân sách: {val} triệu")
     if slots.get("bedrooms"):
         parts.append(f"Quan tâm: {slots['bedrooms']}")
     if slots.get("view"):

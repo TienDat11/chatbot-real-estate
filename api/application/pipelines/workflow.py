@@ -39,6 +39,7 @@ from api.domain.value_objects.constants import (
 )
 from api.infrastructure.dependencies import get_geo, get_reranker
 from api.application.services.generate import stream_answer
+from api.application.services.conv_state import conv_directive, get_context
 from api.domain.services.guard_input import GuardResult as InputGuardResult
 from api.domain.services.guard_input import guard_input, rule_screen
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
@@ -352,7 +353,6 @@ class RagQueryWorkflow(Workflow):
         session_id = await ctx.store.get("session_id")
         conv_dir = None
         if session_id:
-            from api.application.services.conv_state import get_context, conv_directive
             ctx_conv = get_context(session_id)
             conv_dir = conv_directive(ctx_conv.state)
         merged.meta.update(
