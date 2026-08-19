@@ -1,5 +1,7 @@
 "use client";
 
+import { C } from "@/lib/tokens";
+
 /**
  * AckChip — zero-latency "AI đã nhận câu hỏi" feedback.
  * Shown in the assistant bubble as soon as the `ack` SSE event fires (< 100ms),
@@ -21,9 +23,9 @@ export function AckChip({ visible }: AckChipProps) {
         display: "inline-flex",
         alignItems: "center",
         gap: 8,
-        background: "#EAF2FF",
-        border: "1px solid #D7E4FF",
-        color: "#1F46A8",
+        background: C.primarySoft,
+        border: "1px solid " + C.primaryBorder,
+        color: C.primary,
         borderRadius: 999,
         padding: "6px 12px",
         fontSize: 13,
@@ -32,9 +34,9 @@ export function AckChip({ visible }: AckChipProps) {
       }}
     >
       <span aria-hidden="true" style={{ display: "inline-flex", gap: 3 }}>
-        <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#1F46A8" }} />
-        <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#1F46A8" }} />
-        <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#1F46A8" }} />
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.primary }} />
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.primary }} />
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: C.primary }} />
       </span>
       AI đã nhận câu hỏi
     </div>

@@ -106,6 +106,9 @@ export function MapPanel({
 
   const keyOf = (p: NearbyPlace, i: number) => `${p.name}#${i}`;
 
+  // Bumped when the map style finishes loading so the marker effect re-runs.
+  const [markerTick, setMarkerTick] = useState(0);
+
   /* Build the Map once (client-only dynamic import). */
   useEffect(() => {
     const el = containerRef.current;
@@ -135,10 +138,7 @@ export function MapPanel({
       map.on("load", () => setMarkerTick((t) => t + 1));
     })();
     return () => { disposed = true; if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tileUrl, project.lng, project.lat, mode]);
-
-  const [markerTick, setMarkerTick] = useState(0);
 
   /* Recreate markers when data/filter/map become ready. */
   useEffect(() => {
@@ -173,7 +173,6 @@ export function MapPanel({
         markersRef.current.push(new maplibre.Marker({ element: el }).setLngLat([p.lng, p.lat]).addTo(mapRefHere));
       });
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, filtered, markerTick, project, places]);
 
   /* Clean up highlight timer on unmount. */
