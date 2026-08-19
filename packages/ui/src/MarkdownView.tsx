@@ -13,7 +13,7 @@ export interface MarkdownViewProps {
  */
 export function MarkdownView({ content, className }: MarkdownViewProps) {
   return (
-    <Typography style={{ fontSize: 14, lineHeight: "24px" }} className={className}>
+    <Typography style={{ fontSize: "var(--fs-body, 14px)", lineHeight: "var(--fs-body-line, 24px)" }} className={className}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
         {content}
       </ReactMarkdown>

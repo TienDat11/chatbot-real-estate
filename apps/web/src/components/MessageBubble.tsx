@@ -2,6 +2,8 @@ import type { Confidence, FactEvidence, Source } from "@rag-ragre/contracts";
 import { ConfidenceBadge, ReviewBanner, SourcesList, FactsTable, MarkdownView } from "@rag-ragre/ui";
 import { Typography } from "antd";
 import { cn, formatLatency } from "@/lib/utils";
+import { AckChip } from "./AckChip";
+import { ProgressSteps } from "./ProgressSteps";
 
 export interface ChatMessage {
   id: string;
@@ -14,6 +16,8 @@ export interface ChatMessage {
   traceId?: string;
   latencyMs?: number;
   streaming?: boolean;
+  acknowledged?: boolean;
+  progressStep?: number;
   error?: boolean;
 }
 
@@ -40,8 +44,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             color: "#FFFFFF",
             borderRadius: "14px 14px 4px 14px",
             padding: "10px 14px",
-            fontSize: 14,
-            lineHeight: "22px",
+            fontSize: "var(--fs-body, 14px)",
+            lineHeight: "var(--fs-body-line, 22px)",
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
             boxShadow: "0 1px 3px rgba(31,70,168,0.2)",
@@ -78,10 +82,21 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             {message.facts && message.facts.length > 0 && (
               <FactSection facts={message.facts} />
             )}
-            <MarkdownView
-              content={message.content}
-              className={cn(message.streaming && "typing-caret")}
-            />
+            {message.streaming && !message.content ? (
+              <div className="streaming-placeholder">
+                <AckChip visible={!!message.acknowledged} />
+                {message.acknowledged && (
+                  <div style={{ marginTop: 12 }}>
+                    <ProgressSteps activeStep={message.progressStep ?? 0} />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <MarkdownView
+                content={message.content}
+                className={cn(message.streaming && "typing-caret")}
+              />
+            )}
             {message.confidence && !message.streaming && (
               <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <ConfidenceBadge confidence={message.confidence} />
