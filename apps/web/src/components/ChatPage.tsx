@@ -5,16 +5,18 @@
 import "@ant-design/v5-patch-for-react-19";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { App as AntApp, Typography } from "antd";
+import { App as AntApp, Segmented, Typography } from "antd";
 import { SafetyCertificateOutlined } from "@ant-design/icons";
 import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
-import type { FactEvidence, Source } from "@rag-ragre/contracts";
+import type { FactEvidence, NearbyPlace, Source } from "@rag-ragre/contracts";
 import { streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
 import type { ChatMessage } from "./MessageBubble";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { EvidencePanel } from "./EvidencePanel";
+import { MapPanel } from "./MapPanel";
+import { STATIC_PLACES } from "@/lib/places";
 
 const SESSION_KEY = "ragre.session_id";
 const MAX_TURNS = 4;
@@ -59,6 +61,9 @@ function ChatCanvas() {
     sources: [],
     facts: [],
   });
+  // Static catalog shows instantly; live SSE places supersede it.
+  const [places, setPlaces] = useState<NearbyPlace[]>(STATIC_PLACES);
+  const [railTab, setRailTab] = useState<'answer' | 'map'>('answer');
 
   useEffect(() => {
     sessionIdRef.current = getSessionId();
@@ -110,6 +115,9 @@ function ChatCanvas() {
           onFacts: (facts) => {
             patchMessage(assistantId, { facts });
             setEvidence((e) => ({ sources: e.sources, facts, messageId: assistantId }));
+          },
+          onPlaces: (livePlaces) => {
+            if (livePlaces.length) setPlaces(livePlaces);
           },
           onToken: (token) => {
             patchMessage(assistantId, (m) => ({ content: m.content + token }));
@@ -214,11 +222,29 @@ function ChatCanvas() {
 
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         <div className="evidence-rail" style={{ padding: "16px 0 16px 16px" }}>
-          <EvidencePanel
-            sources={evidence.sources}
-            facts={evidence.facts}
-            activeMessageId={evidence.messageId}
-          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%", minHeight: "calc(100vh - 140px)" }}>
+            <Segmented
+              block
+              value={railTab}
+              onChange={(v) => setRailTab(v as "answer" | "map")}
+              options={[
+                { label: "Trả lời", value: "answer" },
+                { label: "Bản đồ", value: "map" },
+              ]}
+              style={{ height: 48, fontSize: 16, fontWeight: 600 }}
+            />
+            {railTab === "map" ? (
+              <div style={{ flex: 1, minHeight: 0 }}>
+                <MapPanel places={places} />
+              </div>
+            ) : (
+              <EvidencePanel
+                sources={evidence.sources}
+                facts={evidence.facts}
+                activeMessageId={evidence.messageId}
+              />
+            )}
+          </div>
         </div>
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           <MessageList messages={messages} streaming={streaming} />
