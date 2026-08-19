@@ -12,7 +12,7 @@ export const BOLD_PRICE_RE =
   /(\d{1,3}(?:[.,]\d{1,3})*\s*(?:tỷ|triệu|trieu|tr(?=[^a-zà-ỹA-ZÀ-Ỹ]|$))(?:\s*\/\s*m²)?)/i;
 
 export function boldPrice(text: string): string {
-  return text.replace(BOLD_PRICE_RE, (match) => `<strong>${match}</strong>`);
+  return text.replace(BOLD_PRICE_RE, (match) => `**${match}**`);
 }
 
 export const DISCLOSURE_KEYWORDS = [

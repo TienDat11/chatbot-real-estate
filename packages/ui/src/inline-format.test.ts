@@ -9,15 +9,17 @@ import {
 } from "./inline-format";
 
 describe("boldPrice", () => {
-  it("wraps VND amounts in strong", () => {
-    expect(boldPrice("Giá từ 2,1 tỷ/căn")).toContain("<strong>2,1 tỷ</strong>");
+  // boldPrice emits markdown `**...**` (not raw <strong>) so ReactMarkdown
+  // v9 without rehype-raw actually parses it into a strong node.
+  it("wraps VND amounts in markdown bold", () => {
+    expect(boldPrice("Giá từ 2,1 tỷ/căn")).toContain("**2,1 tỷ**");
   });
   it("handles triệu and tỷ/m²", () => {
-    expect(boldPrice("500 triệu")).toContain("<strong>500 triệu</strong>");
-    expect(boldPrice("1.2 tỷ/m²")).toContain("<strong>1.2 tỷ/m²</strong>");
+    expect(boldPrice("500 triệu")).toContain("**500 triệu**");
+    expect(boldPrice("1.2 tỷ/m²")).toContain("**1.2 tỷ/m²**");
   });
   it("[RV-18/08] does NOT match tr output of trường", () => {
-    expect(boldPrice("cách 5 trường học")).not.toContain("</strong>");
+    expect(boldPrice("cách 5 trường học")).not.toContain("**");
   });
   it("leaves strings without prices untouched", () => {
     expect(boldPrice("hello world")).toBe("hello world");
