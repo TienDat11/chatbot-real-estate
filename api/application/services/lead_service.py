@@ -154,7 +154,7 @@ async def get_sales_dashboard(repo: LeadRepository, sales: SalesRow) -> dict[str
             {
                 "lead_id": lead.id,
                 "name": lead.name,
-                "phone": lead.phone,
+                "phone": mask_phone(lead.phone) if lead.phone else None,
                 "note": lead.note,
                 "budget_vnd": lead.budget_vnd,
                 "created_at": lead.created_at.isoformat(),

@@ -188,7 +188,8 @@ def test_sales_key_auth_and_customer_submit_http() -> None:
 
     board = client.get("/api/sales/leads", headers={"X-Sales-Key": "key-1"})
     assert board.status_code == 200
-    assert board.json()["leads"][0]["phone"] == "0905123456"
+    # phone is masked to protect PII (mask_phone), not the raw number
+    assert board.json()["leads"][0]["phone"] == "0905***456"
     assert repo.last_seen == [1]
 
 
