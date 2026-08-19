@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * AccessibilityControls — global A/A+/A++ font-size toggle in the header.
@@ -16,15 +16,26 @@ const LEVELS = [
 
 const STORAGE_KEY = "ragre.font_scale";
 
-function currentLevel(): number {
+function storedLevel(): number {
   if (typeof window === "undefined") return 0;
-  const root = document.documentElement;
-  const cls = LEVELS.findIndex((l) => root.classList.contains(l.key));
-  return cls >= 0 ? cls : 0;
+  const saved = LEVELS.findIndex((l) => {
+    try { return window.localStorage.getItem(STORAGE_KEY) === l.key; } catch { return false; }
+  });
+  return saved >= 0 ? saved : 0;
 }
 
 export function AccessibilityControls() {
-  const [level, setLevel] = useState(currentLevel);
+  const [level, setLevel] = useState(storedLevel);
+
+  // Re-apply the persisted scale on mount so the choice survives reloads.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const root = document.documentElement;
+    const idx = storedLevel();
+    LEVELS.forEach((l) => root.classList.remove(l.key));
+    root.classList.add(LEVELS[idx].key);
+    setLevel(idx);
+  }, []);
 
   const apply = (idx: number) => {
     const root = document.documentElement;

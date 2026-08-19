@@ -1,28 +1,15 @@
 /**
- * In-memory prefetch cache for the map/company panels (Story 5.5 §3.2.5).
- * Fetched in the background on app mount; panels read this first and
- * revalidate when real SSE data arrives.
+ * Placeholder for the map/company panel prefetch cache (Story 5.5 §3.2.5).
+ *
+ * The previous implementation fired `fetch("/api/places")` on every app mount,
+ * but no such backend route exists yet (Story 5.1 adds map panels backed by a
+ * client-side static catalog, not an /api/places endpoint). Every mount produced
+ * a guaranteed 404 and cached a permanent null. Disabled until a real places
+ * endpoint plus a consuming panel land together.
  */
-
-let placesCache: unknown = null;
-let placesPromise: Promise<unknown> | null = null;
-
-export async function prefetchPlaces(): Promise<unknown> {
-  if (placesCache) return placesCache;
-  if (!placesPromise) {
-    placesPromise = fetch("/api/places")
-      .then((res) => (res.ok ? res.json() : null))
-      .catch(() => null)
-      .then((data) => {
-        placesCache = data;
-        return data;
-      });
-  }
-  return placesPromise;
-}
 
 /** Trigger prefetches on app mount. Safe to call multiple times. */
 export function warmPrefetchCache() {
-  if (typeof window === "undefined") return;
-  void prefetchPlaces();
+  // No-op: no /api/places endpoint or panel consumer exists on this branch yet.
+  return;
 }
