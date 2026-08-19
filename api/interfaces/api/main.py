@@ -146,13 +146,20 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    from api.interfaces.api.lead import router as lead_router  # noqa: PLC0415
+    from api.interfaces.api.sales import router as sales_router  # noqa: PLC0415
+
+    app.include_router(lead_router)
+    app.include_router(sales_router)
+
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         from api.application.services.audit import close_audit_pool  # noqa: PLC0415
         from api.domain.services.nl2sql_guard import close_nl2sql_pool  # noqa: PLC0415
         from api.application.services.sql_leg import close_ro_pool  # noqa: PLC0415
+        from api.infrastructure.adapters.postgres_leads import close_lead_pool  # noqa: PLC0415
 
-        for closer in (close_ro_pool, close_nl2sql_pool, close_audit_pool):
+        for closer in (close_ro_pool, close_nl2sql_pool, close_audit_pool, close_lead_pool):
             try:
                 await closer()
             except Exception:  # noqa: BLE001
