@@ -109,7 +109,13 @@ export function MapPanel({
   /* Build the Map once (client-only dynamic import). */
   useEffect(() => {
     const el = containerRef.current;
-    if (!el || mapRef.current) return;
+    // Tear down when the container is hidden/detached (list mode) so the map
+    // is rebuilt fresh when the user returns to map mode (not a blank canvas).
+    if (mode !== "map" || !el) {
+      if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
+      return;
+    }
+    if (mapRef.current) return;
     let disposed = false;
     (async () => {
       const maplibre = await import("maplibre-gl");
@@ -130,7 +136,7 @@ export function MapPanel({
     })();
     return () => { disposed = true; if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tileUrl, project.lng, project.lat]);
+  }, [tileUrl, project.lng, project.lat, mode]);
 
   const [markerTick, setMarkerTick] = useState(0);
 

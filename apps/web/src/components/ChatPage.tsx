@@ -108,6 +108,10 @@ function ChatCanvas() {
       void streamQuery(
         { query, session_id: sessionIdRef.current, history },
         {
+          onRouting: (r) => {
+            // Auto-open the map rail when the backend classifies the query as location intent.
+            if (r.panel_hint === "map") setRailTab("map");
+          },
           onSources: (sources) => {
             patchMessage(assistantId, { sources });
             setEvidence((e) => ({ sources, facts: e.facts, messageId: assistantId }));
@@ -117,7 +121,9 @@ function ChatCanvas() {
             setEvidence((e) => ({ sources: e.sources, facts, messageId: assistantId }));
           },
           onPlaces: (livePlaces) => {
-            if (livePlaces.length) setPlaces(livePlaces);
+            // Reset to the static catalog when no live places arrive, so a
+            // later non-location query does not show stale landmarks.
+            setPlaces(livePlaces.length ? livePlaces : STATIC_PLACES);
           },
           onToken: (token) => {
             patchMessage(assistantId, (m) => ({ content: m.content + token }));

@@ -160,7 +160,8 @@ function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
       handlers.onSources?.(asArray<Source>(evt.data));
       break;
     case API_SSE_EVENTS.PLACES:
-      handlers.onPlaces?.(asArray<NearbyPlace>(evt.data));
+      // Backend emits an object `{"places": [...]}`, not a bare array.
+      handlers.onPlaces?.((evt.data as { places?: NearbyPlace[] } | null)?.places ?? asArray<NearbyPlace>(evt.data));
       break;
     case API_SSE_EVENTS.FACTS:
       handlers.onFacts?.(asArray<FactEvidence>(evt.data));
