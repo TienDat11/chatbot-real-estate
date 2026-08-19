@@ -21,7 +21,8 @@ export const DESIGN_TOKENS = {
   colorTextBase: "#1A2233",
   colorTextSecondary: "#5B6478",
   colorBorderSecondary: "#E9ECF2",
-  borderRadius: 10,
+  fontSize: 17,
+  borderRadius: 12,
   borderRadiusLG: 14,
   fontFamily:
     "'Be Vietnam Pro', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",

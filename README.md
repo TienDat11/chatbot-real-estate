@@ -51,6 +51,7 @@ docker compose up -d
 psql -f db/schema.sql && psql -f db/audit.sql \
   && psql -f db/seed/legal_docs.sql && psql -f db/seed/price_campaigns.sql \
   && psql -f db/seed/policy_vay.sql   # optional — policy đã có trong price_campaigns.sql
+psql -f db/lead_schema.sql            # Story 6.4: sales/leads/sales_assignment_log + seed 5 sales
 psql -f scripts/verify_ingest.sql     # verify seed
 
 # 2. Backend (copy .env.example → .env, điền secret)

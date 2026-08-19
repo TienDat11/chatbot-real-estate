@@ -85,6 +85,7 @@ export interface SseRoutingPayload {
 }
 
 export type SseEventName =
+  | "ack"
   | "routing"
   | "places"
   | "sources"
