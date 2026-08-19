@@ -19,6 +19,7 @@ import { Composer } from "./Composer";
 import { EvidencePanel } from "@/components/EvidencePanel";
 import { MapPanel } from "./MapPanel";
 import { STATIC_PLACES } from "@/lib/places";
+import { C, RADIUS, SHADOW } from "@/lib/tokens";
 
 const SESSION_KEY = "ragre.session_id";
 const MAX_TURNS = 4;
@@ -196,54 +197,57 @@ function ChatCanvas() {
         height: "100vh",
         display: "flex",
         flexDirection: "column",
-        background: "#F7F8FA",
+        background: C.bg,
       }}
     >
       <header
         style={{
-          background: "#FFFFFF",
-          borderBottom: "1px solid #E9ECF2",
+          background: C.surface,
+          borderBottom: "1px solid " + C.border,
           padding: "10px 24px",
           display: "flex",
           alignItems: "center",
           gap: 12,
           flexShrink: 0,
+          boxShadow: SHADOW.card,
+          zIndex: 1,
         }}
       >
         <div
           style={{
-            width: 34,
-            height: 34,
-            borderRadius: 10,
-            background: "#1F46A8",
+            width: 36,
+            height: 36,
+            borderRadius: RADIUS.small,
+            background: C.primary,
             color: "#fff",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontSize: 17,
+            fontSize: 18,
           }}
         >
           <SafetyCertificateOutlined />
         </div>
-        <div>
-          <Typography.Title level={4} style={{ margin: 0, color: "#1A2233", fontSize: 16 }}>
+        <div style={{ minWidth: 0 }}>
+          <Typography.Title level={4} style={{ margin: 0, color: C.text, fontSize: 16, lineHeight: "22px" }}>
             RAG Real Estate
           </Typography.Title>
           <Typography.Text
             style={{
               fontSize: 12,
-              color: "#5B6478",
+              color: C.textMuted,
               display: "flex",
               alignItems: "center",
               gap: 6,
+              whiteSpace: "nowrap",
             }}
           >
             Tra cứu pháp lý bất động sản
             <span
               style={{
-                background: "#EAF7EF",
-                color: "#16A34A",
-                borderRadius: 999,
+                background: C.successSoft,
+                color: C.success,
+                borderRadius: RADIUS.pill,
                 padding: "1px 8px",
                 fontSize: 11,
                 fontWeight: 600,
@@ -269,7 +273,7 @@ function ChatCanvas() {
                 { label: "Trả lời", value: "answer" },
                 { label: "Bản đồ", value: "map" },
               ]}
-              style={{ height: 48, fontSize: 16, fontWeight: 600 }}
+              style={{ height: 44, fontSize: 15, fontWeight: 600 }}
             />
             {railTab === "map" ? (
               <div style={{ flex: 1, minHeight: 0 }}>
@@ -286,7 +290,7 @@ function ChatCanvas() {
         </div>
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           <MessageList messages={messages} streaming={streaming} />
-          <div style={{ padding: "12px 16px 8px", flexShrink: 0 }}>
+          <div style={{ padding: "12px 16px 10px", flexShrink: 0 }}>
             <Composer
               value={input}
               onChange={setInput}

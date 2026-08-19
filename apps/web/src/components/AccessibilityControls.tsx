@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { C, RADIUS } from "@/lib/tokens";
 
 /**
  * AccessibilityControls — global A/A+/A++ font-size toggle in the header.
@@ -16,7 +17,11 @@ const LEVELS = [
 
 const STORAGE_KEY = "ragre.font_scale";
 
-function storedLevel(): number {
+// External store so SSR + hydration render identically (level 0) and the
+// persisted scale is picked up only after the client mounts. Reading
+// localStorage in a useState initializer would cause a hydration mismatch.
+
+function readLevel(): number {
   if (typeof window === "undefined") return 0;
   const saved = LEVELS.findIndex((l) => {
     try { return window.localStorage.getItem(STORAGE_KEY) === l.key; } catch { return false; }
@@ -24,26 +29,44 @@ function storedLevel(): number {
   return saved >= 0 ? saved : 0;
 }
 
-export function AccessibilityControls() {
-  const [level, setLevel] = useState(storedLevel);
+// Cache the snapshot so useSyncExternalStore sees a stable reference (no
+// infinite re-render loop from a fresh value on every read).
+let cached: number | null = null;
+function getSnapshot(): number {
+  if (cached === null) cached = readLevel();
+  return cached;
+}
 
-  // Re-apply the persisted scale on mount so the choice survives reloads.
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const root = document.documentElement;
-    const idx = storedLevel();
-    LEVELS.forEach((l) => root.classList.remove(l.key));
-    root.classList.add(LEVELS[idx].key);
-    setLevel(idx);
-  }, []);
-
-  const apply = (idx: number) => {
-    const root = document.documentElement;
-    LEVELS.forEach((l) => root.classList.remove(l.key));
-    root.classList.add(LEVELS[idx].key);
-    try { window.localStorage.setItem(STORAGE_KEY, LEVELS[idx].key); } catch {}
-    setLevel(idx);
+function subscribe(onStoreChange: () => void): () => void {
+  window.addEventListener("storage", onStoreChange);
+  window.addEventListener("ragre:font-scale", onStoreChange);
+  return () => {
+    window.removeEventListener("storage", onStoreChange);
+    window.removeEventListener("ragre:font-scale", onStoreChange);
   };
+}
+
+function syncClass(level: number): void {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  LEVELS.forEach((l) => root.classList.remove(l.key));
+  root.classList.add(LEVELS[level].key);
+}
+
+export function AccessibilityControls() {
+  const level = useSyncExternalStore(subscribe, getSnapshot, () => 0);
+
+  // Apply the scale class to <html> (DOM mutation only, no setState).
+  useEffect(() => {
+    syncClass(level);
+  }, [level]);
+
+  const apply = useCallback((idx: number) => {
+    syncClass(idx);
+    try { window.localStorage.setItem(STORAGE_KEY, LEVELS[idx].key); } catch {}
+    cached = idx;
+    window.dispatchEvent(new Event("ragre:font-scale"));
+  }, []);
 
   return (
     <div role="group" aria-label="Cỡ chữ" style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -52,15 +75,15 @@ export function AccessibilityControls() {
           key={l.key}
           type="button"
           aria-pressed={level === i}
-          aria-label={`Cỡ chữ ${l.label}`}
+          aria-label={"Cỡ chữ " + l.label}
           onClick={() => apply(i)}
           style={{
             minWidth: 40,
             height: 40,
-            borderRadius: 8,
-            border: level === i ? "2px solid #1F46A8" : "1px solid #D5DBE6",
-            background: level === i ? "#EAF2FF" : "#FFFFFF",
-            color: "#1A2233",
+            borderRadius: RADIUS.small,
+            border: level === i ? "2px solid " + C.primary : "1px solid " + C.borderStrong,
+            background: level === i ? C.primarySoft : C.surface,
+            color: C.text,
             fontSize: l.size === 17 ? 14 : l.size === 19 ? 15 : 16,
             fontWeight: 600,
             cursor: "pointer",

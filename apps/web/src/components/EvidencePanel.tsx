@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Collapse, Typography } from "antd";
 import { FactsTable, SourcesList } from "@rag-ragre/ui";
 import type { FactEvidence, Source } from "@rag-ragre/contracts";
+import { C, RADIUS, SHADOW } from "@/lib/tokens";
 
 interface EvidencePanelProps {
   sources: Source[];
@@ -26,19 +27,20 @@ export function EvidencePanel({ sources, facts, activeMessageId }: EvidencePanel
       style={{
         width: 320,
         flexShrink: 0,
-        background: "#FFFFFF",
-        border: "1px solid #E9ECF2",
-        borderRadius: 14,
-        padding: 12,
+        background: C.surface,
+        border: "1px solid " + C.border,
+        borderRadius: RADIUS.card,
+        padding: 14,
         height: "fit-content",
         maxHeight: "calc(100vh - 180px)",
         overflowY: "auto",
         display: "flex",
         flexDirection: "column",
+        boxShadow: SHADOW.card,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <Typography.Text strong style={{ fontSize: 13, color: "#1A2233" }}>
+        <Typography.Text strong style={{ fontSize: 13, color: C.text }}>
           Dẫn chứng gần nhất
         </Typography.Text>
         <button
@@ -47,7 +49,7 @@ export function EvidencePanel({ sources, facts, activeMessageId }: EvidencePanel
           style={{
             border: "none",
             background: "transparent",
-            color: "#1F46A8",
+            color: C.primary,
             fontSize: 12,
             cursor: "pointer",
             padding: 0,
@@ -65,7 +67,7 @@ export function EvidencePanel({ sources, facts, activeMessageId }: EvidencePanel
             {
               key: "sources",
               label: (
-                <Typography.Text style={{ fontSize: 12, color: "#5B6478" }}>
+                <Typography.Text style={{ fontSize: 12, color: C.textMuted }}>
                   Nguồn tài liệu ({sources.length})
                 </Typography.Text>
               ),
@@ -74,7 +76,7 @@ export function EvidencePanel({ sources, facts, activeMessageId }: EvidencePanel
             {
               key: "facts",
               label: (
-                <Typography.Text style={{ fontSize: 12, color: "#5B6478" }}>
+                <Typography.Text style={{ fontSize: 12, color: C.textMuted }}>
                   Sự kiện pháp lý ({facts.length})
                 </Typography.Text>
               ),

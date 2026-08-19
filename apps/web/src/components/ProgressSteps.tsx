@@ -1,5 +1,7 @@
 "use client";
 
+import { C } from "@/lib/tokens";
+
 /**
  * ProgressSteps — 4-step vertical checklist shown while the assistant is
  * working (replaces the plain progress label). Each completed step gets a
@@ -48,9 +50,9 @@ export function ProgressSteps({ activeStep }: ProgressStepsProps) {
                 justifyContent: "center",
                 fontSize: 12,
                 fontWeight: 700,
-                background: done ? "#16A34A" : running ? "#EAF2FF" : "#EEF0F4",
-                color: done ? "#FFFFFF" : running ? "#1F46A8" : "#9AA3B2",
-                border: running ? "2px solid #1F46A8" : "none",
+                background: done ? C.success : running ? C.primarySoft : C.surfaceAlt,
+                color: done ? "#FFFFFF" : running ? C.primary : C.textGhost,
+                border: running ? "2px solid " + C.primary : "1px solid " + C.border,
               }}
             >
               {done ? "✓" : running ? <span className="step-spinner" /> : i + 1}
@@ -58,7 +60,7 @@ export function ProgressSteps({ activeStep }: ProgressStepsProps) {
             <span
               style={{
                 fontSize: 15,
-                color: done || running ? "#1A2233" : "#9AA3B2",
+                color: done || running ? C.text : C.textGhost,
                 fontWeight: running ? 600 : 400,
               }}
             >

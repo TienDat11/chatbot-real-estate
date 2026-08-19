@@ -4,6 +4,7 @@ import { Typography } from "antd";
 import { cn, formatLatency } from "@/lib/utils";
 import { AckChip } from "./AckChip";
 import { ProgressSteps } from "./ProgressSteps";
+import { C, SHADOW, FS } from "@/lib/tokens";
 
 export interface ChatMessage {
   id: string;
@@ -40,15 +41,15 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         <div
           style={{
             maxWidth: "72%",
-            background: "#1F46A8",
+            background: C.primary,
             color: "#FFFFFF",
-            borderRadius: "14px 14px 4px 14px",
-            padding: "10px 14px",
-            fontSize: "var(--fs-body, 14px)",
-            lineHeight: "var(--fs-body-line, 22px)",
+            borderRadius: "16px 16px 4px 16px",
+            padding: "10px 16px",
+            fontSize: FS.body,
+            lineHeight: FS.bodyLine,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
-            boxShadow: "0 1px 3px rgba(31,70,168,0.2)",
+            boxShadow: SHADOW.primary,
           }}
         >
           {message.content}
@@ -62,11 +63,11 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       <div
         style={{
           maxWidth: "86%",
-          background: "#FFFFFF",
-          border: "1px solid #E9ECF2",
-          borderRadius: "14px 14px 14px 4px",
-          padding: "14px 16px",
-          boxShadow: "0 1px 4px rgba(26,34,51,0.05)",
+          background: C.surface,
+          border: "1px solid " + C.border,
+          borderRadius: "16px 16px 16px 4px",
+          padding: "16px 18px",
+          boxShadow: SHADOW.card,
           width: "100%",
         }}
       >
@@ -108,8 +109,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 style={{
                   marginTop: 10,
                   paddingTop: 8,
-                  borderTop: "1px dashed #E9ECF2",
-                  color: "#ABB3C3",
+                  borderTop: "1px dashed " + C.border,
+                  color: C.textGhost,
                   fontSize: 11,
                   display: "flex",
                   gap: 12,
@@ -132,7 +133,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 function SourceSection({ title, sources }: { title: string; sources: Source[] }) {
   return (
     <div style={{ marginBottom: 10 }}>
-      <Typography.Text strong style={{ fontSize: 12, color: "#5B6478", textTransform: "uppercase", letterSpacing: 0.4 }}>
+      <Typography.Text strong style={{ fontSize: 12, color: C.textMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>
         {title}
       </Typography.Text>
       <div style={{ marginTop: 4 }}>
@@ -145,7 +146,7 @@ function SourceSection({ title, sources }: { title: string; sources: Source[] })
 function FactSection({ facts }: { facts: FactEvidence[] }) {
   return (
     <div style={{ marginBottom: 10 }}>
-      <Typography.Text strong style={{ fontSize: 12, color: "#5B6478", textTransform: "uppercase", letterSpacing: 0.4 }}>
+      <Typography.Text strong style={{ fontSize: 12, color: C.textMuted, textTransform: "uppercase", letterSpacing: 0.4 }}>
         Sự kiện pháp lý
       </Typography.Text>
       <div style={{ marginTop: 4 }}>
