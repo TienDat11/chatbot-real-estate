@@ -1,5 +1,5 @@
 import type { Confidence, FactEvidence, Source } from "@rag-ragre/contracts";
-import { ConfidenceBadge, ReviewBanner, SourcesList, FactsTable, MarkdownView } from "@rag-ragre/ui";
+import { ConfidenceBadge, ReviewBanner, SourcesList, FactsTable, AnswerBlocks } from "@rag-ragre/ui";
 import { Typography } from "antd";
 import { cn, formatLatency } from "@/lib/utils";
 import { AckChip } from "./AckChip";
@@ -92,7 +92,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 )}
               </div>
             ) : (
-              <MarkdownView
+              <AnswerBlocks
                 content={message.content}
                 className={cn(message.streaming && "typing-caret")}
               />
