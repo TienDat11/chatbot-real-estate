@@ -18,6 +18,7 @@ export interface QueryStreamHandlers {
   onFacts?: (facts: FactEvidence[]) => void;
   onToken?: (text: string) => void;
   onDone?: (meta: DoneMeta) => void;
+  onAck?: () => void;
   onError?: (error: Error) => void;
 }
 
@@ -151,6 +152,9 @@ function dispatchChunk(chunk: string, handlers: QueryStreamHandlers): void {
 
 function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
   switch (evt.event) {
+    case API_SSE_EVENTS.ACK:
+      handlers.onAck?.();
+      break;
     case API_SSE_EVENTS.ROUTING:
       if (evt.data && typeof evt.data === "object") {
         handlers.onRouting?.(evt.data as SseRoutingPayload);
@@ -190,7 +194,6 @@ function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
       break;
   }
 }
-
 function asArray<T>(data: unknown): T[] {
   return Array.isArray(data) ? (data as T[]) : [];
 }

@@ -10,3 +10,13 @@ export { FactsTable } from "./FactsTable";
 export type { FactsTableProps } from "./FactsTable";
 export { MarkdownView } from "./MarkdownView";
 export type { MarkdownViewProps } from "./MarkdownView";
+export { AnswerBlocks } from "./AnswerBlocks";
+export type { AnswerBlocksProps } from "./AnswerBlocks";
+export {
+  BOLD_PRICE_RE,
+  boldPrice,
+  classifyBlock,
+  splitBlocks,
+  parseTable,
+} from "./inline-format";
+export type { BlockKind } from "./inline-format";
