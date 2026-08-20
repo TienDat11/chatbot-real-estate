@@ -1,4 +1,4 @@
-import type { Confidence, FactEvidence, NearbyPlace, Source, SseRoutingPayload } from "@rag-ragre/contracts";
+import type { Confidence, FactEvidence, Image, NearbyPlace, Source, SseRoutingPayload } from "@rag-ragre/contracts";
 import { API_QUERY_ENDPOINT, API_SSE_EVENTS } from "@rag-ragre/contracts";
 
 /** Metadata delivered on the `done` SSE event (besides the streamed answer). */
@@ -16,6 +16,7 @@ export interface QueryStreamHandlers {
   onSources?: (sources: Source[]) => void;
   onPlaces?: (places: NearbyPlace[]) => void;
   onFacts?: (facts: FactEvidence[]) => void;
+  onImages?: (images: Image[]) => void;
   onToken?: (text: string) => void;
   onDone?: (meta: DoneMeta) => void;
   onAck?: () => void;
@@ -169,6 +170,10 @@ function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
       break;
     case API_SSE_EVENTS.FACTS:
       handlers.onFacts?.(asArray<FactEvidence>(evt.data));
+      break;
+    case API_SSE_EVENTS.IMAGES:
+      // Backend emits an object `{"images": [...]}`, not a bare array.
+      handlers.onImages?.((evt.data as { images?: Image[] } | null)?.images ?? asArray<Image>(evt.data));
       break;
     case API_SSE_EVENTS.TOKEN:
       if (typeof evt.data === "string") {

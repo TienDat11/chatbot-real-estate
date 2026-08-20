@@ -51,6 +51,50 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON document_chunks (doc_id);
 
+-- 11. images — image metadata registry (vision not wired yet, so caption stays nullable)
+CREATE TABLE IF NOT EXISTS images (
+  id                 BIGSERIAL PRIMARY KEY,
+  -- Stable id: 'matbang-trang-06' | 'banggia-trang-1' | 'toroi-trang-1' | 'thanh-toan-chuan'
+  image_id           TEXT NOT NULL UNIQUE,
+  kind               TEXT NOT NULL CHECK (kind IN ('matbang', 'banggia', 'toroi', 'thanh-toan', 'phaply', 'qna', 'other')),
+  title              TEXT NOT NULL,
+  caption            TEXT,
+  alt_text           TEXT,
+  url_cdn            TEXT NOT NULL UNIQUE,
+  width              INT,
+  height             INT,
+  content_hash       TEXT NOT NULL,       -- sha256 of the original file
+  status             TEXT NOT NULL DEFAULT 'published'
+                     CHECK (status IN ('published', 'expired', 'deprecated')),
+  source_file        TEXT,
+  doc_id             TEXT REFERENCES documents(doc_id) ON DELETE CASCADE,
+  chunk_id           TEXT REFERENCES document_chunks(chunk_id) ON DELETE CASCADE,
+  linked_subject_key TEXT,
+  metadata           JSONB NOT NULL DEFAULT '{}',
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_images_kind ON images (kind);
+CREATE INDEX IF NOT EXISTS idx_images_doc ON images (doc_id);
+CREATE INDEX IF NOT EXISTS idx_images_link ON images (linked_subject_key);
+CREATE INDEX IF NOT EXISTS idx_images_status ON images (status) WHERE status = 'published';
+
+-- 12. image_embeddings — per-image vector store (cosine); dims 1024 = text-embedding-v4 LOCK
+CREATE TABLE IF NOT EXISTS image_embeddings (
+  embedding_id BIGSERIAL PRIMARY KEY,
+  image_id     TEXT NOT NULL REFERENCES images(image_id) ON DELETE CASCADE,
+  caption_hash TEXT NOT NULL,             -- sha256(caption) to dedupe identical embedded captions
+  embedding    vector(1024) NOT NULL,
+  model        TEXT NOT NULL DEFAULT 'text-embedding-v4',
+  dims         INT NOT NULL DEFAULT 1024,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_emb_hnsw
+  ON image_embeddings USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_image_emb_img ON image_embeddings (image_id, caption_hash);
+
 -- 3. campaigns — price / loan-policy periods (B7: price & policy MUST belong to a campaign)
 CREATE TABLE IF NOT EXISTS campaigns (
   id            BIGSERIAL PRIMARY KEY,
@@ -220,6 +264,10 @@ ALTER TABLE facts           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE facts           FORCE ROW LEVEL SECURITY;
 ALTER TABLE chunk_fact_refs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chunk_fact_refs FORCE ROW LEVEL SECURITY;
+ALTER TABLE images            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE images            FORCE ROW LEVEL SECURITY;
+ALTER TABLE image_embeddings  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE image_embeddings  FORCE ROW LEVEL SECURITY;
 
 -- SELECT policy: only rows backed by a published doc (MVP static)
 DROP POLICY IF EXISTS facts_pub_select ON facts;
@@ -263,6 +311,20 @@ CREATE POLICY facts_write ON facts FOR ALL TO ragre USING (true) WITH CHECK (tru
 DROP POLICY IF EXISTS refs_write ON chunk_fact_refs;
 CREATE POLICY refs_write ON chunk_fact_refs FOR ALL TO ragre USING (true) WITH CHECK (true);
 
+-- Image SELECT policy: only published images (vision/embedding consumers read published only)
+DROP POLICY IF EXISTS images_pub_select ON images;
+CREATE POLICY images_pub_select ON images FOR SELECT USING (status = 'published');
+DROP POLICY IF EXISTS image_emb_pub_select ON image_embeddings;
+CREATE POLICY image_emb_pub_select ON image_embeddings FOR SELECT USING (
+  EXISTS (SELECT 1 FROM images i
+          WHERE i.image_id = image_embeddings.image_id AND i.status = 'published'));
+
+-- Image write policies: only the owner/ingest role (ragre) may write
+DROP POLICY IF EXISTS images_write ON images;
+CREATE POLICY images_write ON images FOR ALL TO ragre USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS image_emb_write ON image_embeddings;
+CREATE POLICY image_emb_write ON image_embeddings FOR ALL TO ragre USING (true) WITH CHECK (true);
+
 -- Query role: base SELECT grants on registry + view; RLS policies still filter rows.
 -- GRANT ro_query TO ragre enables SET LOCAL ROLE ro_query inside with_rls_identity()
 -- (without it the query leg fails with 'permission denied to set role').
@@ -274,7 +336,7 @@ BEGIN
 END
 $$;
 GRANT SELECT ON documents, document_chunks, campaigns, fact_subjects, facts,
-  chunk_fact_refs, fact_aliases, v_unit_offers TO ro_query;
+  chunk_fact_refs, fact_aliases, v_unit_offers, images, image_embeddings TO ro_query;
 GRANT EXECUTE ON FUNCTION v_unit_offers_as_of(date) TO ro_query;
 GRANT USAGE ON SCHEMA public TO ro_query;
 

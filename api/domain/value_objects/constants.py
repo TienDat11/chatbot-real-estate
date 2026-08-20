@@ -14,11 +14,12 @@ LLM_CALL_TIMEOUT_S = 20.0  # per-operation LLM call budget (rewrite / nl2sql)
 MAX_QUERY_LENGTH = 2000  # Pydantic cap on /query input
 MAX_INPUT_CHARS = 2000  # L1 rule cap on raw input
 
-# --- SSE event names (order: places -> sources -> facts -> token -> done) ---
+# --- SSE event names (order: places -> sources -> facts -> images -> token -> done) ---
 # error emitted before done on failure.
 SSE_EVENT_PLACES = "places"
 SSE_EVENT_SOURCES = "sources"
 SSE_EVENT_FACTS = "facts"
+SSE_EVENT_IMAGES = "images"
 SSE_EVENT_TOKEN = "token"
 SSE_EVENT_DONE = "done"
 SSE_EVENT_ERROR = "error"

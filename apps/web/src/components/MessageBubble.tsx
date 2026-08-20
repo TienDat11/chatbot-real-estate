@@ -1,9 +1,10 @@
-import type { Confidence, FactEvidence, Source } from "@rag-ragre/contracts";
+import type { Confidence, FactEvidence, Image, Source } from "@rag-ragre/contracts";
 import { ConfidenceBadge, ReviewBanner, SourcesList, FactsTable, AnswerBlocks } from "@rag-ragre/ui";
 import { Typography } from "antd";
 import { cn, formatLatency } from "@/lib/utils";
 import { AckChip } from "./AckChip";
 import { ProgressSteps } from "./ProgressSteps";
+import { ImageGallery } from "./ImageGallery";
 import { C, SHADOW, FS } from "@/lib/tokens";
 
 export interface ChatMessage {
@@ -12,6 +13,7 @@ export interface ChatMessage {
   content: string;
   sources?: Source[];
   facts?: FactEvidence[];
+  images?: Image[];
   confidence?: Confidence;
   requires_review?: boolean;
   traceId?: string;
@@ -97,6 +99,9 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 content={message.content}
                 className={cn(message.streaming && "typing-caret")}
               />
+            )}
+            {message.images && message.images.length > 0 && (
+              <ImageGallery images={message.images} />
             )}
             {message.confidence && !message.streaming && (
               <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>

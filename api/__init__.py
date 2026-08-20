@@ -41,6 +41,7 @@ from .domain.value_objects.constants import (
     SSE_EVENT_PLACES,
     SSE_EVENT_SOURCES,
     SSE_EVENT_FACTS,
+    SSE_EVENT_IMAGES,
     SSE_EVENT_TOKEN,
     SSE_EVENT_DONE,
     SSE_EVENT_ERROR,

@@ -33,10 +33,12 @@ from api.domain.services.utils import sha256_hex
 from api.application.services.audit import write_audit
 from api.domain.value_objects.constants import (
     SSE_EVENT_FACTS,
+    SSE_EVENT_IMAGES,
     SSE_EVENT_PLACES,
     SSE_EVENT_SOURCES,
     SSE_EVENT_TOKEN,
 )
+from api.application.services.image_search import search_images
 from api.infrastructure.dependencies import get_geo, get_reranker
 from api.application.services.generate import stream_answer
 from api.application.services.conv_state import conv_directive, get_context
@@ -352,6 +354,11 @@ class RagQueryWorkflow(Workflow):
 
         merged: Merged = await merge_context(guard.clean, chunks, sql_result.rows, as_of)
         session_id = await ctx.store.get("session_id")
+
+        # Illustrative image enrichment is best-effort: search_images never raises,
+        # so a degraded/empty result only omits images, never the pipeline.
+        images = await search_images(routed.rewritten)
+        await ctx.store.set("images", images)
         conv_dir = None
         conv_state_str = None
         if session_id:
@@ -391,6 +398,7 @@ class RagQueryWorkflow(Workflow):
             await self._emit(SSE_EVENT_PLACES, {"places": _places_payload(geo_result)})
         await self._emit(SSE_EVENT_SOURCES, {"sources": merged.sources})
         await self._emit(SSE_EVENT_FACTS, {"facts": merged.facts})
+        await self._emit(SSE_EVENT_IMAGES, {"images": images})
         return MergedEv()
 
     @step()
@@ -448,6 +456,7 @@ class RagQueryWorkflow(Workflow):
                 "answer": answer,
                 "sources": merged.sources,
                 "facts": merged.facts,
+                "images": await ctx.store.get("images") or [],
                 "places": _places_payload(await ctx.store.get("geo_result"))
                 if routed.routing.get("needs_geo", False)
                 else [],
