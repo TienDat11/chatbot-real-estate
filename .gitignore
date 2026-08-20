@@ -89,3 +89,6 @@ docs/
 *.sqlite3
 data/
 uploads/
+
+# --- local tooling (ffmpeg static builds, etc.) ---
+tools/

@@ -16,6 +16,8 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from api.application.services.image_search import search_project_images
+from api.application.services.media_config import list_project_videos
 from api.application.services.sales_kit import sales_kit_block
 from api.infrastructure.dependencies import get_llm
 
@@ -23,7 +25,7 @@ logger = logging.getLogger("api.hello")
 
 router = APIRouter(tags=["hello"])
 
-GREETING_TIMEOUT_S = 8.0
+GREETING_TIMEOUT_S = 6.0  # single LLM greeting call; 6s bounds a stuck gateway while leaving warm calls (sub-2s) ample headroom
 GREETING_MAX_TOKENS = 400
 
 # Em-dash is a display-only hard rule in this project; normalize it and the
@@ -39,6 +41,12 @@ class HelloRequest(BaseModel):
 class HelloResponse(BaseModel):
     greeting: str
     trace_id: str
+    # Representative project imagery accompanying the welcome message; best-effort
+    # and omitted ([]-ish) on failure so the greeting contract never hard-fails.
+    images: list[dict] = Field(default_factory=list)
+    # Project videos (brand film + drone) attached to the welcome so the widget
+    # can offer playback immediately; additive and best-effort like images.
+    videos: list[dict] = Field(default_factory=list)
 
 
 # System prompt mirrors system_policy.md Layer 0 (intro first) + Layer 4
@@ -98,9 +106,15 @@ async def llms_hello(payload: HelloRequest | None = None) -> HelloResponse:
             greeting = candidate
     except Exception as exc:  # noqa: BLE001 — greeting must never 500 the request
         logger.warning("llms-hello LLM failed; using static greeting: %s", exc)
+    # Representative project imagery decorates the welcome; a failure here only
+    # drops images, never the greeting itself.
+    images = await search_project_images()
+    # Videos ride along with the imagery; list_project_videos is a frozen config
+    # so this attach step cannot fail or block the greeting.
+    videos = list_project_videos()
     if payload is not None and payload.session_id:
         logger.debug("llms-hello trace_id=%s session_id=%s", trace_id, payload.session_id)
-    return HelloResponse(greeting=greeting, trace_id=trace_id)
+    return HelloResponse(greeting=greeting, trace_id=trace_id, images=images, videos=videos)
 
 
 def _frame(event: str, data: dict) -> str:
@@ -134,6 +148,14 @@ async def _stream_greeting(session_id: str | None) -> AsyncIterator[str]:
         if session_id:
             yield _frame("error", {"message": "Lời chào tạo nhanh không khả dụng; dùng lời chào mẫu."})
         yield _frame("token", {"text": greeting})
+    # Representative project imagery rides along with the welcome; a failure only
+    # omits images from the stream, never the greeting itself.
+    images = await search_project_images()
+    yield _frame("images", {"images": images})
+    # Attach the project video registry as its own SSE event so the widget can
+    # render playback without waiting for the done frame; frozen config, no I/O.
+    videos = list_project_videos()
+    yield _frame("videos", {"videos": videos})
     yield _frame("done", {"trace_id": trace_id})
 
 

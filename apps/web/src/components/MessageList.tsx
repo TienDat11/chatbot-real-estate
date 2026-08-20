@@ -26,16 +26,39 @@ const SUGGESTIONS = [
  */
 export function MessageList({ messages, streaming }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Whether the reader is parked at the bottom. While true we keep following
+  // the streaming tail; once the user scrolls up to re-read we stop forcing the
+  // caret down so autoscroll never fights their hand.
+  const stickToBottomRef = useRef(true);
 
+  // A brand-new message (greeting, or the user just asked something) always
+  // jumps to the latest turn, regardless of where the reader scrolled.
   useEffect(() => {
+    stickToBottomRef.current = true;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length]);
+
+  // While streaming, keep the caret at the bottom only if the reader has not
+  // scrolled up away from it.
+  useEffect(() => {
+    if (!stickToBottomRef.current) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, streaming]);
+
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < 80;
+  };
 
   if (messages.length === 0) {
     return (
       <div
         ref={scrollRef}
+        onScroll={handleScroll}
         className="chat-scroll"
         style={{ flex: 1, overflowY: "auto", padding: "24px 16px" }}
       >
@@ -96,6 +119,7 @@ export function MessageList({ messages, streaming }: MessageListProps) {
   return (
     <div
       ref={scrollRef}
+      onScroll={handleScroll}
       className="chat-scroll"
       style={{ flex: 1, overflowY: "auto", padding: "24px 16px" }}
     >

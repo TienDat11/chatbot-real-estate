@@ -55,15 +55,26 @@ from api.application.services.sql_leg import SqlLegResult, run_sql_leg
 
 logger = logging.getLogger("api.workflow")
 
+# Per-step budgets (asyncio.wait_for). Measured warm latencies (scripts/timing
+# probe): guard 0.1ms, rewrite <=9.3s (single call), rag <=5.9s, sql ~0.15s,
+# nl2sql ~8s, rerank 0.3-0.5s, geo 0.5ms, output_guard 0.2-4ms, images ~0.3s.
+# Each value keeps >=1.3x headroom over the observed happy-path time so normal
+# requests are never cut, while still bounding stuck calls so the workflow
+# degrades to its fallback instead of parking. nl2sql 11.0: measured happy-path
+# runs ~8s, so 11.0 leaves >=1.3x headroom (8.0 sat the budget and timed out real
+# requests). sql 3.0: run_sql_leg runs two sequential with_rls_identity(timeout_s=1.5)
+# blocks, so the outer budget must cover their combined 3.0s so the inner
+# statement_timeout fires before the workflow cuts. geo 3.0: covers the
+# google_places HTTP TIMEOUT_S of 2.5s.
 STEP_TIMEOUTS = {
     "guard": 1.0,
-    "rewrite": 25.0,
-    "rag": 45.0,
-    "sql": 2.0,
-    "sql_nl2sql": 8.0,
-    "rerank": 5.0,
+    "rewrite": 12.0,
+    "rag": 25.0,
+    "sql": 3.0,
+    "sql_nl2sql": 11.0,
+    "rerank": 3.0,
     "geo": 3.0,
-    "output_guard": 2.0,
+    "output_guard": 1.5,
 }
 
 # Event callback: accepts async or sync callables (workflow awaits coroutines).

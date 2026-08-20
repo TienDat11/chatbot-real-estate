@@ -1,4 +1,12 @@
-import type { Confidence, FactEvidence, Image, NearbyPlace, Source, SseRoutingPayload } from "@rag-ragre/contracts";
+import type {
+  Confidence,
+  FactEvidence,
+  Image,
+  NearbyPlace,
+  Source,
+  SseRoutingPayload,
+  Video,
+} from "@rag-ragre/contracts";
 import { API_QUERY_ENDPOINT, API_SSE_EVENTS } from "@rag-ragre/contracts";
 
 /** Metadata delivered on the `done` SSE event (besides the streamed answer). */
@@ -17,6 +25,7 @@ export interface QueryStreamHandlers {
   onPlaces?: (places: NearbyPlace[]) => void;
   onFacts?: (facts: FactEvidence[]) => void;
   onImages?: (images: Image[]) => void;
+  onVideos?: (videos: Video[]) => void;
   onToken?: (text: string) => void;
   onDone?: (meta: DoneMeta) => void;
   onAck?: () => void;
@@ -175,6 +184,10 @@ function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
       // Backend emits an object `{"images": [...]}`, not a bare array.
       handlers.onImages?.((evt.data as { images?: Image[] } | null)?.images ?? asArray<Image>(evt.data));
       break;
+    case API_SSE_EVENTS.VIDEOS:
+      // Greeting stream emits an object `{"videos": [...]}`, not a bare array.
+      handlers.onVideos?.((evt.data as { videos?: Video[] } | null)?.videos ?? asArray<Video>(evt.data));
+      break;
     case API_SSE_EVENTS.TOKEN:
       if (typeof evt.data === "string") {
         handlers.onToken?.(evt.data);
@@ -210,3 +223,7 @@ function tryJson(raw: string): unknown {
     return undefined;
   }
 }
+
+// The first-open greeting is now static FE content (see greetingContent.ts), so
+// there is no /llms-hello fetch path left in the client. Streaming query answers
+// remain the only interactive API the chat talks to.

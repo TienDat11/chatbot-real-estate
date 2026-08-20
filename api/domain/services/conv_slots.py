@@ -142,7 +142,7 @@ async def llm_slot_fill(query: str) -> "dict[str, Any]":
     model = model_for_role("extract")
     try:
         llm = get_llm()
-        text = await llm.complete(messages, json_mode=True, model=model, timeout=8.0)
+        text = await llm.complete(messages, json_mode=True, model=model, timeout=6.0)
         data = json.loads(_clean_json(text))
         if not isinstance(data, dict):
             return {}

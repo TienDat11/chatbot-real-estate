@@ -1,10 +1,11 @@
-import type { Confidence, FactEvidence, Image, Source } from "@rag-ragre/contracts";
+import type { Confidence, FactEvidence, Image, Source, Video } from "@rag-ragre/contracts";
 import { ConfidenceBadge, ReviewBanner, SourcesList, FactsTable, AnswerBlocks } from "@rag-ragre/ui";
 import { Typography } from "antd";
 import { cn, formatLatency } from "@/lib/utils";
 import { AckChip } from "./AckChip";
 import { ProgressSteps } from "./ProgressSteps";
 import { ImageGallery } from "./ImageGallery";
+import { GreetingMedia } from "./GreetingMedia";
 import { C, SHADOW, FS } from "@/lib/tokens";
 
 export interface ChatMessage {
@@ -14,6 +15,7 @@ export interface ChatMessage {
   sources?: Source[];
   facts?: FactEvidence[];
   images?: Image[];
+  videos?: Video[];
   confidence?: Confidence;
   requires_review?: boolean;
   traceId?: string;
@@ -100,9 +102,13 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 className={cn(message.streaming && "typing-caret")}
               />
             )}
-            {message.images && message.images.length > 0 && (
-              <ImageGallery images={message.images} />
-            )}
+            {(message.videos?.length || message.images?.length) ? (
+              <GreetingMedia
+                videos={message.videos}
+                images={message.images}
+                ready={!message.streaming}
+              />
+            ) : null}
             {message.confidence && !message.streaming && (
               <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <ConfidenceBadge confidence={message.confidence} />

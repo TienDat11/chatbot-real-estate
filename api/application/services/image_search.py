@@ -56,6 +56,22 @@ WHERE i.status = 'published'
 LIMIT 1
 """
 
+# Representative project imagery for the first-open greeting: published images of
+# a given kind with no unit link, ordered by a display-type preference list so the
+# welcome always leads with the most visual asset (cover/render before amenity).
+PROJECT_IMAGES_QUERY = """
+SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
+       i.width, i.height, i.linked_subject_key, i.metadata,
+       i.metadata->>'type' AS display_type
+FROM images i
+WHERE i.status = 'published'
+  AND i.kind = $1
+  AND i.linked_subject_key IS NULL
+  AND i.metadata->>'type' = ANY (string_to_array($2, ','))
+ORDER BY array_position(string_to_array($2, ','), i.metadata->>'type')
+LIMIT $3
+"""
+
 
 def _embedding_base_url() -> str:
     """Normalize the embedding base URL to carry the /v1 API path.
@@ -209,6 +225,40 @@ async def _rerank_by_unit(
             out.append(_row_to_image(row, score, "similar", f"Căn {unit_type} tương tự để so sánh"))
             continue
         out.append(_row_to_image(row, score, "semantic", None))
+    return out[:top_k]
+
+
+async def search_project_images(
+    top_k: int = 6, kind: str = "matbang"
+) -> list[dict[str, Any]]:
+    """Return representative project imagery for the first-open greeting.
+
+    A welcome message should show the project, not a specific floor plan, so we
+    pick published images of the given kind that have NO unit link (they are
+    overviews: cover, render, amenity map/collage) and deterministically order
+    them by the display type so the greeting always leads with the most visual
+    asset. Best-effort: any DB failure returns [] so the greeting never 500s.
+    """
+    order = ["cover", "render", "amenity_map", "amenity_collage"]
+    try:
+        async with with_rls_identity() as conn:
+            recs = await conn.fetch(
+                PROJECT_IMAGES_QUERY,
+                kind,
+                ",".join(order),
+                top_k,
+            )
+    except Exception as exc:  # noqa: BLE001 — greeting imagery is a garnish, never fatal
+        logger.warning("image_search: project images degraded: %s", exc)
+        return []
+    rows = [dict(r) for r in recs]
+    # The query already orders by array_position over the display-type preference
+    # list, so no client-side re-sort is needed; unit-linked rows are dropped below.
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if _row_unit(r):
+            continue
+        out.append(_row_to_image(r, 1.0, "semantic", None))
     return out[:top_k]
 
 

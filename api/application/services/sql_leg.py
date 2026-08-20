@@ -549,7 +549,7 @@ async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlL
     try:
         sql, params = build_sql(spec, as_of)
         rows: list[dict] = []
-        async with with_rls_identity(timeout_s=2.0) as conn:
+        async with with_rls_identity(timeout_s=1.5) as conn:
             recs = await conn.fetch(sql, *params)
             rows = [dict(r) for r in recs]
 
@@ -560,7 +560,7 @@ async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlL
         # the view has no subject_key — map from fact_subjects for display
         if spec["source"] == "v_unit_offers" and rows:
             ids = [r["subject_id"] for r in rows]
-            async with with_rls_identity(timeout_s=2.0) as conn:
+            async with with_rls_identity(timeout_s=1.5) as conn:
                 recs = await conn.fetch(
                     "SELECT id, subject_key, display_name FROM fact_subjects WHERE id = ANY($1)", ids
                 )

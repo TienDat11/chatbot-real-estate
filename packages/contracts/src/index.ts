@@ -62,6 +62,24 @@ export interface Image {
   reason?: string | null;
 }
 
+/** Motion format of a project film attached to the greeting/welcome. */
+export type VideoKind = "brand" | "drone";
+
+/**
+ * Project film shown in the welcome (brand film / drone tour). The MP4 lives on
+ * the CDN while `poster_url` is a render used as the loading/fallback frame.
+ * Duration/dimensions are optional: the player must never depend on them.
+ */
+export interface Video {
+  title: string;
+  url_cdn: string;
+  kind?: VideoKind;
+  poster_url?: string | null;
+  width?: number | null;
+  height?: number | null;
+  duration?: number | null;
+}
+
 /** Nearby amenity/landmark from the maps leg (Google Places or static fallback). */
 export interface NearbyPlace {
   name: string;
@@ -112,9 +130,18 @@ export type SseEventName =
   | "sources"
   | "facts"
   | "images"
+  | "videos"
   | "token"
   | "done"
   | "error";
+
+/** Non-streaming response of `POST /api/llms-hello` (first-open greeting). */
+export interface HelloResponse {
+  greeting: string;
+  trace_id: string;
+  images?: Image[];
+  videos?: Video[];
+}
 
 /** A single event in the SSE stream of `POST /api/query`. */
 export interface SseEvent {
