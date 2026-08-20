@@ -29,7 +29,7 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
               border: "1px solid #E9ECF2",
               borderRadius: 10,
               padding: "8px 10px",
-              background: "#FAFBFD",
+              background: "#F4F6FA",
             }}
           >
             <Typography.Text strong style={{ fontSize: 12.5, color: "#1A2233", display: "block" }}>

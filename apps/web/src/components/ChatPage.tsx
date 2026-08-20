@@ -8,16 +8,57 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { App as AntApp, Typography } from "antd";
 import { SafetyCertificateOutlined } from "@ant-design/icons";
 import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
-import type { FactEvidence, Source } from "@rag-ragre/contracts";
+import type { NearbyPlace } from "@rag-ragre/contracts";
 import { streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
-import type { ChatMessage } from "./MessageBubble";
+import type { ChatMessage } from "@/components/MessageBubble";
+import { AccessibilityControls } from "@/components/AccessibilityControls";
+import { warmPrefetchCache } from "@/lib/prefetch";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
-import { EvidencePanel } from "./EvidencePanel";
+import { MapPanel, DEFAULT_PROJECT } from "./MapPanel";
+import { STATIC_PLACES } from "@/lib/places";
+import { C, RADIUS, SHADOW } from "@/lib/tokens";
 
 const SESSION_KEY = "ragre.session_id";
+const HELLO_SHOWN_KEY = "ragre.hello_shown";
 const MAX_TURNS = 4;
+
+// Hardcoded first-open greeting. Shipping a static copy instead of calling the
+// backend LLM saves tokens on every load and guarantees the intro is always
+// grounded in The Camellia, regardless of backend availability.
+const GREETING_TEXT =
+  "Anh/Chị ơi, em chào Anh/Chị! Em là chuyên viên tư vấn dự án The Camellia Sơn Trà, Đà Nẵng. " +
+  "Dự án nằm ngay giao lộ Lê Văn Lương - Lê Đức Thọ, phường Thọ Quang, quận Sơn Trà, " +
+  "vừa gần biển vừa có view núi Sơn Trà, cùng 42 tiện ích đa tầng phục vụ trọn đời sống cả gia đình. " +
+  "Anh/Chị đang quan tâm theo hướng để ở, đầu tư, cho thuê, hay làm văn phòng/khách sạn ạ? " +
+  "Anh/Chị cứ nhắn nhu cầu của mình, em sẽ tư vấn chi tiết và gợi ý căn phù hợp nhất để Anh/Chị an tâm sở hữu nhé.";
+
+// Read the map mode from the URL query string so a refresh (F5) restores the
+// list view without remounting the chat (state is local). The rail tab no
+// longer exists (map is always visible), so a legacy ?tab= param is ignored.
+function initialMapModeFromUrl(): "map" | "list" {
+  if (typeof window === "undefined") return "map";
+  const params = new URLSearchParams(window.location.search);
+  return params.get("mode") === "list" ? "list" : "map";
+}
+
+// Reflect the current map mode in the URL (query string only). Using
+// history.replaceState avoids a Next route transition, so the ChatPage
+// component stays mounted and all local state (messages, streaming) survives.
+// The legacy ?tab= param is always stripped on write.
+function syncModeUrl(mode: "map" | "list"): void {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  params.delete("tab");
+  if (mode === "list") params.set("mode", "list");
+  else params.delete("mode");
+  const qs = params.toString();
+  const nextUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+  if (window.location.href !== nextUrl) {
+    window.history.replaceState(null, "", nextUrl);
+  }
+}
 
 function getSessionId(): string {
   if (typeof window === "undefined") return "";
@@ -38,6 +79,32 @@ function newId(): string {
     : `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+const GREETING_CHUNK_MS = 40;
+const GREETING_CHUNK_SIZE = 3;
+
+/**
+ * Streams the static greeting out character-by-character via a timer chain,
+ * mimicking a live SSE response so the bot appears to be typing. Cleans up its
+ * own interval so no timer leaks after the greeting finishes.
+ */
+function startFakeGreetingStream(
+  messageId: string,
+  patch: (p: Partial<ChatMessage>) => void,
+  onDone: () => void
+): void {
+  let cursor = 0;
+  const total = GREETING_TEXT.length;
+  const timer = window.setInterval(() => {
+    cursor = Math.min(total, cursor + GREETING_CHUNK_SIZE);
+    patch({ content: GREETING_TEXT.slice(0, cursor), streaming: true });
+    if (cursor >= total) {
+      window.clearInterval(timer);
+      patch({ streaming: false });
+      onDone();
+    }
+  }, GREETING_CHUNK_MS);
+}
+
 /** Main chat layout: single page with chat and evidence rail side by side. */
 export function ChatPage() {
   return (
@@ -55,13 +122,38 @@ function ChatCanvas() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const sessionIdRef = useRef<string>("");
-  const [evidence, setEvidence] = useState<{ sources: Source[]; facts: FactEvidence[]; messageId?: string }>({
-    sources: [],
-    facts: [],
-  });
+  const tokenBufferRef = useRef("");
+  const flushTimerRef = useRef<number | null>(null);
+  // Static catalog shows instantly; live SSE places supersede it.
+  const [places, setPlaces] = useState<NearbyPlace[]>(STATIC_PLACES);
+  // Map mode defaults to the map view on first render (server + client
+  // identical) to avoid a hydration mismatch; the URL is applied after mount.
+  const [mapMode, setMapMode] = useState<"map" | "list">("map");
 
+  const setMapModeRouted = useCallback(
+    (mode: "map" | "list") => {
+      setMapMode(mode);
+      syncModeUrl(mode);
+    },
+    []
+  );
+
+  // When the user presses back/forward, sync local state from the URL so the
+  // map mode follows history without remounting the chat.
   useEffect(() => {
-    sessionIdRef.current = getSessionId();
+    const onPopState = () => {
+      setMapMode(initialMapModeFromUrl());
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  // Restore the map mode from the URL query string after mount. Reading the
+  // URL here (instead of in a useState initializer) keeps the first render
+  // server/client identical, so a deep link (?mode=list) hydrates cleanly,
+  // then swaps to the list view without losing chat state.
+  useEffect(() => {
+    setMapMode(initialMapModeFromUrl());
   }, []);
 
   const patchMessage = useCallback(
@@ -75,6 +167,41 @@ function ChatCanvas() {
     },
     []
   );
+
+  useEffect(() => {
+    sessionIdRef.current = getSessionId();
+    warmPrefetchCache();
+  }, []);
+
+  // First-open greeting: stream the static GREETING_TEXT out progressively
+  // (fake SSE) so it reads like a live answer, without any backend LLM call.
+  // The sessionStorage flag is claimed synchronously before the timer chain so
+  // React StrictMode's double-mount in dev and route changes never re-run it.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let alreadyShown = false;
+    try {
+      alreadyShown = window.sessionStorage.getItem(HELLO_SHOWN_KEY) === "1";
+    } catch {
+      alreadyShown = false;
+    }
+    if (alreadyShown) return;
+    try {
+      window.sessionStorage.setItem(HELLO_SHOWN_KEY, "1");
+    } catch {
+      // sessionStorage unavailable (private mode): non-fatal.
+    }
+
+    const greetingId = newId();
+    setMessages((prev) => [
+      { id: greetingId, role: "assistant", content: "", streaming: true },
+      ...prev,
+    ]);
+    setStreaming(true);
+    startFakeGreetingStream(greetingId, (patch) => patchMessage(greetingId, patch), () =>
+      setStreaming(false)
+    );
+  }, [patchMessage]);
 
   const handleSend = useCallback(
     (text: string) => {
@@ -91,30 +218,62 @@ function ChatCanvas() {
       };
 
       // Keep at most MAX_TURNS rounds (each round = 1 user + 1 assistant turn).
+      // Drop empty turns and cap each turn's content at 2000 chars to match the
+      // backend HistoryTurn.content limit; long RAG answers would otherwise
+      // fail validation (HTTP 422) on every turn after the first.
       const history = messages
-        .filter((m) => m.role === "user" || m.role === "assistant")
+        .filter(
+          (m) => (m.role === "user" || m.role === "assistant") && m.content.trim().length > 0,
+        )
         .slice(-(MAX_TURNS * 2))
-        .map((m) => ({ role: m.role, content: m.content }));
+        .map((m) => ({ role: m.role, content: m.content.slice(0, 2000) }));
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
       setStreaming(true);
       setInput("");
 
+      const flushTokens = () => {
+        if (tokenBufferRef.current) {
+          const chunk = tokenBufferRef.current;
+          tokenBufferRef.current = "";
+          patchMessage(assistantId, (m) => ({ content: m.content + chunk }));
+        }
+        flushTimerRef.current = null;
+      };
       void streamQuery(
         { query, session_id: sessionIdRef.current, history },
         {
+          onAck: () => {
+            patchMessage(assistantId, { acknowledged: true });
+          },
+          onRouting: () => {
+            patchMessage(assistantId, { progressStep: 0 });
+            // Map panel is always visible, so panel_hint no longer needs to
+            // switch the rail; the hint is informational only.
+          },
           onSources: (sources) => {
-            patchMessage(assistantId, { sources });
-            setEvidence((e) => ({ sources, facts: e.facts, messageId: assistantId }));
+            patchMessage(assistantId, { sources, progressStep: 1 });
           },
           onFacts: (facts) => {
-            patchMessage(assistantId, { facts });
-            setEvidence((e) => ({ sources: e.sources, facts, messageId: assistantId }));
+            patchMessage(assistantId, { facts, progressStep: 2 });
+          },
+          onPlaces: (livePlaces) => {
+            // Reset to the static catalog when no live places arrive, so a
+            // later non-location query does not show stale landmarks.
+            setPlaces(livePlaces.length ? livePlaces : STATIC_PLACES);
           },
           onToken: (token) => {
-            patchMessage(assistantId, (m) => ({ content: m.content + token }));
+            tokenBufferRef.current += token;
+            patchMessage(assistantId, { progressStep: 3 });
+            if (flushTimerRef.current === null) {
+              flushTimerRef.current = window.setTimeout(flushTokens, 60);
+            }
           },
           onDone: (meta) => {
+            if (flushTimerRef.current !== null) {
+              window.clearTimeout(flushTimerRef.current);
+              flushTokens();
+            }
             patchMessage(assistantId, {
               streaming: false,
               confidence: meta.confidence,
@@ -125,6 +284,10 @@ function ChatCanvas() {
             setStreaming(false);
           },
           onError: (err) => {
+            if (flushTimerRef.current !== null) {
+              window.clearTimeout(flushTimerRef.current);
+              flushTokens();
+            }
             patchMessage(assistantId, { streaming: false, error: true, content: err.message });
             message.error(err.message);
             setStreaming(false);
@@ -134,7 +297,7 @@ function ChatCanvas() {
         }
       );
     },
-    [messages, streaming, message, patchMessage]
+    [messages, streaming, message, patchMessage, setMapModeRouted]
   );
 
   // Suggestion clicks from MessageList arrive via the ASK_EVENT custom event.
@@ -153,54 +316,57 @@ function ChatCanvas() {
         height: "100vh",
         display: "flex",
         flexDirection: "column",
-        background: "#F7F8FA",
+        background: C.bg,
       }}
     >
       <header
         style={{
-          background: "#FFFFFF",
-          borderBottom: "1px solid #E9ECF2",
+          background: C.surface,
+          borderBottom: "1px solid " + C.border,
           padding: "10px 24px",
           display: "flex",
           alignItems: "center",
           gap: 12,
           flexShrink: 0,
+          boxShadow: SHADOW.card,
+          zIndex: 1,
         }}
       >
         <div
           style={{
-            width: 34,
-            height: 34,
-            borderRadius: 10,
-            background: "#1F46A8",
+            width: 36,
+            height: 36,
+            borderRadius: RADIUS.small,
+            background: C.primary,
             color: "#fff",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontSize: 17,
+            fontSize: 18,
           }}
         >
           <SafetyCertificateOutlined />
         </div>
-        <div>
-          <Typography.Title level={4} style={{ margin: 0, color: "#1A2233", fontSize: 16 }}>
-            RAG Real Estate
+        <div style={{ minWidth: 0 }}>
+          <Typography.Title level={4} style={{ margin: 0, color: C.text, fontSize: 17, lineHeight: "24px" }}>
+            The Camellia
           </Typography.Title>
           <Typography.Text
             style={{
               fontSize: 12,
-              color: "#5B6478",
+              color: C.textMuted,
               display: "flex",
               alignItems: "center",
               gap: 6,
+              whiteSpace: "nowrap",
             }}
           >
-            Tra cứu pháp lý bất động sản
+            Chuyên viên tư vấn dự án Sơn Trà, Đà Nẵng
             <span
               style={{
-                background: "#EAF7EF",
-                color: "#16A34A",
-                borderRadius: 999,
+                background: C.successSoft,
+                color: C.success,
+                borderRadius: RADIUS.pill,
                 padding: "1px 8px",
                 fontSize: 11,
                 fontWeight: 600,
@@ -210,19 +376,53 @@ function ChatCanvas() {
             </span>
           </Typography.Text>
         </div>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 13,
+              color: C.text,
+              background: C.surfaceAlt,
+              borderRadius: RADIUS.pill,
+              padding: "6px 14px",
+            }}
+          >
+            <span style={{ color: C.primary, fontSize: 14 }}>📞</span>
+            <span style={{ fontWeight: 600, letterSpacing: 0.5 }}>09x xxx xxxx</span>
+          </div>
+          <AccessibilityControls />
+        </div>
       </header>
 
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        <div className="evidence-rail" style={{ padding: "16px 0 16px 16px" }}>
-          <EvidencePanel
-            sources={evidence.sources}
-            facts={evidence.facts}
-            activeMessageId={evidence.messageId}
-          />
+        {/* Column 1: map rail. Always visible and always wide so the canvas
+            reads as a balanced peer of the chat column. */}
+        <div className="evidence-rail evidence-rail--wide" style={{ padding: "16px 0 16px 16px" }}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+              height: "100%",
+              minHeight: "calc(100vh - 140px)",
+            }}
+          >
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <MapPanel
+                places={places}
+                project={DEFAULT_PROJECT}
+                mode={mapMode}
+                onModeChange={setMapModeRouted}
+              />
+            </div>
+          </div>
         </div>
+        {/* Column 2: chat column */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           <MessageList messages={messages} streaming={streaming} />
-          <div style={{ padding: "12px 16px 8px", flexShrink: 0 }}>
+          <div style={{ padding: "12px 16px 10px", flexShrink: 0 }}>
             <Composer
               value={input}
               onChange={setInput}

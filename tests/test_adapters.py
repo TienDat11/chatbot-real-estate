@@ -18,7 +18,7 @@ _CATALOG = "db/seed/static_places.json"
 @pytest.mark.asyncio
 async def test_static_places_filters_by_kinds_and_radius():
     sp = StaticPlaces(_CATALOG, radius_m=10000)
-    res = await sp.places_around(16.0558, 108.2455, 10000, kinds=["school", "hospital"])
+    res = await sp.places_around(16.1052, 108.2558, 10000, kinds=["school", "hospital"])
     assert isinstance(res, GeoResult)
     assert not res.degraded
     assert res.places

@@ -29,6 +29,11 @@ const apiRewrites =
 const nextConfig: NextConfig = {
   transpilePackages: TRANSPILE_PACKAGES,
   rewrites: async () => apiRewrites,
+  // Disable the server's response compression. The Next dev/prod server would
+  // otherwise gzip-buffer the SSE stream proxied from FastAPI, which breaks
+  // incremental token delivery (ERR_INCOMPLETE_CHUNKED_ENCODING). FastAPI
+  // streams are already chunked; we only need them passed through verbatim.
+  compress: false,
 };
 
 export default nextConfig;
