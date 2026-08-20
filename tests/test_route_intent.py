@@ -125,3 +125,25 @@ def test_empty_or_whitespace_other():
 def test_date_like_and_amount_numbers_not_handoff():
     assert _cls("năm 2025 quy định thế nào").intent != Intent.HANDOFF
     assert _cls("chi phí khoảng 100 triệu đủ không").intent == Intent.PRICE
+
+
+# --- regression: closure must not drop an onward action (FIX-7 hardening) ---
+
+
+def test_closure_blockers_keep_conversation_alive():
+    # These carry an onward action/deliberation — MUST NOT be classified closure.
+    assert _cls("ok cho em xem thực tế nhé").intent != Intent.CLOSURE
+    assert _cls("ok để em về bàn với chồng rồi").intent != Intent.CLOSURE
+    assert _cls("cảm ơn, để tôi suy nghĩ").intent != Intent.CLOSURE
+
+
+def test_handoff_not_triggered_by_bare_tu_van():
+    # "tư vấn" alone is a price/legal/company question, not a contact request.
+    assert _cls("chi phí tư vấn pháp lý là bao nhiêu").intent != Intent.HANDOFF
+    assert _cls("anh tư vấn giúp em căn này với").intent != Intent.HANDOFF
+
+
+def test_handoff_strong_signal_still_matches():
+    assert _cls("để lại số điện thoại nhé").intent == Intent.HANDOFF
+    assert _cls("gọi lại cho tôi").intent == Intent.HANDOFF
+    assert _cls("tôi muốn nhận tư vấn từ chuyên viên").intent == Intent.HANDOFF

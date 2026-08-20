@@ -6,6 +6,7 @@ import {
   COMPOSER_PLACEHOLDER_IDLE,
   COMPOSER_PLACEHOLDER_STREAMING,
 } from "@/lib/constants";
+import { C, RADIUS } from "@/lib/tokens";
 
 interface ComposerProps {
   value: string;
@@ -47,12 +48,13 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
         autoSize={{ minRows: 1, maxRows: 5 }}
         disabled={disabled}
         style={{
-          borderRadius: 12,
+          borderRadius: RADIUS.input,
           padding: "10px 14px",
-          fontSize: 14,
+          fontSize: 15,
+          lineHeight: "24px",
           resize: "none",
-          borderColor: "#D5DBE6",
-          background: "#FFFFFF",
+          borderColor: C.borderStrong,
+          background: C.surface,
         }}
         aria-label="Câu hỏi"
       />
@@ -62,7 +64,7 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
         onClick={onSend}
         disabled={!canSend}
         loading={streaming}
-        style={{ borderRadius: 12, height: 42, minWidth: 92 }}
+        style={{ borderRadius: RADIUS.input, height: 42, minWidth: 92 }}
       >
         Gửi
       </Button>

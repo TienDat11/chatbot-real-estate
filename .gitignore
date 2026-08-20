@@ -70,6 +70,10 @@ _bmad/
 skills-lock.json
 .mcp.json
 
+# --- deepseek-harness (DSH) orchestration config (custom layer, khong push) ---
+.dsh/
+/AGENTS.md
+
 # evidence / report artifacts (KHÔNG đẩy lên git)
 camellia-report-full.png
 

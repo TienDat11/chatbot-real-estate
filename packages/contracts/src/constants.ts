@@ -9,8 +9,13 @@ export const DEFAULT_API_PROXY_TARGET = "http://localhost:8000";
 /** Relative endpoint proxied to FastAPI for the streaming chat query. */
 export const API_QUERY_ENDPOINT = "/api/query";
 
+/** Relative endpoint proxied to FastAPI for the first-open greeting. */
+export const API_HELLO_ENDPOINT = "/api/llms-hello";
+
 /** Canonical SSE event names emitted by the FastAPI /api/query stream. */
 export const API_SSE_EVENTS = {
+  ACK: "ack",
+  ROUTING: "routing",
   PLACES: "places",
   SOURCES: "sources",
   FACTS: "facts",
@@ -21,6 +26,8 @@ export const API_SSE_EVENTS = {
 
 /** Every SSE event name in the stream, for iteration and validation. */
 export const SSE_EVENT_NAMES: readonly SseEventName[] = [
+  API_SSE_EVENTS.ACK,
+  API_SSE_EVENTS.ROUTING,
   API_SSE_EVENTS.PLACES,
   API_SSE_EVENTS.SOURCES,
   API_SSE_EVENTS.FACTS,

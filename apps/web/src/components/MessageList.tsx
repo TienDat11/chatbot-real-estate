@@ -4,7 +4,9 @@ import { useEffect, useRef } from "react";
 import type { ChatMessage } from "./MessageBubble";
 import { MessageBubble } from "./MessageBubble";
 import { ASK_EVENT } from "@/lib/constants";
-import { Empty } from "antd";
+import { Typography } from "antd";
+import { SafetyCertificateOutlined } from "@ant-design/icons";
+import { C, RADIUS, SHADOW } from "@/lib/tokens";
 
 interface MessageListProps {
   messages: ChatMessage[];
@@ -12,10 +14,10 @@ interface MessageListProps {
 }
 
 const SUGGESTIONS = [
-  "Thế chấp đất cho ngân hàng cần những giấy tờ gì?",
-  "Cầm cố sổ đỏ giấy tay có hợp pháp không?",
-  "Chuyển nhượng đất nông nghiệp cần điều kiện gì?",
-  "Quy hoạch dự án tại quận 9 hiện trạng thế nào?",
+  "Camellia có những tiện ích gì nổi bật?",
+  "Giá căn 2PN view biển hiện tại là bao nhiêu?",
+  "Vị trí và pháp lý dự án The Camellia thế nào?",
+  "Dự án phù hợp để ở hay đầu tư cho thuê?",
 ];
 
 /**
@@ -37,38 +39,49 @@ export function MessageList({ messages, streaming }: MessageListProps) {
         className="chat-scroll"
         style={{ flex: 1, overflowY: "auto", padding: "24px 16px" }}
       >
-        <div style={{ maxWidth: 560, margin: "48px auto 0", textAlign: "center" }}>
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description={
-              <span style={{ color: "#5B6478" }}>
-                Hỏi về văn bản pháp luật, quy hoạch, hồ sơ dự án bất động sản
-              </span>
-            }
-          />
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 16 }}>
+        <div style={{ maxWidth: 600, margin: "56px auto 0", textAlign: "center" }}>
+          <div
+            aria-hidden="true"
+            style={{
+              width: 64,
+              height: 64,
+              margin: "0 auto 16px",
+              borderRadius: RADIUS.card,
+              background: C.primarySoft,
+              color: C.primary,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 30,
+            }}
+          >
+            <SafetyCertificateOutlined />
+          </div>
+          <Typography.Title level={3} style={{ margin: 0, color: C.text, fontSize: 22, lineHeight: "30px" }}>
+            Tư vấn dự án The Camellia
+          </Typography.Title>
+          <Typography.Paragraph style={{ color: C.textMuted, fontSize: 15, margin: "8px auto 24px", maxWidth: 420, lineHeight: "24px" }}>
+            Hỗ trợ tư vấn căn hộ view biển, view núi Sơn Trà, tiện ích nội khu và
+            tra cứu pháp lý, quy hoạch dự án kèm độ tin cậy.
+          </Typography.Paragraph>
+          <div className="suggestion-grid" style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, textAlign: "left" }}>
             {SUGGESTIONS.map((q) => (
               <button
                 key={q}
                 type="button"
                 onClick={() => document.dispatchEvent(new CustomEvent(ASK_EVENT, { detail: q }))}
                 style={{
-                  background: "#FFFFFF",
-                  border: "1px solid #E9ECF2",
-                  borderRadius: 10,
-                  padding: "9px 14px",
+                  background: C.surface,
+                  border: "1px solid " + C.border,
+                  borderRadius: RADIUS.input,
+                  padding: "11px 16px",
                   textAlign: "left",
-                  fontSize: 13,
-                  color: "#1A2233",
+                  fontSize: 14,
+                  lineHeight: "22px",
+                  color: C.text,
                   cursor: "pointer",
-                  boxShadow: "0 1px 2px rgba(26,34,51,0.04)",
-                  transition: "border-color .15s, box-shadow .15s",
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLButtonElement).style.borderColor = "#1F46A8";
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLButtonElement).style.borderColor = "#E9ECF2";
+                  boxShadow: SHADOW.card,
+                  transition: "border-color .15s, box-shadow .15s, transform .15s",
                 }}
               >
                 {q}
