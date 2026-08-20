@@ -42,6 +42,26 @@ export interface FactEvidence {
   note?: string;
 }
 
+/** Qualifier explaining why an image appears in the gallery, set by the backend. */
+export type ImageMatch = "exact" | "similar" | "semantic";
+
+/** Illustrative asset attached to an answer (floor plan, price sheet, flyer, payment). */
+export interface Image {
+  image_id: string;
+  kind: string;
+  title: string;
+  caption: string | null;
+  alt_text: string | null;
+  url_cdn: string;
+  width: number | null;
+  height: number | null;
+  score: number;
+  /** Why this image was retrieved. "exact" = the exact unit asked; "similar" = a comparable one; "semantic" = loose relevance. */
+  match?: ImageMatch;
+  /** Vietnamese sentence shown with the match badge; null/absent when match is semantic. */
+  reason?: string | null;
+}
+
 /** Nearby amenity/landmark from the maps leg (Google Places or static fallback). */
 export interface NearbyPlace {
   name: string;
@@ -69,6 +89,7 @@ export interface QueryResponse {
   sources: Source[];
   facts: FactEvidence[];
   places: NearbyPlace[];
+  images?: Image[];
   confidence: Confidence;
   requires_review: boolean;
   routing: QueryResponseRouting;
@@ -90,6 +111,7 @@ export type SseEventName =
   | "places"
   | "sources"
   | "facts"
+  | "images"
   | "token"
   | "done"
   | "error";

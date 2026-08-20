@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { App as AntApp, Typography } from "antd";
 import { SafetyCertificateOutlined } from "@ant-design/icons";
 import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
-import type { NearbyPlace } from "@rag-ragre/contracts";
+import type { Image, NearbyPlace } from "@rag-ragre/contracts";
 import { streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
 import type { ChatMessage } from "@/components/MessageBubble";
@@ -256,6 +256,9 @@ function ChatCanvas() {
           },
           onFacts: (facts) => {
             patchMessage(assistantId, { facts, progressStep: 2 });
+          },
+          onImages: (images) => {
+            patchMessage(assistantId, { images });
           },
           onPlaces: (livePlaces) => {
             // Reset to the static catalog when no live places arrive, so a

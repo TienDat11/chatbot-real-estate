@@ -82,6 +82,27 @@ class Settings(BaseSettings):
     geo_center_lat: float = 16.1052  # The Camellia: giao lộ Lê Văn Lương - Lê Đức Thọ, Thọ Quang, Sơn Trà
     geo_center_lng: float = 108.2558
 
+    # Cloudflare R2 object storage (image upload; credentials only, never hardcoded)
+    r2_account_id: str = ""
+    r2_endpoint: str = ""
+    r2_bucket_name: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    # Optional public custom domain; empty falls back to the R2 public r2.dev host.
+    r2_public_url: str = ""
+
+    @property
+    def r2_public_base(self) -> str:
+        """Public base host for R2 objects.
+
+        A custom domain is the explicit choice; otherwise derive the r2.dev
+        public URL from the account id so callers never hardcode the host.
+        """
+        explicit = self.r2_public_url.strip()
+        if explicit:
+            return explicit.rstrip("/")
+        return f"https://pub-{self.r2_account_id}.r2.dev"
+
     # LLM gateway (OpenAI-compatible)
     llm_api_key: str = ""
     llm_base_url: str = ""
