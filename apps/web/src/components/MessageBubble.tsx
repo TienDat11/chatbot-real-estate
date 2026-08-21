@@ -38,6 +38,10 @@ interface MessageBubbleProps {
  */
 export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  // The greeting is the only message that carries videos (RAG answers attach
+  // images only), so use it to flip the welcome layout: the hero leads with the
+  // film + gallery and the static chào text lands last, below the images.
+  const isGreeting = !!message.videos?.length;
 
   if (isUser) {
     return (
@@ -87,6 +91,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             {message.facts && message.facts.length > 0 && (
               <FactSection facts={message.facts} />
             )}
+            {/* On the welcome message the media block opens the bubble (hero
+                film + gallery first), so the chào copy sits last under the
+                images instead of interrupting the cinematic opener. */}
+            {isGreeting && (
+              <GreetingMedia
+                videos={message.videos}
+                images={message.images}
+                ready={!message.streaming}
+              />
+            )}
             {message.streaming && !message.content ? (
               <div className="streaming-placeholder">
                 <AckChip visible={!!message.acknowledged} />
@@ -102,7 +116,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 className={cn(message.streaming && "typing-caret")}
               />
             )}
-            {(message.videos?.length || message.images?.length) ? (
+            {!isGreeting && (message.videos?.length || message.images?.length) ? (
               <GreetingMedia
                 videos={message.videos}
                 images={message.images}
