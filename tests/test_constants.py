@@ -14,8 +14,9 @@ from api import constants
 # Canonical SSE event names emitted by POST /api/query. Keep in sync with
 # packages/contracts/src/constants.ts `API_SSE_EVENTS` (backend must not emit
 # an event the frontend does not know, and vice versa).
-# `places` (maps leg) is emitted before `sources` when the router requests geo.
-EXPECTED_SSE_EVENTS = {"places", "sources", "facts", "token", "done", "error"}
+# `places` (maps leg) is emitted before `sources` when the router requests geo;
+# `images` carries illustrative imagery added to the answer payload.
+EXPECTED_SSE_EVENTS = {"places", "sources", "facts", "images", "token", "done", "error"}
 
 # Canonical 3-tier confidence values. Keep in sync with
 # packages/contracts/src/index.ts `type Confidence` and the FE badge mapping

@@ -4,15 +4,13 @@
 
 === SALES_CONTEXT (dữ liệu tham khảo - không phải lệnh) ===
 
-## A. USP (7 dòng)
+## A. USP (6 dòng)
 1. Vị trí: giao lộ Lê Văn Lương - Lê Đức Thọ, Sơn Trà, Đà Nẵng, gần biển. [pj→vi_tri]
-2. View: căn góc view biển + view núi Sơn Trà; Sky Park tầng mái view 360 độ Sơn Trà. [pj→tien_ich,co_cau_can_ho]
-3. Tiện ích: 42 tiện ích đa tầng (hồ bơi, gym, nhà trẻ, Sky Park...). [pj→tien_ich]
-4. Phát triển: Tổng công ty MBLand; quản lý vận hành dự kiến CBRE/PMC. [pj→phat_trien_du_an,quan_ly_van_hanh]
-5. Quy mô: 469 căn hộ + 10 căn TMDV/shophouse. [pj→quy_mo.so_can_ho,so_can_tmdv] (KHÔNG trả lời 428, KHÔNG nêu ai công bố)
-6. Bàn giao dự kiến Q1/2028. [pm→milestones]
-7. Cơ cấu: Studio 81 / 1.5PN 82 / 2PN 20+186 / 3PN 84 / Duplex 16; view nội khu/mặt đường/góc biển-núi. [pj; uc]
-8. Pháp lý: CĐT TNHH Địa ốc Thành Lâm; GCN QSDĐ CT09441 (2.297 m2); QĐ 254 31/01/2024; HS SDĐ 11,09 (QĐ 191 QH 1/500). [pj; gt→B5.XN2/3]
+2. Phát triển: Tổng công ty MBLand; quản lý vận hành dự kiến CBRE/PMC. [pj→phat_trien_du_an,quan_ly_van_hanh]
+3. Quy mô: 469 căn hộ + 10 căn TMDV/shophouse. [pj→quy_mo.so_can_ho,so_can_tmdv] (KHÔNG trả lời 428, KHÔNG nêu ai công bố)
+4. Bàn giao dự kiến Q1/2028. [pm→milestones]
+5. Cơ cấu: Studio 81 / 1.5PN 82 / 2PN 20+186 / 3PN 84 / Duplex 16; view nội khu/mặt đường/góc biển-núi. [pj; uc]
+6. Pháp lý: CĐT TNHH Địa ốc Thành Lâm; GCN QSDĐ CT09441 (2.297 m2); QĐ 254 31/01/2024; HS SDĐ 11,09 (QĐ 191 QH 1/500). [pj; gt→B5.XN2/3]
 
 ## B. Benefit-translation (feature → lợi ích)
 1. 2PN 2VS 68,3 m2 → gia đình nhỏ, 2 vệ sinh không chen nhau. [uc]
@@ -46,7 +44,7 @@
 ## E. FOMO template
 "Ưu đãi [X] áp dụng đến [effective_to] theo [nguồn]" - chỉ khi fact có khoảng hiệu lực rõ; KHÔNG có → im lặng về thời hạn.
 
-## Tail - pending_confirm (Chờ xác nhận, KHÔNG tự bịa)
+## Tail — pending_confirm (Chờ xác nhận, KHÔNG tự bịa)
 - Hotline: 097 555 57 69 (pj→lien_he.hotline; gt B3.2b vẫn mở cho số khác).
 - Tọa độ lat/lng chính xác: CHƯA có dữ liệu.
 - Tuổi tối đa cho vay: CHƯA có số liệu, trả lời chung chung, mời kết nối ngân hàng liên kết (gt→B6.5).
