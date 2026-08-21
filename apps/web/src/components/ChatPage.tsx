@@ -18,6 +18,7 @@ import { warmPrefetchCache } from "@/lib/prefetch";
 import { MessageList } from "./MessageList";
 import { Composer } from "./Composer";
 import { MapPanel, DEFAULT_PROJECT } from "./MapPanel";
+import { LeadForm, LEAD_ID_STORAGE_KEY } from "./LeadForm";
 import { STATIC_PLACES } from "@/lib/places";
 import { C, RADIUS, SHADOW } from "@/lib/tokens";
 
@@ -68,6 +69,22 @@ function newId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Builds a best-effort lead note (<= 200 chars) from the most recent answer
+ * facts so the broker sees what the customer was asking about. Returns
+ * undefined when no facts exist yet (the backend treats note as optional).
+ */
+export function buildLeadNote(messages: ChatMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg.role !== "assistant" || !msg.facts || msg.facts.length === 0) continue;
+    const subjects = msg.facts.map((f) => f.subject).filter((s) => s.trim().length > 0);
+    if (subjects.length === 0) continue;
+    return `Quan tâm: ${subjects.join(", ")}`.slice(0, 200);
+  }
+  return undefined;
 }
 
 const GREETING_CHUNK_MS = 40;
@@ -121,6 +138,12 @@ function ChatCanvas() {
   // Map mode defaults to the map view on first render (server + client
   // identical) to avoid a hydration mismatch; the URL is applied after mount.
   const [mapMode, setMapMode] = useState<"map" | "list">("map");
+  // Lead CTA (Story 5.7): the SSE routing event carries lead_cta_hint; the
+  // chip under the composer appears once a hint arrives and a lead is not
+  // already recorded for this browser.
+  const [leadCtaHint, setLeadCtaHint] = useState<string | null>(null);
+  const [leadFormOpen, setLeadFormOpen] = useState(false);
+  const [leadDone, setLeadDone] = useState(false);
 
   const setMapModeRouted = useCallback(
     (mode: "map" | "list") => {
@@ -163,6 +186,12 @@ function ChatCanvas() {
   useEffect(() => {
     sessionIdRef.current = getSessionId();
     warmPrefetchCache();
+    try {
+      if (window.localStorage.getItem(LEAD_ID_STORAGE_KEY)) setLeadDone(true);
+    } catch {
+      // Storage unavailable (private mode): the chip may reappear; the
+      // backend duplicate check still guards the actual submission.
+    }
   }, []);
 
   // First-open greeting: render purely from the static FE greeting config so
@@ -250,10 +279,13 @@ function ChatCanvas() {
           onAck: () => {
             patchMessage(assistantId, { acknowledged: true });
           },
-          onRouting: () => {
+          onRouting: (payload) => {
             patchMessage(assistantId, { progressStep: 0 });
             // Map panel is always visible, so panel_hint no longer needs to
             // switch the rail; the hint is informational only.
+            if (payload.lead_cta_hint != null) {
+              setLeadCtaHint(payload.lead_cta_hint);
+            }
           },
           onSources: (sources) => {
             patchMessage(assistantId, { sources, progressStep: 1 });
@@ -437,12 +469,49 @@ function ChatCanvas() {
               disabled={false}
               streaming={streaming}
             />
+            {/* §5.1 entry point (a). Entry point (b), a CTA inside the
+                AffordabilityCard, is out of scope until that card exists. */}
+            {leadCtaHint !== null && !leadDone && (
+              <button
+                type="button"
+                onClick={() => setLeadFormOpen(true)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                  width: "100%",
+                  maxWidth: 860,
+                  height: 48,
+                  margin: "10px auto 0",
+                  padding: "0 16px",
+                  border: `1px solid ${C.primaryBorder}`,
+                  borderRadius: RADIUS.pill,
+                  background: C.primarySoft,
+                  color: C.primary,
+                  fontSize: 16,
+                  fontWeight: 600,
+                  fontFamily: "inherit",
+                  cursor: "pointer",
+                }}
+              >
+                <span aria-hidden="true">📥</span>
+                Nhận bảng giá + ưu đãi qua điện thoại
+              </button>
+            )}
             <div style={{ marginTop: 8 }}>
               <Disclaimer />
             </div>
           </div>
         </div>
       </div>
+      <LeadForm
+        open={leadFormOpen}
+        sessionId={sessionIdRef.current}
+        notePrefill={buildLeadNote(messages)}
+        onClose={() => setLeadFormOpen(false)}
+        onSuccess={() => setLeadDone(true)}
+      />
     </div>
   );
 }

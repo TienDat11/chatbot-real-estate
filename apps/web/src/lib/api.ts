@@ -227,3 +227,91 @@ function tryJson(raw: string): unknown {
 // The first-open greeting is now static FE content (see greetingContent.ts), so
 // there is no /llms-hello fetch path left in the client. Streaming query answers
 // remain the only interactive API the chat talks to.
+
+/* ------------------------------------------------------------------ */
+/* Lead submission (Story 5.7) - POST /api/lead.                      */
+/* ------------------------------------------------------------------ */
+
+const API_LEAD_ENDPOINT = "/api/lead";
+
+/** Request body of `POST /api/lead` (snake_case mirrors the FastAPI model). */
+export interface LeadPayload {
+  session_id?: string;
+  name?: string;
+  phone: string;
+  consent: boolean;
+  note?: string;
+  budget_vnd?: number;
+}
+
+/** Successful `POST /api/lead` response (HTTP 201). */
+export interface LeadSubmitResult {
+  lead_id: number;
+  will_call_within_minutes: number;
+}
+
+export type LeadSubmitErrorKind = "duplicate" | "validation" | "network";
+
+/** Typed submit failure so LeadForm can map HTTP outcomes onto UX states. */
+export class LeadSubmitError extends Error {
+  readonly kind: LeadSubmitErrorKind;
+  readonly status: number | null;
+
+  constructor(kind: LeadSubmitErrorKind, message: string, status: number | null = null) {
+    super(message);
+    this.name = "LeadSubmitError";
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
+/**
+ * Submits a customer lead. Resolves on 201; throws LeadSubmitError classified
+ * as duplicate (409), validation (other 4xx, carrying the backend detail when
+ * it is a plain string), or network (fetch failure / 5xx).
+ */
+export async function submitLead(payload: LeadPayload): Promise<LeadSubmitResult> {
+  let response: Response;
+  try {
+    response = await fetch(API_LEAD_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new LeadSubmitError("network", "Không kết nối được máy chủ. Vui lòng thử lại.");
+  }
+
+  if (response.ok) {
+    return (await response.json()) as LeadSubmitResult;
+  }
+
+  if (response.status === 409) {
+    throw new LeadSubmitError(
+      "duplicate",
+      "Số này đã đăng ký, chuyên viên sẽ gọi sớm nhất.",
+      409
+    );
+  }
+
+  if (response.status >= 400 && response.status < 500) {
+    const detail = await readErrorDetail(response);
+    throw new LeadSubmitError(
+      "validation",
+      detail ?? "Thông tin chưa hợp lệ. Vui lòng kiểm tra lại.",
+      response.status
+    );
+  }
+
+  throw new LeadSubmitError("network", "Máy chủ gặp sự cố. Vui lòng thử lại sau.", response.status);
+}
+
+/** Best-effort extraction of a FastAPI `detail` string from an error body. */
+export async function readErrorDetail(response: Response): Promise<string | null> {
+  try {
+    const data = (await response.json()) as { detail?: unknown };
+    return typeof data.detail === "string" ? data.detail : null;
+  } catch {
+    return null;
+  }
+}
