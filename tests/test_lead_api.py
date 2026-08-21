@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from api.application.services.conv_state import get_context, maybe_lead_cta_hint
 from api.infrastructure.ports.leads import get_lead_repository
 from api.interfaces.api.main import create_app
 from tests.test_sales_api import FakeLeadRepository
@@ -81,3 +82,32 @@ def test_submit_lead_strips_name_and_note_whitespace() -> None:
     assert response.status_code == 201
     assert repo.leads[1].name == "Anh Test"
     assert repo.leads[1].note == "Quan tâm căn 2PN"
+
+
+def test_submit_lead_marks_session_handoff_done() -> None:
+    # §6.7: a successful lead submit must flip the session to phone_given +
+    # handoff_done, otherwise gate (b) of maybe_lead_cta_hint never blocks and
+    # the customer is asked for a phone again after already providing it.
+    session_id = "session-handoff"
+    ctx = get_context(session_id)
+    ctx.useful_turns = 1  # make (a) pass so only (b) can suppress the hint
+    client, _ = make_client()
+    response = client.post(
+        "/api/lead",
+        json={"session_id": session_id, "phone": "0905123456", "consent": True},
+    )
+    assert response.status_code == 201
+    assert ctx.slots.get("phone_given") is True
+    assert ctx.state == "handoff_done"
+    assert maybe_lead_cta_hint(ctx) is None
+
+
+def test_submit_lead_without_session_skips_state_marking() -> None:
+    # Anonymous submits must not mint a throwaway conv_state entry.
+    client, repo = make_client()
+    response = client.post(
+        "/api/lead",
+        json={"phone": "0905123456", "consent": True},
+    )
+    assert response.status_code == 201
+    assert repo.leads[1].session_id is None

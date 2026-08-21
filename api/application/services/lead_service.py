@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
+from api.application.services.conv_state import mark_phone_given
 from api.infrastructure.ports.leads import LeadRepository, LeadRow, SalesRow
 
 logger = logging.getLogger("api.lead_service")
@@ -92,6 +93,11 @@ async def create_customer_lead(
         note=note,
         budget_vnd=budget_vnd,
     )
+    # Session state is in-memory only, so mark here instead of in the route to
+    # keep every caller of this service consistent (plan §6.7). Anonymous
+    # sessions get no marker: get_context would mint a throwaway key.
+    if session_id:
+        mark_phone_given(session_id)
     _, assigned = await _assign(repo, lead.id)
     return assigned or lead
 
