@@ -16,7 +16,7 @@ from api.infrastructure.ports.geo import GeoPlace, GeoPort, GeoResult
 logger = logging.getLogger("api.adapters.google_places")
 
 NEARBY_ENDPOINT = "/nearbysearch/json"
-TIMEOUT_S = 3.0
+TIMEOUT_S = 2.5  # geo provider HTTP budget; the geo step is sub-ms on the static binding, so 2.5s only guards the Google path
 
 
 class GooglePlaces(GeoPort):

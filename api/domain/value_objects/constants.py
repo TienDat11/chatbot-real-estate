@@ -6,9 +6,15 @@ Centralizes magic numbers/strings so provider or policy changes touch one file.
 from __future__ import annotations
 
 # --- Timeouts (seconds) ---
-DEFAULT_LLM_TIMEOUT_S = 30.0  # OpenAI client default per request
-DEFAULT_RERANK_TIMEOUT_S = 3.0  # HTTP rerank call budget
-LLM_CALL_TIMEOUT_S = 20.0  # per-operation LLM call budget (rewrite / nl2sql)
+# OpenAI client default per request. Non-streaming calls that do not override
+# it are bounded here; streaming generation is per-read, not totalled, so a
+# long answer stream is never cut by this value. 20s still allows the observed
+# rewrite/nl2sql single calls (median <5s) while shrinking the worst-case cap.
+DEFAULT_LLM_TIMEOUT_S = 20.0
+DEFAULT_RERANK_TIMEOUT_S = 3.0  # HTTP rerank call budget (measured 0.3-0.5s)
+# per-operation LLM call budget (rewrite / nl2sql). Observed per-step latencies
+# are <=9.3s warm; 12s keeps >=1.3x headroom over that while bounding stuck calls.
+LLM_CALL_TIMEOUT_S = 12.0
 
 # --- Query limits ---
 MAX_QUERY_LENGTH = 2000  # Pydantic cap on /query input

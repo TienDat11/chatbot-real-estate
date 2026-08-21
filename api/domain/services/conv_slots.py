@@ -80,23 +80,25 @@ def extract_purpose(query: str) -> "str | None":
         q_clean = re.sub(r"không\s+(đầu tư|mua đầu tư)\s*", " ", q)
     else:
         q_clean = q
-    # Specific sub-groups first so "cho thuê" maps to rent (not invest),
-    # "làm khách sạn" to hotel, and "làm văn phòng" to office before stay.
-    for kw in _PURPOSE_RENT:
-        if kw in q_clean:
-            return "rent"
+    # Specific sub-groups first so "làm khách sạn" -> hotel and "làm văn phòng"
+    # -> office before the broader invest/stay groups. "đầu tư" is checked before
+    # "cho thuê" because "mua để đầu tư cho thuê" is an investment intent where
+    # renting out is the mode, not a tenant rental (plan §6.3).
     for kw in _PURPOSE_OFFICE:
         if kw in q_clean:
             return "office"
     for kw in _PURPOSE_HOTEL:
         if kw in q_clean:
             return "hotel"
-    for kw in _PURPOSE_STAY:
-        if kw in q_clean:
-            return "stay"
     for kw in _PURPOSE_INVEST:
         if kw in q_clean:
             return "invest"
+    for kw in _PURPOSE_RENT:
+        if kw in q_clean:
+            return "rent"
+    for kw in _PURPOSE_STAY:
+        if kw in q_clean:
+            return "stay"
     return None
 
 
@@ -142,7 +144,7 @@ async def llm_slot_fill(query: str) -> "dict[str, Any]":
     model = model_for_role("extract")
     try:
         llm = get_llm()
-        text = await llm.complete(messages, json_mode=True, model=model, timeout=8.0)
+        text = await llm.complete(messages, json_mode=True, model=model, timeout=6.0)
         data = json.loads(_clean_json(text))
         if not isinstance(data, dict):
             return {}

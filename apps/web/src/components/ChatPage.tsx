@@ -8,9 +8,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { App as AntApp, Typography } from "antd";
 import { SafetyCertificateOutlined } from "@ant-design/icons";
 import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
-import type { Image, NearbyPlace } from "@rag-ragre/contracts";
+import type { NearbyPlace } from "@rag-ragre/contracts";
 import { streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
+import { GREETING_STATIC_TEXT, GREETING_IMAGES, GREETING_VIDEOS } from "@/lib/greetingContent";
 import type { ChatMessage } from "@/components/MessageBubble";
 import { AccessibilityControls } from "@/components/AccessibilityControls";
 import { warmPrefetchCache } from "@/lib/prefetch";
@@ -23,16 +24,6 @@ import { C, RADIUS, SHADOW } from "@/lib/tokens";
 const SESSION_KEY = "ragre.session_id";
 const HELLO_SHOWN_KEY = "ragre.hello_shown";
 const MAX_TURNS = 4;
-
-// Hardcoded first-open greeting. Shipping a static copy instead of calling the
-// backend LLM saves tokens on every load and guarantees the intro is always
-// grounded in The Camellia, regardless of backend availability.
-const GREETING_TEXT =
-  "Anh/Chị ơi, em chào Anh/Chị! Em là chuyên viên tư vấn dự án The Camellia Sơn Trà, Đà Nẵng. " +
-  "Dự án nằm ngay giao lộ Lê Văn Lương - Lê Đức Thọ, phường Thọ Quang, quận Sơn Trà, " +
-  "vừa gần biển vừa có view núi Sơn Trà, cùng 42 tiện ích đa tầng phục vụ trọn đời sống cả gia đình. " +
-  "Anh/Chị đang quan tâm theo hướng để ở, đầu tư, cho thuê, hay làm văn phòng/khách sạn ạ? " +
-  "Anh/Chị cứ nhắn nhu cầu của mình, em sẽ tư vấn chi tiết và gợi ý căn phù hợp nhất để Anh/Chị an tâm sở hữu nhé.";
 
 // Read the map mode from the URL query string so a refresh (F5) restores the
 // list view without remounting the chat (state is local). The rail tab no
@@ -83,20 +74,21 @@ const GREETING_CHUNK_MS = 40;
 const GREETING_CHUNK_SIZE = 3;
 
 /**
- * Streams the static greeting out character-by-character via a timer chain,
+ * Streams a greeting string out character-by-character via a timer chain,
  * mimicking a live SSE response so the bot appears to be typing. Cleans up its
  * own interval so no timer leaks after the greeting finishes.
  */
 function startFakeGreetingStream(
   messageId: string,
+  text: string,
   patch: (p: Partial<ChatMessage>) => void,
   onDone: () => void
 ): void {
   let cursor = 0;
-  const total = GREETING_TEXT.length;
+  const total = text.length;
   const timer = window.setInterval(() => {
     cursor = Math.min(total, cursor + GREETING_CHUNK_SIZE);
-    patch({ content: GREETING_TEXT.slice(0, cursor), streaming: true });
+    patch({ content: text.slice(0, cursor), streaming: true });
     if (cursor >= total) {
       window.clearInterval(timer);
       patch({ streaming: false });
@@ -173,10 +165,11 @@ function ChatCanvas() {
     warmPrefetchCache();
   }, []);
 
-  // First-open greeting: stream the static GREETING_TEXT out progressively
-  // (fake SSE) so it reads like a live answer, without any backend LLM call.
-  // The sessionStorage flag is claimed synchronously before the timer chain so
-  // React StrictMode's double-mount in dev and route changes never re-run it.
+  // First-open greeting: render purely from the static FE greeting config so
+  // the intro appears instantly with no network dependency. The copy streams
+  // out character-by-character for the typing feel, and the curated images +
+  // videos attach to that first message. The sessionStorage flag is claimed
+  // synchronously so StrictMode's double-mount in dev never re-runs it.
   useEffect(() => {
     if (typeof window === "undefined") return;
     let alreadyShown = false;
@@ -194,12 +187,23 @@ function ChatCanvas() {
 
     const greetingId = newId();
     setMessages((prev) => [
-      { id: greetingId, role: "assistant", content: "", streaming: true },
+      {
+        id: greetingId,
+        role: "assistant",
+        content: "",
+        streaming: true,
+        images: GREETING_IMAGES,
+        videos: GREETING_VIDEOS,
+      },
       ...prev,
     ]);
     setStreaming(true);
-    startFakeGreetingStream(greetingId, (patch) => patchMessage(greetingId, patch), () =>
-      setStreaming(false)
+
+    startFakeGreetingStream(
+      greetingId,
+      GREETING_STATIC_TEXT,
+      (patch) => patchMessage(greetingId, patch),
+      () => setStreaming(false)
     );
   }, [patchMessage]);
 
