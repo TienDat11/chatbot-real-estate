@@ -180,6 +180,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    from api.interfaces.api.admin_routes import (  # noqa: PLC0415
+        admin_session_router,
+        sales_session_router,
+    )
     from api.interfaces.api.hello import router as hello_router  # noqa: PLC0415
     from api.interfaces.api.lead import router as lead_router  # noqa: PLC0415
     from api.interfaces.api.projects import router as projects_router  # noqa: PLC0415
@@ -189,6 +193,8 @@ def create_app() -> FastAPI:
     app.include_router(sales_router)
     app.include_router(hello_router)
     app.include_router(projects_router)
+    app.include_router(admin_session_router)
+    app.include_router(sales_session_router)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:

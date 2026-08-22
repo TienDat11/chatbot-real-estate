@@ -19,9 +19,12 @@ from typing import Protocol
 class VerifiedFirebaseUser:
     """Claims extracted from a verified Firebase ID token.
 
-    `role` is deliberately None here: the sales role is resolved later from the
-    sales document (PG is the source of truth for roles), never trusted from a
-    client-mintable token claim.
+    `role` carries the signed `role` custom claim (None when the token has
+    none). Custom claims are minted server-side via the Firebase Admin SDK
+    and only become trustworthy after the adapter's signature/issuer/audience
+    verification, so they are safe for coarse role gating (story 8.3). The PG
+    sales row stays the source of truth for the per-user mapping (sales_id,
+    is_active), resolved downstream of this port.
     """
 
     firebase_uid: str
