@@ -46,6 +46,19 @@ export function signOutUser() {
   return signOut(getFirebaseAuth());
 }
 
+/**
+ * Fresh Firebase ID token for authorized backend calls (CRM routes verify it
+ * against the JWKS). getIdToken() refreshes an expired token automatically.
+ * Rejects when nobody is signed in — callers surface that as a re-login hint.
+ */
+export async function getFreshIdToken(): Promise<string> {
+  const currentUser = getFirebaseAuth().currentUser;
+  if (!currentUser) {
+    throw new Error("No signed-in Firebase user; cannot mint an ID token.");
+  }
+  return currentUser.getIdToken(/* forceRefresh */ false);
+}
+
 /** Subscribes to auth-state changes; returns the unsubscribe function. */
 export function onAuthChange(callback: (user: AuthenticatedUser | null) => void) {
   return onAuthStateChanged(getFirebaseAuth(), async (firebaseUser) => {

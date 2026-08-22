@@ -59,6 +59,17 @@ export interface Lead {
   workflowStatus: LeadWorkflowStatus;
   /** Postgres sales row id that owns the lead, when assigned. */
   assignedSalesId: number | null;
+  /**
+   * Firebase uid of the assigned sales (the mirror's isolation key). The CRM
+   * table needs it for the per-sales where() clause; never shown in the UI.
+   */
+  assignedSalesFirebaseUid: string | null;
+  /** Why the customer said no; set when a sales marks the lead "lost". */
+  rejectionReason: string | null;
+  /** ISO-8601 instant from which re-approaching this customer is allowed. */
+  reengageAt: string | null;
+  /** ISO-8601 instant marketing consent was withdrawn ("ngừng liên hệ"). */
+  marketingWithdrawnAt: string | null;
   escalCount: number;
   /** ISO-8601 instant the lead was first mirrored. */
   createdAt: string;

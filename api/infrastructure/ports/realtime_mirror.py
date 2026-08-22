@@ -34,6 +34,12 @@ class LeadMirrorDocument:
     consent_recorded_at: str | None
     last_customer_message_at: str | None
     updated_at: str
+    # CRM-facing fields (story 9.3): the realtime table filters rejected
+    # customers and reengage windows straight off Firestore, so the mirror
+    # must carry them; defaulted so older constructions stay source-compatible.
+    rejection_reason: str | None = None
+    reengage_at: str | None = None
+    marketing_withdrawn_at: str | None = None
 
 
 class RealtimeLeadMirror(Protocol):

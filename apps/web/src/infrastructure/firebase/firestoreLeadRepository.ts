@@ -9,6 +9,7 @@
 import { doc, getDoc, setDoc, type Firestore } from "firebase/firestore";
 import type { Lead } from "@/domain/crm/lead";
 import type {
+  CrmLeadStreamRequest,
   LeadRepositoryPort,
   LeadStreamHandlers,
 } from "@/domain/crm/ports/leadRepositoryPort";
@@ -40,6 +41,39 @@ export class FirestoreLeadRepository implements LeadRepositoryPort {
         filters: [
           { fieldPath: "project_key", operator: "==", value: request.projectKey },
         ],
+        orderBy: { fieldPath: "created_at", direction: "desc" },
+        limit: LEAD_STREAM_LIMIT,
+      },
+      {
+        onDocumentsChanged: (leads) => handlers.onLeadsChanged(leads),
+        onError: handlers.onError,
+        onConnectionStateChanged: handlers.onConnectionStateChanged,
+      }
+    );
+  }
+
+  streamLeadsForCrm(
+    request: CrmLeadStreamRequest,
+    handlers: LeadStreamHandlers
+  ): RealtimeSubscriptionHandle {
+    // The where() clause mirrors the firestore.rules isolation decision: a
+    // sales list query without it is rejected by Firestore outright, while an
+    // admin omits the filter to see every lead. Requires the composite index
+    // (assigned_sales_firebase_uid ASC, created_at DESC) declared in
+    // apps/web/firestore.indexes.json.
+    const crmFilters = request.assignedSalesFirebaseUid
+      ? [
+          {
+            fieldPath: "assigned_sales_firebase_uid",
+            operator: "==" as const,
+            value: request.assignedSalesFirebaseUid,
+          },
+        ]
+      : [];
+    return this.realtimeChannel.subscribeToQuery(
+      {
+        collectionName: LEAD_COLLECTION_NAME,
+        filters: crmFilters,
         orderBy: { fieldPath: "created_at", direction: "desc" },
         limit: LEAD_STREAM_LIMIT,
       },

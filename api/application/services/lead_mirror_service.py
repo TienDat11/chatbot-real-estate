@@ -75,6 +75,15 @@ def build_lead_mirror_document(
         ),
         # The chat transcript timestamp is not persisted on the lead row yet.
         last_customer_message_at=None,
+        rejection_reason=lead.rejection_reason,
+        reengage_at=(
+            lead.reengage_at.isoformat() if lead.reengage_at is not None else None
+        ),
+        marketing_withdrawn_at=(
+            lead.marketing_withdrawn_at.isoformat()
+            if lead.marketing_withdrawn_at is not None
+            else None
+        ),
         updated_at=datetime.now(timezone.utc).isoformat(),
     )
 

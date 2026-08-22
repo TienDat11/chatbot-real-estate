@@ -19,6 +19,7 @@
  * Swap walkthrough: see apps/web/src/lib/realtime/README.md.
  */
 import { LeadRealtimeService } from "@/application/crm/leadRealtimeService";
+import type { CrmNoteStorePort } from "@/domain/crm/ports/crmNoteStorePort";
 import type { Lead } from "@/domain/crm/lead";
 import type { LeadRepositoryPort } from "@/domain/crm/ports/leadRepositoryPort";
 import type { RealtimeChannelPort } from "@/domain/realtime/ports/realtimeChannelPort";
@@ -27,6 +28,7 @@ import {
   LEAD_COLLECTION_NAME,
   FirestoreLeadRepository,
 } from "./firebase/firestoreLeadRepository";
+import { FirestoreCrmNoteStore } from "./firebase/firestoreCrmNoteStore";
 import { FirestoreRealtimeChannel } from "./firebase/firestoreRealtimeChannel";
 import { mapLeadDocumentData } from "./firebase/mappers/leadDocumentMapper";
 
@@ -38,6 +40,8 @@ export interface RealtimeContainer {
   readonly leadRepository: LeadRepositoryPort;
   /** Use-case service the React hooks talk to. */
   readonly leadRealtimeService: LeadRealtimeService;
+  /** FIRESTORE-NATIVE staff-note store (story 9.3); no backend round-trip. */
+  readonly crmNoteStore: CrmNoteStorePort;
 }
 
 /**
@@ -51,6 +55,15 @@ export const REALTIME_CONTAINER: RealtimeContainer =
 function createLazyRealtimeContainer(): RealtimeContainer {
   let builtRealtimeChannel: RealtimeChannelPort<Lead> | null = null;
   let builtLeadRepository: LeadRepositoryPort | null = null;
+  let builtCrmNoteStore: CrmNoteStorePort | null = null;
+
+  /** Materializes the Firestore note store exactly once, on first real use. */
+  function getCrmNoteStore(): CrmNoteStorePort {
+    if (!builtCrmNoteStore) {
+      builtCrmNoteStore = new FirestoreCrmNoteStore(getFirebaseFirestore());
+    }
+    return builtCrmNoteStore;
+  }
 
   /** Materializes the Firestore adapters exactly once, on the first real use. */
   function getLeadRepository(): LeadRepositoryPort {
@@ -84,6 +97,9 @@ function createLazyRealtimeContainer(): RealtimeContainer {
     streamLeadsByProject(request, handlers) {
       return getLeadRepository().streamLeadsByProject(request, handlers);
     },
+    streamLeadsForCrm(request, handlers) {
+      return getLeadRepository().streamLeadsForCrm(request, handlers);
+    },
     getLeadById(leadId) {
       return getLeadRepository().getLeadById(leadId);
     },
@@ -105,6 +121,9 @@ function createLazyRealtimeContainer(): RealtimeContainer {
       streamLeadsByProject(request, handlers) {
         return getLeadRepository().streamLeadsByProject(request, handlers);
       },
+      streamLeadsForCrm(request, handlers) {
+        return getLeadRepository().streamLeadsForCrm(request, handlers);
+      },
       getLeadById(leadId) {
         return getLeadRepository().getLeadById(leadId);
       },
@@ -113,5 +132,13 @@ function createLazyRealtimeContainer(): RealtimeContainer {
       },
     },
     leadRealtimeService,
+    crmNoteStore: {
+      readLeadNote(leadId) {
+        return getCrmNoteStore().readLeadNote(leadId);
+      },
+      saveLeadNote(request) {
+        return getCrmNoteStore().saveLeadNote(request);
+      },
+    },
   };
 }

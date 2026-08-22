@@ -27,8 +27,10 @@ rules_version = '2';
 //   server-only (see IAM note).
 //
 // notes/{noteId}
-//   CRM notes attached to a lead. Read: authenticated sales/admin only.
-//   Write: server-only (see IAM note).
+//   One staff-authored CRM note per lead; the document id IS the lead id.
+//   Fields: content (string), updated_by_uid (string), updated_at (timestamp).
+//   Read: sales/admin. Write: FIRESTORE-NATIVE — the staff client writes it
+//   directly (validated below); never mirrored from PG.
 //
 // sales/{firebaseUid}
 //   Sales profile keyed by Firebase Auth uid. Owned fields: firebase_uid,
@@ -101,8 +103,21 @@ service cloud.firestore {
     match /notes/{noteId} {
       allow read: if isSalesOrAdmin();
 
-      // Server-only writes, same IAM-governed mirror path as leads.
-      allow write: if false;
+      // FIRESTORE-NATIVE (story 9.3): notes are the one CRM write authored
+      // directly by the signed-in staff client, never mirrored from PG. The
+      // document id is the lead id; setDoc(merge) lands as create or update,
+      // both validated identically — the author uid must be the caller's own,
+      // so a sales can never forge someone else's note. Deleting is refused
+      // to keep the note trail intact.
+      allow create, update: if isSalesOrAdmin()
+        && request.resource.data.keys().hasAll(
+          ["content", "updated_by_uid", "updated_at"]
+        )
+        && request.resource.data.updated_by_uid == request.auth.uid
+        && request.resource.data.content is string
+        && request.resource.data.content.size() <= 2000;
+
+      allow delete: if false;
     }
 
     // ---------------- sales profiles ----------------
