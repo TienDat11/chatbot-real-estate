@@ -87,8 +87,26 @@ if [[ -n "${PG_DUMP_BIN}" ]]; then
 elif docker ps --format '{{.Names}}' | grep -qx "${POSTGRES_CONTAINER}"; then
   # Container path: the container IS the server, so connect via localhost:5432
   # inside it and stream the custom-format dump to stdout -> host file.
+  #
+  # Secret handling: `docker exec -e PGPASSWORD=...` puts the value in the
+  # docker client's argv, visible in `ps` on the host. An --env-file is read
+  # by the docker client from disk and injected into the container process
+  # environment only, so the password never appears on a command line. The
+  # temp file is created 0600 and removed on exit.
   echo "[backup] using docker exec pg_dump in ${POSTGRES_CONTAINER}"
-  docker exec -e "PGPASSWORD=${PGPASSWORD}" "${POSTGRES_CONTAINER}" \
+  PGPASS_FILE="$(mktemp)"
+  chmod 600 "${PGPASS_FILE}"
+  trap 'rm -f "${PGPASS_FILE}"' EXIT
+  printf 'PGPASSWORD=%s\n' "${PGPASSWORD}" > "${PGPASS_FILE}"
+  # Native docker.exe cannot read a Git Bash POSIX path; translate it via
+  # cygpath so the env-file resolves identically under Git Bash, WSL, and
+  # plain Linux (where cygpath is absent and the path is used as-is).
+  if command -v cygpath >/dev/null 2>&1; then
+    PGPASS_FILE_DOCKER="$(cygpath -w "${PGPASS_FILE}")"
+  else
+    PGPASS_FILE_DOCKER="${PGPASS_FILE}"
+  fi
+  docker exec --env-file "${PGPASS_FILE_DOCKER}" "${POSTGRES_CONTAINER}" \
     pg_dump \
     -h localhost -p 5432 \
     -U "${POSTGRES_USER}" -d "${POSTGRES_DATABASE}" \

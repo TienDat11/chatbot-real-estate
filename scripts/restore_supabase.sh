@@ -101,6 +101,26 @@ elif ! docker ps --format '{{.Names}}' | grep -qx "${POSTGRES_CONTAINER}"; then
   exit 1
 fi
 
+# Docker client path: `docker exec -e PGPASSWORD=...` puts the password in the
+# docker client's argv, visible in `ps` on the host. An --env-file is read by
+# the docker client from disk and injected into the container process
+# environment only, so the secret never appears on a command line. The temp
+# file is created 0600 and removed on exit. The pg_restore docker call runs
+# under MSYS_NO_PATHCONV=1 (container-side /tmp path must not be rewritten),
+# so docker.exe needs the env-file as a native Windows path under Git Bash:
+# translate it here via cygpath; plain POSIX path elsewhere (Linux/WSL).
+if [[ "${HAVE_HOST_CLIENT}" != "1" ]]; then
+  PGPASS_FILE="$(mktemp)"
+  chmod 600 "${PGPASS_FILE}"
+  trap 'rm -f "${PGPASS_FILE}"' EXIT
+  printf 'PGPASSWORD=%s\n' "${SUPABASE_PASSWORD}" > "${PGPASS_FILE}"
+  if command -v cygpath >/dev/null 2>&1; then
+    PGPASS_FILE_DOCKER="$(cygpath -w "${PGPASS_FILE}")"
+  else
+    PGPASS_FILE_DOCKER="${PGPASS_FILE}"
+  fi
+fi
+
 run_psql() {
   # $1 = SQL text; executes against Supabase via the chosen client.
   if [[ "${HAVE_HOST_CLIENT}" == "1" ]]; then
@@ -109,7 +129,7 @@ run_psql() {
       -U "${SUPABASE_USER}" -d "${SUPABASE_DATABASE}" \
       -v ON_ERROR_STOP=1 -X -q -c "$1"
   else
-    docker exec -e "PGPASSWORD=${SUPABASE_PASSWORD}" "${POSTGRES_CONTAINER}" \
+    docker exec --env-file "${PGPASS_FILE_DOCKER}" "${POSTGRES_CONTAINER}" \
       psql \
       -h "${SUPABASE_HOST}" -p "${SUPABASE_PORT}" \
       -U "${SUPABASE_USER}" -d "${SUPABASE_DATABASE}" \
@@ -167,7 +187,7 @@ else
   # restore from there, then remove it. Never pipe -Fc via stdin.
   # MSYS_NO_PATHCONV stops Git Bash translating /tmp/... to a Windows path.
   docker cp "${DUMP_FILE}" "${POSTGRES_CONTAINER}:/tmp/${DUMP_BASENAME}"
-  if MSYS_NO_PATHCONV=1 docker exec -e "PGPASSWORD=${SUPABASE_PASSWORD}" "${POSTGRES_CONTAINER}" \
+  if MSYS_NO_PATHCONV=1 docker exec --env-file "${PGPASS_FILE_DOCKER}" "${POSTGRES_CONTAINER}" \
       pg_restore \
       -h "${SUPABASE_HOST}" -p "${SUPABASE_PORT}" \
       -U "${SUPABASE_USER}" -d "${SUPABASE_DATABASE}" \

@@ -33,7 +33,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from api.infrastructure.config.config import settings  # noqa: E402
-from ingest.upload_images_r2 import _CONTENT_TYPES, _slugify  # noqa: E402
+from ingest.upload_images_r2 import CONTENT_TYPES, slugify  # noqa: E402
 
 # Vietnamese display labels for the unit-type tokens found in floor-plan names.
 _UNIT_TYPE_LABELS: tuple[tuple[str, str], ...] = (
@@ -88,7 +88,7 @@ def build_title_caption(filename: str) -> tuple[str, str]:
         parts.append(type_label)
 
     if not parts:
-        stem = _slugify(filename).rsplit(".", 1)[0].replace("-", " ")
+        stem = slugify(filename).rsplit(".", 1)[0].replace("-", " ")
         parts.append(stem.title() or "Tổng thể")
 
     title = " — ".join(parts)
@@ -98,9 +98,9 @@ def build_title_caption(filename: str) -> tuple[str, str]:
 def _image_rows(project: str, src_dir: pathlib.Path, kind: str, r2_base: str):
     """Yield one dict of column values per in-scope image file."""
     for path in sorted(src_dir.iterdir()):
-        if not path.is_file() or path.suffix.lower() not in _CONTENT_TYPES:
+        if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES:
             continue
-        slug = _slugify(path.name)
+        slug = slugify(path.name)
         stem = slug.rsplit(".", 1)[0]
         title, caption = build_title_caption(path.name)
         with Image.open(path) as img:

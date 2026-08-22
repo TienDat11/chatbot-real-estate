@@ -8,12 +8,18 @@ load_document(preserve_seed_facts=True).
 
 The generated file is committed; re-run this script to regenerate after the
 corpus changes (idempotent output - ordering is deterministic).
+
+Drift check (keeps the committed seed in sync with the corpus):
+  python scripts/gen_soleil_seed.py --check
+Exits non-zero when the committed db/seed/soleil_campaign.sql no longer
+matches what the current data/_processed/soleil JSONs would generate.
 """
 
 from __future__ import annotations
 
 import json
 import pathlib
+import sys
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _PROC = _ROOT / "data" / "_processed" / "soleil"
@@ -419,7 +425,30 @@ def build_sql() -> str:
     return "\n".join(header + doc + campaign + body + ["COMMIT;", ""])
 
 
-def main() -> int:
+def _check_drift() -> int:
+    """Compare the committed seed SQL against a fresh generation.
+
+    The corpus JSONs and the committed SQL are two copies of the same data;
+    if either changes alone they drift silently (review M14). This check
+    surfaces that drift so it is caught before it reaches production.
+    """
+    if not _OUT.exists():
+        print(f"DRIFT: {_OUT} is missing — run scripts/gen_soleil_seed.py to generate it.")
+        return 1
+    generated = build_sql()
+    committed = _OUT.read_text(encoding="utf-8")
+    if generated != committed:
+        print("DRIFT: db/seed/soleil_campaign.sql is out of date with the corpus.")
+        print("  Re-run: python scripts/gen_soleil_seed.py")
+        return 1
+    print(f"OK: {_OUT} matches the processed Soleil corpus ({len(committed)} bytes).")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if "--check" in args:
+        return _check_drift()
     sql = build_sql()
     _OUT.write_text(sql, encoding="utf-8")
     print(f"wrote {_OUT} ({len(sql)} bytes)")

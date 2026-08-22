@@ -77,6 +77,13 @@ def _slugify(filename: str) -> str:
     return f"{slug}.{filename.rsplit('.', 1)[1].lower()}"
 
 
+# Public aliases for cross-module consumers (review m2): other modules must
+# import the public names rather than reaching into the private ones. The
+# private names stay as deprecated aliases so existing callers keep working.
+CONTENT_TYPES = _CONTENT_TYPES
+slugify = _slugify
+
+
 def _kind_for(filename: str) -> str | None:
     """Return the R2 object kind for a filename, or None if it is not in scope."""
     for prefix, kind in _KIND_RULES:
