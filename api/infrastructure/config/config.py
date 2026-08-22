@@ -144,6 +144,34 @@ class Settings(BaseSettings):
     max_async_llm: int = 6
     max_parallel_workers: int = 2
 
+    # Firebase realtime layer (hybrid D1). The binding is the single switch for
+    # the whole BE realtime layer; "firestore" activates the REST mirror and the
+    # JWKS token verifier stays live regardless because auth must not depend on
+    # the mirror binding. firebase-admin is banned by the stack lock, hence the
+    # service-account fields below feed a pure httpx+PyJWT OAuth2 grant.
+    firebase_binding: str = "off"  # off | firestore
+    firebase_project_id: str = "sale-chat-bot-11e49"
+    firebase_service_account_client_email: str = ""
+    # Env-provided PEM with \n escapes (the JSON key-file form); decoded before signing.
+    firebase_service_account_private_key: str = ""
+    # Ops-only web key (session-cookie exchange later); never used for token verify.
+    firebase_web_api_key: str = ""
+
+    @property
+    def firebase_firestore_rest_base_url(self) -> str:
+        """Firestore REST v1 root — the no-SDK write path for the mirror."""
+        return "https://firestore.googleapis.com/v1"
+
+    @property
+    def firebase_jwks_url(self) -> str:
+        """Google's public JWKS for securetoken RS256 key rotation."""
+        return "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"
+
+    @property
+    def firebase_auth_issuer(self) -> str:
+        """Expected ID-token issuer for this Firebase project."""
+        return f"https://securetoken.google.com/{self.firebase_project_id}"
+
     # DSNs
     @property
     def pg_dsn(self) -> str:
