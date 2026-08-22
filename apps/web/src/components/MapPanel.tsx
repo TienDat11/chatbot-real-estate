@@ -1,9 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Typography } from "antd";
+import { Button, Modal, Typography } from "antd";
 import { CarOutlined, EnvironmentOutlined, UnorderedListOutlined } from "@ant-design/icons";
 import type { NearbyPlace } from "@rag-ragre/contracts";
+import {
+  createDirectionsFlow,
+  type DirectionsFlow,
+  type LineStringGeometry,
+  type RouteDirections,
+} from "@/lib/routeDirections";
 // Required for maplibre markers (position: absolute, anchoring) and controls.
 // Without it markers render as static elements that stretch the canvas container.
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -55,11 +61,10 @@ export const DEFAULT_PROJECT: { lat: number; lng: number; name: string } =
 const OSM_TILE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
-function dirUrl(p: NearbyPlace): string {
-  const dest = encodeURIComponent(p.lat + "," + p.lng);
-  const origin = encodeURIComponent(`${DEFAULT_PROJECT.lat},${DEFAULT_PROJECT.lng}`);
-  return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${dest}`;
-}
+// Stable ids for the client-side route overlay so a new route (or a project
+// change) can replace the previous polyline without leaking layers.
+const ROUTE_SOURCE_ID = "directions-route";
+const ROUTE_LAYER_ID = "directions-route-line";
 
 /* marker builders ------------------------------------------------------- */
 function projectMarkerElement(name: string): HTMLButtonElement {
@@ -118,6 +123,15 @@ export function MapPanel({
   const [activeFilter, setActiveFilter] = useState<FilterDef>(FILTERS[0]);
   const [highlightKey, setHighlightKey] = useState<string | null>(null);
   const highlightTimer = useRef<number | null>(null);
+  // Consent-first directions (story 10.7): the modal opens before any
+  // geolocation call, and the resolved location never leaves this component.
+  const [directionsOpen, setDirectionsOpen] = useState(false);
+  const [directionsBusy, setDirectionsBusy] = useState(false);
+  const [routeBadge, setRouteBadge] = useState<RouteDirections | null>(null);
+  const activeDirectionsRef = useRef<DirectionsFlow | null>(null);
+  // A route approved while the map is absent (list mode) is drawn as soon as
+  // the map finishes loading instead of being silently dropped.
+  const pendingRouteRef = useRef<LineStringGeometry | null>(null);
 
   const sorted = useMemo(() => {
     return [...places].sort((a, b) => (a.distance_m ?? Infinity) - (b.distance_m ?? Infinity));
@@ -138,7 +152,12 @@ export function MapPanel({
     // Tear down when the container is hidden/detached (list mode) so the map
     // is rebuilt fresh when the user returns to map mode (not a blank canvas).
     if (mode !== "map" || !el) {
-      if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; }
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+        setRouteBadge(null);
+        pendingRouteRef.current = null;
+      }
       return;
     }
     if (mapRef.current) return;
@@ -158,9 +177,24 @@ export function MapPanel({
       });
       mapRef.current = map;
       // Wait for style so isStyleLoaded() is true for the marker effect.
-      map.on("load", () => setMarkerTick((t) => t + 1));
+      map.on("load", () => {
+        setMarkerTick((t) => t + 1);
+        // Route approved before this map existed (list mode) gets drawn now.
+        if (pendingRouteRef.current) {
+          void drawRouteLine(pendingRouteRef.current);
+          pendingRouteRef.current = null;
+        }
+      });
     })();
-    return () => { disposed = true; if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } };
+    return () => {
+      disposed = true;
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+        setRouteBadge(null);
+        pendingRouteRef.current = null;
+      }
+    };
   }, [tileUrl, project.lng, project.lat, mode]);
 
   /* Recreate markers when data/filter/map become ready. */
@@ -230,16 +264,109 @@ export function MapPanel({
       d.textContent = `${p.kinds[0] ?? "Tiện ích"} · ${fmtDistance(p.distance_m)}`;
       d.style.cssText = `font-size:16px;color:${MUTED};margin:2px 0 10px;`;
       body.appendChild(d);
-      const cta = document.createElement("a");
-      cta.href = dirUrl(p);
-      cta.target = "_blank";
-      cta.rel = "noopener noreferrer";
+      const cta = document.createElement("button");
+      cta.type = "button";
       cta.textContent = "Chỉ đường";
-      cta.style.cssText = `display:flex;align-items:center;justify-content:center;width:100%;height:48px;background:${NAVY};color:#fff;border-radius:8px;text-decoration:none;font-size:16px;font-weight:600;`;
+      // Consent-first: only opens the location popup; geolocation and routing
+      // happen after the visitor agrees (story 10.7).
+      cta.addEventListener("click", () => requestDirections());
+      cta.style.cssText = `display:flex;align-items:center;justify-content:center;width:100%;height:48px;background:${NAVY};color:#fff;border-radius:8px;border:none;text-decoration:none;font-size:16px;font-weight:600;cursor:pointer;`;
       body.appendChild(cta);
       popupRef.current = new maplibre.Popup({ closeButton: true, closeOnClick: false, offset: 18 })
         .setLngLat([p.lng, p.lat]).setDOMContent(body).addTo(mapHere);
     })();
+  }
+
+  /* ---- consent-first directions (story 10.7) ---- */
+
+  // "Chỉ đường" always goes through the permission popup first. The flow is
+  // created lazily on the click so SSR/static render never touches navigator.
+  function requestDirections() {
+    const flow = createDirectionsFlow(project, {
+      geolocation: typeof navigator !== "undefined" ? navigator.geolocation : undefined,
+    });
+    activeDirectionsRef.current = flow;
+    flow.begin();
+    setDirectionsOpen(true);
+  }
+
+  // User accepted: resolve the location, then draw the OSRM route or fall back
+  // to the 5.2 Google Maps deep-link when the location/route is unavailable.
+  async function approveDirections() {
+    const flow = activeDirectionsRef.current;
+    if (!flow) return;
+    setDirectionsBusy(true);
+    try {
+      const outcome = await flow.confirm();
+      if (outcome.status === "route") {
+        setRouteBadge(outcome);
+        const map = mapRef.current;
+        if (map && map.isStyleLoaded()) {
+          await drawRouteLine(outcome.geometry);
+        } else {
+          // The map is absent (list mode) or still loading its style: keep the
+          // geometry and let the map "load" handler draw it.
+          pendingRouteRef.current = outcome.geometry;
+          if (!map) setMode("map");
+        }
+      } else {
+        clearRoute();
+        window.open(outcome.url, "_blank", "noopener,noreferrer");
+      }
+    } finally {
+      setDirectionsBusy(false);
+      setDirectionsOpen(false);
+    }
+  }
+
+  // User dismissed the popup: keep the 5.2 deep-link behaviour (no origin
+  // coordinate, so no location is requested or shared).
+  function cancelDirections() {
+    const flow = activeDirectionsRef.current;
+    if (flow) {
+      const outcome = flow.cancel();
+      if (outcome.status === "fallback") {
+        window.open(outcome.url, "_blank", "noopener,noreferrer");
+      }
+    }
+    setDirectionsOpen(false);
+  }
+
+  function removeRouteOverlay() {
+    const map = mapRef.current;
+    if (!map) return;
+    if (map.getLayer(ROUTE_LAYER_ID)) map.removeLayer(ROUTE_LAYER_ID);
+    if (map.getSource(ROUTE_SOURCE_ID)) map.removeSource(ROUTE_SOURCE_ID);
+  }
+
+  function clearRoute() {
+    removeRouteOverlay();
+    setRouteBadge(null);
+  }
+
+  // Draws the OSRM polyline and fits the view to the whole route so the
+  // visitor can read the full path, not just the tail.
+  async function drawRouteLine(geometry: LineStringGeometry) {
+    const map = mapRef.current;
+    if (!map) return;
+    const maplibre = await import("maplibre-gl");
+    removeRouteOverlay();
+    map.addSource(ROUTE_SOURCE_ID, {
+      type: "geojson",
+      data: geometry as unknown as GeoJSON.GeoJSON,
+    });
+    map.addLayer({
+      id: ROUTE_LAYER_ID,
+      type: "line",
+      source: ROUTE_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": NAVY, "line-width": 5, "line-opacity": 0.9 },
+    });
+    const [firstLng, firstLat] = geometry.coordinates[0];
+    const bounds = new maplibre.LngLatBounds([firstLng, firstLat], [firstLng, firstLat]);
+    geometry.coordinates.forEach(([lng, lat]) => bounds.extend([lng, lat]));
+    bounds.extend([project.lng, project.lat]);
+    map.fitBounds(bounds, { padding: 48, duration: 700 });
   }
 
   return (
@@ -352,11 +479,57 @@ export function MapPanel({
             itemRefs={listItemRefs}
             highlightKey={highlightKey}
             onPick={flyToMaybe}
+            onDirections={requestDirections}
           />
         ) : (
-          <div ref={containerRef} style={{ position: "absolute", inset: 0, filter: "saturate(0.85) contrast(1.02)" }} />
+          <>
+            <div ref={containerRef} style={{ position: "absolute", inset: 0, filter: "saturate(0.85) contrast(1.02)" }} />
+            {routeBadge && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  right: 12,
+                  zIndex: 2,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  background: "#FFFFFF",
+                  border: `1px solid ${NAVY}`,
+                  borderRadius: 10,
+                  padding: "8px 14px",
+                  boxShadow: "0 2px 8px rgba(26,34,51,.18)",
+                }}
+              >
+                <CarOutlined style={{ color: NAVY, fontSize: 20 }} />
+                <div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: INK }}>{routeBadge.statsLabel}</div>
+                  <div style={{ fontSize: 13, color: MUTED }}>Đường đi dự kiến</div>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
+      {/* Permission popup: explains why the location is needed and that it
+          stays on the device before any geolocation call is made. */}
+      <Modal
+        open={directionsOpen}
+        title="Cho phép lấy vị trí của bạn?"
+        onOk={approveDirections}
+        onCancel={cancelDirections}
+        okText={directionsBusy ? "Đang tính đường..." : "Đồng ý"}
+        cancelText="Không"
+        confirmLoading={directionsBusy}
+        centered
+      >
+        <p style={{ fontSize: 16, lineHeight: 1.65, color: INK, marginTop: 8 }}>
+          Để vẽ đường đi từ vị trí hiện tại của bạn đến dự án trên bản đồ, ứng dụng cần biết vị trí của bạn.
+        </p>
+        <p style={{ fontSize: 16, lineHeight: 1.65, color: MUTED }}>
+          Vị trí chỉ được sử dụng ngay trên máy này để tính đường đi, không được gửi đến máy chủ và không được lưu lại sau khi đóng trang.
+        </p>
+      </Modal>
     </div>
   );
 }
@@ -367,11 +540,13 @@ function PlaceList({
   itemRefs,
   highlightKey,
   onPick,
+  onDirections,
 }: {
   places: NearbyPlace[];
   itemRefs: React.MutableRefObject<Map<string, HTMLLIElement | null>>;
   highlightKey: string | null;
   onPick: (p: NearbyPlace) => void;
+  onDirections: () => void;
 }) {
   return (
     <div style={{ height: "100%", overflowY: "auto" }}>
@@ -410,10 +585,9 @@ function PlaceList({
               </button>
               <Button
                 type="primary"
-                href={dirUrl(p)}
-                target="_blank"
                 icon={<CarOutlined />}
                 block
+                onClick={onDirections}
                 style={{ marginTop: 10, height: 48, fontSize: 16, background: NAVY, fontWeight: 600 }}
               >
                 Chỉ đường
