@@ -37,15 +37,48 @@ interface RawSseEvent {
   data: unknown;
 }
 
+/** Structured `{"ok": false, "error": {"code", "message"}}` error envelope. */
+export interface ApiErrorEnvelope {
+  ok?: boolean;
+  error?: { code?: string; message?: string };
+  /** Optional project list a future backend may attach to PROJECT_SCOPE 422. */
+  projects?: unknown;
+}
+
+/**
+ * HTTP-level query failure carrying the backend error code so callers can
+ * branch on the outcome (e.g. 422 PROJECT_SCOPE prompts the ProjectPicker).
+ */
+export class QueryRequestError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  /** Raw error envelope; may hold a project list for the picker. */
+  readonly body: ApiErrorEnvelope | null;
+
+  constructor(status: number, message: string, code: string | null, body: ApiErrorEnvelope | null = null) {
+    super(message);
+    this.name = "QueryRequestError";
+    this.status = status;
+    this.code = code;
+    this.body = body;
+  }
+}
+
 /**
  * Streams a chat query through POST /api/query (SSE) and fans out events to
  * the provided handlers. Supports standard `event:`/`data:` framing plus a
  * `events:` batch line (JSON array of events).
+ *
+ * Story 10.1-FE: every query carries the persistent device id and the chosen
+ * project key. project_key may be an empty string while no project is picked,
+ * which the backend's default rule maps to the PROJECT_SCOPE 422.
  */
 export async function streamQuery(
   req: {
     query: string;
     session_id?: string;
+    device_id?: string;
+    project_key?: string;
     as_of?: string;
     history?: { role: "user" | "assistant"; content: string }[];
   },
@@ -68,8 +101,15 @@ export async function streamQuery(
   }
 
   if (!response.ok) {
-    const err = new Error(
-      `Máy chủ trả lỗi ${response.status}. Vui lòng thử lại sau.`
+    // The backend answers 422 PROJECT_SCOPE when more than one project is
+    // active and none was chosen; surface the code so the chat can offer the
+    // picker instead of a dead-end error toast.
+    const body = await readErrorBody(response);
+    const err = new QueryRequestError(
+      response.status,
+      body?.error?.message ?? `Máy chủ trả lỗi ${response.status}. Vui lòng thử lại sau.`,
+      body?.error?.code ?? null,
+      body
     );
     handlers.onError?.(err);
     return;
@@ -236,7 +276,11 @@ const API_LEAD_ENDPOINT = "/api/lead";
 
 /** Request body of `POST /api/lead` (snake_case mirrors the FastAPI model). */
 export interface LeadPayload {
+  /** Project the lead belongs to (backend requires it, story 10.1/G1). */
+  project_key: string;
   session_id?: string;
+  /** Anonymous persistent device id (D7), sent alongside the lead. */
+  device_id?: string;
   name?: string;
   phone: string;
   consent: boolean;
@@ -311,6 +355,15 @@ export async function readErrorDetail(response: Response): Promise<string | null
   try {
     const data = (await response.json()) as { detail?: unknown };
     return typeof data.detail === "string" ? data.detail : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Parses the backend error envelope; returns null when the body is not JSON. */
+async function readErrorBody(response: Response): Promise<ApiErrorEnvelope | null> {
+  try {
+    return (await response.json()) as ApiErrorEnvelope;
   } catch {
     return null;
   }

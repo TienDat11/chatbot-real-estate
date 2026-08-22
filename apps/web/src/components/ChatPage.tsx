@@ -5,11 +5,11 @@
 import "@ant-design/v5-patch-for-react-19";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { App as AntApp, Typography } from "antd";
-import { SafetyCertificateOutlined } from "@ant-design/icons";
+import { App as AntApp, Button, Typography } from "antd";
+import { SafetyCertificateOutlined, SwapOutlined } from "@ant-design/icons";
 import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
 import type { NearbyPlace } from "@rag-ragre/contracts";
-import { streamQuery } from "@/lib/api";
+import { QueryRequestError, streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
 import { GREETING_STATIC_TEXT, GREETING_IMAGES, GREETING_VIDEOS } from "@/lib/greetingContent";
 import type { ChatMessage } from "@/components/MessageBubble";
@@ -21,8 +21,11 @@ import { MapPanel, DEFAULT_PROJECT } from "./MapPanel";
 import { LeadForm, LEAD_ID_STORAGE_KEY } from "./LeadForm";
 import { STATIC_PLACES } from "@/lib/places";
 import { C, RADIUS, SHADOW } from "@/lib/tokens";
+import { getDeviceId, getSessionId, getStoredProjectKey, storeProjectKey } from "@/features/chat/identity";
+import { loadActiveProjects, FALLBACK_ACTIVE_PROJECTS } from "@/features/chat/activeProjects";
+import type { ActiveProject } from "@/features/chat/activeProjects";
+import { ProjectPicker } from "@/features/chat/ProjectPicker";
 
-const SESSION_KEY = "ragre.session_id";
 const HELLO_SHOWN_KEY = "ragre.hello_shown";
 const MAX_TURNS = 4;
 
@@ -49,19 +52,6 @@ function syncModeUrl(mode: "map" | "list"): void {
   const nextUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
   if (window.location.href !== nextUrl) {
     window.history.replaceState(null, "", nextUrl);
-  }
-}
-
-function getSessionId(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    const existing = window.sessionStorage.getItem(SESSION_KEY);
-    if (existing) return existing;
-    const fresh = crypto.randomUUID();
-    window.sessionStorage.setItem(SESSION_KEY, fresh);
-    return fresh;
-  } catch {
-    return crypto.randomUUID();
   }
 }
 
@@ -144,6 +134,24 @@ function ChatCanvas() {
   const [leadCtaHint, setLeadCtaHint] = useState<string | null>(null);
   const [leadFormOpen, setLeadFormOpen] = useState(false);
   const [leadDone, setLeadDone] = useState(false);
+  // Story 10.1-FE: device_id is the anonymous cross-visit identity, minted once
+  // and kept in localStorage so a returning caller is recognized by the backend.
+  // Held in state (not a ref) because the LeadForm reads it during render.
+  const [deviceId, setDeviceId] = useState("");
+  // Story 10.3: the chosen active project, persisted so the next visit skips
+  // the picker; an empty key means the backend will answer 422 PROJECT_SCOPE.
+  const [projectKey, setProjectKey] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    try {
+      return getStoredProjectKey(window.localStorage) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [activeProjects, setActiveProjects] = useState<ActiveProject[]>(FALLBACK_ACTIVE_PROJECTS);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  // The user question awaiting a project choice; re-sent once a project is picked.
+  const pendingQueryRef = useRef<string | null>(null);
 
   const setMapModeRouted = useCallback(
     (mode: "map" | "list") => {
@@ -184,7 +192,15 @@ function ChatCanvas() {
   );
 
   useEffect(() => {
-    sessionIdRef.current = getSessionId();
+    try {
+      setDeviceId(getDeviceId(window.localStorage));
+      sessionIdRef.current = getSessionId(window.sessionStorage);
+    } catch {
+      // Storage unavailable (private mode): mint ephemeral ids so the chat
+      // still works; persistence is a progressive enhancement here.
+      setDeviceId(crypto.randomUUID());
+      sessionIdRef.current = crypto.randomUUID();
+    }
     warmPrefetchCache();
     try {
       if (window.localStorage.getItem(LEAD_ID_STORAGE_KEY)) setLeadDone(true);
@@ -236,6 +252,16 @@ function ChatCanvas() {
     );
   }, [patchMessage]);
 
+  // Opens the ProjectPicker with the best available active-project list: the
+  // one carried by the 422 body when present, otherwise the endpoint/fallback.
+  const openProjectPicker = useCallback(async (errorBodyProjects?: unknown) => {
+    const projects = await loadActiveProjects(
+      errorBodyProjects !== undefined ? { projects: errorBodyProjects } : undefined
+    );
+    setActiveProjects(projects);
+    setProjectPickerOpen(true);
+  }, []);
+
   const handleSend = useCallback(
     (text: string) => {
       const query = text.trim();
@@ -274,7 +300,13 @@ function ChatCanvas() {
         flushTimerRef.current = null;
       };
       void streamQuery(
-        { query, session_id: sessionIdRef.current, history },
+        {
+          query,
+          session_id: sessionIdRef.current,
+          device_id: deviceId,
+          project_key: projectKey,
+          history,
+        },
         {
           onAck: () => {
             patchMessage(assistantId, { acknowledged: true });
@@ -327,6 +359,18 @@ function ChatCanvas() {
               window.clearTimeout(flushTimerRef.current);
               flushTokens();
             }
+            if (err instanceof QueryRequestError && err.code === "PROJECT_SCOPE") {
+              // More than one active project and none chosen: open the picker
+              // instead of a dead-end error toast. The question is kept aside
+              // and re-sent with the chosen project key.
+              patchMessage(assistantId, {
+                streaming: false,
+                content: "Vui lòng chọn dự án muốn tìm hiểu để tiếp tục.",
+              });
+              pendingQueryRef.current = query;
+              void openProjectPicker(err.body?.projects);
+              return;
+            }
             patchMessage(assistantId, { streaming: false, error: true, content: err.message });
             message.error(err.message);
             setStreaming(false);
@@ -336,7 +380,35 @@ function ChatCanvas() {
         }
       );
     },
-    [messages, streaming, message, patchMessage, setMapModeRouted]
+    [messages, streaming, message, patchMessage, setMapModeRouted, projectKey, openProjectPicker, deviceId]
+  );
+
+  // Applies a picked project: persist it, reset the conversation context so the
+  // new project answers fresh, then re-send the question that prompted the pick.
+  const handleSelectProject = useCallback(
+    (key: string) => {
+      try {
+        storeProjectKey(window.localStorage, key);
+      } catch {
+        // Storage unavailable (private mode): the choice still applies for the
+        // current visit even though it will not survive a reload.
+      }
+      setProjectKey(key);
+      setProjectPickerOpen(false);
+      // A fresh session id detaches the new project's context from the old one
+      // on the backend (`device_id:session_id` scope key).
+      try {
+        sessionIdRef.current = getSessionId(window.sessionStorage, true);
+      } catch {
+        sessionIdRef.current = crypto.randomUUID();
+      }
+      setMessages([]);
+      setLeadCtaHint(null);
+      const pending = pendingQueryRef.current;
+      pendingQueryRef.current = null;
+      if (pending) handleSend(pending);
+    },
+    [handleSend]
   );
 
   // Suggestion clicks from MessageList arrive via the ASK_EVENT custom event.
@@ -348,6 +420,15 @@ function ChatCanvas() {
     document.addEventListener(ASK_EVENT, handler);
     return () => document.removeEventListener(ASK_EVENT, handler);
   }, [handleSend]);
+
+  // The active project name for the header and lead form; a project without a
+  // stored key (nothing picked yet) reads as a generic welcome line.
+  const currentProject =
+    activeProjects.find((p) => p.project_key === projectKey) ?? null;
+  const headerTitle = currentProject ? currentProject.ten_thuong_mai : "Tư vấn bất động sản";
+  const headerSubtitle = currentProject
+    ? `Chuyên viên tư vấn dự án ${currentProject.ten_thuong_mai}`
+    : "Chuyên viên tư vấn bất động sản";
 
   return (
     <div
@@ -388,7 +469,7 @@ function ChatCanvas() {
         </div>
         <div style={{ minWidth: 0 }}>
           <Typography.Title level={4} style={{ margin: 0, color: C.text, fontSize: 17, lineHeight: "24px" }}>
-            The Camellia
+            {headerTitle}
           </Typography.Title>
           <Typography.Text
             style={{
@@ -400,7 +481,7 @@ function ChatCanvas() {
               whiteSpace: "nowrap",
             }}
           >
-            Chuyên viên tư vấn dự án Sơn Trà, Đà Nẵng
+            {headerSubtitle}
             <span
               style={{
                 background: C.successSoft,
@@ -431,6 +512,20 @@ function ChatCanvas() {
             <span style={{ color: C.primary, fontSize: 14 }}>📞</span>
             <span style={{ fontWeight: 600, letterSpacing: 0.5 }}>09x xxx xxxx</span>
           </div>
+          <Button
+            type="default"
+            onClick={() => void openProjectPicker()}
+            icon={<SwapOutlined />}
+            style={{
+              height: 40,
+              fontSize: 15,
+              fontWeight: 600,
+              borderRadius: RADIUS.btn,
+              color: C.primary,
+            }}
+          >
+            Đổi dự án
+          </Button>
           <AccessibilityControls />
         </div>
       </header>
@@ -508,9 +603,19 @@ function ChatCanvas() {
       <LeadForm
         open={leadFormOpen}
         sessionId={sessionIdRef.current}
+        deviceId={deviceId}
+        projectKey={projectKey}
+        projectName={currentProject?.ten_thuong_mai}
         notePrefill={buildLeadNote(messages)}
         onClose={() => setLeadFormOpen(false)}
         onSuccess={() => setLeadDone(true)}
+      />
+      <ProjectPicker
+        open={projectPickerOpen}
+        projects={activeProjects}
+        currentProjectKey={projectKey}
+        onSelect={handleSelectProject}
+        onClose={() => setProjectPickerOpen(false)}
       />
     </div>
   );
