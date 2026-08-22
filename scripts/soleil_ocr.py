@@ -22,8 +22,9 @@ os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 from docling.document_converter import DocumentConverter  # noqa: E402
 
-DATA = pathlib.Path(r"D:/chatbot-real-estate/data/soleil")
-OUT = pathlib.Path(r"D:/chatbot-real-estate/data/_processed/soleil/_extract/ocr")
+_ROOT = pathlib.Path(__file__).resolve().parents[1]
+DATA = _ROOT / "data" / "soleil"
+OUT = _ROOT / "data" / "_processed" / "soleil" / "_extract" / "ocr"
 OUT.mkdir(parents=True, exist_ok=True)
 
 

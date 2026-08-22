@@ -14,6 +14,11 @@ survives ONLY as a best-effort fallback so the greeting latch never 500s when
 the registry row is missing or the DB is unreachable (matches the previous
 "frozen config, no I/O" contract — callers treat the result as read-only).
 
+Async answer path (B2/M1): inside a request-bound registry snapshot the media
+entries come from the record the async handler already loaded — the DB is never
+touched here. The sync psycopg2 read remains only for unbound legacy sync
+callers (direct unit-test seams / scripts).
+
 Callers that predate project_key (api/interfaces/api/hello.py) call with no
 arguments; the Camellia default keeps them working until ISSUE-05 scopes the
 call sites by project.
@@ -24,6 +29,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from api.application.services.project_config import (
+    request_project_snapshot,
+    request_project_snapshot_bound,
+)
 from api.infrastructure.config.config import settings
 
 logger = logging.getLogger("api.media_config")
@@ -95,9 +104,10 @@ def _resolve_media_row(entry: dict[str, Any]) -> dict[str, Any]:
 def _media_from_registry(project_key: str) -> list[dict[str, Any]] | None:
     """Read project_config.media for a project; None on any failure.
 
-    Sync psycopg2 because every caller is synchronous (the greeting latch).
-    Best-effort: a short connect timeout keeps a dead DB from stalling the
-    greeting; any exception returns None so the caller falls back.
+    Legacy sync psycopg2 seam for unbound sync callers (see module docstring);
+    the async answer path resolves media from the request-bound snapshot
+    instead. Best-effort: a short connect timeout keeps a dead DB from
+    stalling the caller; any exception returns None so the caller falls back.
     """
     try:
         import psycopg2
@@ -126,12 +136,79 @@ def _media_from_registry(project_key: str) -> list[dict[str, Any]] | None:
 def list_project_videos(project_key: str = "camellia") -> list[dict[str, Any]]:
     """Return the project video registry for the greeting widget.
 
-    Best-effort and synchronous: prefers the project's ``project_config.media``
-    rows, falls back to the static Camellia bundle when the registry is missing
-    or unreachable so the greeting always has videos to attach. Callers must
-    treat the result as read-only.
+    Resolution order (B2: never a sync DB read inside a bound async request):
+    1. per-request registry snapshot — entries the async handler already read;
+    2. legacy sync psycopg2 read (unbound sync callers only);
+    3. static Camellia bundle when the registry is missing or unreachable so
+       the greeting always has videos to attach.
+    Callers must treat the result as read-only.
     """
+    if request_project_snapshot_bound():
+        record = request_project_snapshot()
+        if (
+            record is not None
+            and record.project_key == project_key
+            and record.status == "active"
+            and record.media_entries is not None
+        ):
+            # The row exists: media may legitimately be '[]' (project has no
+            # videos yet, e.g. Soleil) — return the empty list rather than
+            # falling back to Camellia's bundle, which would mislabel another
+            # project's clips.
+            return [
+                _resolve_media_row(entry)
+                for entry in record.media_entries
+                if isinstance(entry, dict)
+            ]
+        return [dict(item) for item in VIDEO_MEDIA]
     from_registry = _media_from_registry(project_key)
     if from_registry is not None:
         return from_registry
     return [dict(item) for item in VIDEO_MEDIA]
+
+
+async def fetch_recent_project_images(
+    project_key: str, limit: int = 8
+) -> list[dict[str, Any]]:
+    """Async recently published gallery rows for a project, no embeddings.
+
+    Fallback path for the greeting when vector search is unavailable (e.g. an
+    embedding-provider quota outage): plain published-rows listing scoped by
+    project_key through the registry port so the welcome stays decorated
+    without any external call or event-loop-blocking read.
+    """
+    from api.infrastructure.dependencies import get_project_registry  # noqa: PLC0415
+
+    return await get_project_registry().fetch_recent_published_images(project_key, limit)
+
+
+def list_project_images(project_key: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Legacy sync variant of fetch_recent_project_images (kept for sync CLIs).
+
+    The greeting handler is async and must use the port-backed coroutine; this
+    psycopg2 wrapper remains for unbound sync callers that predate the port.
+    """
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning("psycopg2 unavailable; greeting image fallback empty")
+        return []
+    try:
+        with psycopg2.connect(settings.pg_dsn_sync, connect_timeout=2) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT image_id, kind, title, caption, alt_text, url_cdn, "
+                    "width, height FROM images "
+                    "WHERE project_key = %s AND status = 'published' "
+                    "ORDER BY updated_at DESC LIMIT %s",
+                    (project_key, limit),
+                )
+                rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001 — decoration must never 500 a greeting
+        logger.warning("greeting image fallback read failed: %s", exc)
+        return []
+    columns = (
+        "image_id", "kind", "title", "caption", "alt_text",
+        "url_cdn", "width", "height",
+    )
+    return [dict(zip(columns, row)) for row in rows]

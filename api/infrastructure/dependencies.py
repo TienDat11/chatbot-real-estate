@@ -30,6 +30,7 @@ from api.infrastructure.ports.rag import RagPort
 from api.infrastructure.ports.rerank import RerankPort
 from api.infrastructure.ports.realtime_mirror import RealtimeLeadMirror
 from api.infrastructure.ports.sql import SqlPort
+from api.application.ports.project_registry import ProjectRegistryPort
 
 _llm: OpenAICompatibleLLM | None = None
 _reranker: RerankPort | None = None
@@ -38,6 +39,7 @@ _rag: RagPort | None = None
 _sql: SqlPort | None = None
 _firebase_auth_verifier: FirebaseAuthTokenVerifier | None = None
 _realtime_lead_mirror: RealtimeLeadMirror | None = None
+_project_registry: ProjectRegistryPort | None = None
 
 
 def get_llm() -> LLMChatPort:
@@ -129,6 +131,18 @@ def get_firebase_auth_verifier() -> FirebaseAuthTokenVerifier:
             audience=s.firebase_project_id,
         )
     return _firebase_auth_verifier
+
+
+def get_project_registry() -> ProjectRegistryPort:
+    """Build (once) the async Postgres registry adapter (B2/M1 single read path)."""
+    global _project_registry
+    if _project_registry is None:
+        from api.infrastructure.adapters.postgres_project_registry import (
+            PostgresProjectRegistry,
+        )
+
+        _project_registry = PostgresProjectRegistry()
+    return _project_registry
 
 
 async def get_realtime_lead_mirror() -> RealtimeLeadMirror:

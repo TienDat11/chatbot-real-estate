@@ -24,14 +24,6 @@ OUT = ROOT / "data" / "_processed" / "soleil" / "_extract"
 OUT.mkdir(parents=True, exist_ok=True)
 
 
-def _read(path: pathlib.Path, sheet: str) -> list[tuple]:
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    ws = wb[sheet]
-    rows = [tuple(ws.iter_rows(values_only=True))]
-    wb.close()
-    return rows[0]
-
-
 def _rows(path: pathlib.Path, sheet: str) -> list[tuple]:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb[sheet]

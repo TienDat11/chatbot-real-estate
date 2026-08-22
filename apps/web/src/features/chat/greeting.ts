@@ -34,7 +34,9 @@ export interface GreetingBundle {
 /**
  * Returns the greeting bundle for a chosen project. The rich media belongs to
  * Camellia (the first project with a processed static media bundle); every
- * other project greets with grounded text only.
+ * other project greets with grounded text only and is then enriched with
+ * backend media (see fetchGreetingMedia) — this static bundle is the instant
+ * render and the offline fallback, never the whole story.
  */
 export function greetingForProject(projectKey: string | null | undefined): GreetingBundle {
   if (projectKey === "soleil") {

@@ -9,22 +9,23 @@ cover the scoping logic that lives in the retrieval layer:
   (injectable fetch, no DB).
 - ``run_rag_leg._post_filter`` appends the documents.project_key predicate and
   drops chunks whose doc belongs to another project (monkeypatched pool).
-- ``filter_images_by_project`` drops images tagged outside the project
-  (monkeypatched pool).
+- ``search_images`` / ``search_project_images`` scope the project predicate in
+  SQL (M6): the scoped fetch binds project_key as a query parameter instead
+  of fetching every project's rows and post-filtering (monkeypatched conn).
 
 None of these touch a live database; the pool/fetch are replaced.
 """
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import date
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
+from api.application.services import image_search as img
 from api.application.services.sql_leg import build_sql, run_affordability
-from api.application.services.project_scope import filter_images_by_project
-
 
 # --- build_sql: facts path must carry fs.project_key -------------------------
 
@@ -179,23 +180,86 @@ async def test_post_filter_without_project_key_keeps_all_valid() -> None:
     assert [c["id"] for c in kept] == ["c-1"]
 
 
-# --- filter_images_by_project: images tagged outside the project are dropped ---
+# --- image search: project predicate rides in the SQL (M6) --------------------
+
+def _capture_conn(rows, captured):
+    class _CaptureConn:
+        async def fetch(self, *args, **kwargs):
+            captured["args"] = args
+            return rows
+
+        async def fetchrow(self, *args, **kwargs):
+            captured["args"] = args
+            return None
+
+    @asynccontextmanager
+    async def rls():
+        yield _CaptureConn()
+
+    return rls
+
 
 @pytest.mark.asyncio
-async def test_filter_images_by_project_keeps_only_project_images() -> None:
-    import asyncpg
+async def test_search_images_scopes_project_in_sql(monkeypatch) -> None:
+    """A scoped search binds project_key as a query parameter on the scoped SQL
+    variant — it must never fetch the cross-project corpus and post-filter."""
+    captured: dict = {}
 
-    images = [
-        {"image_id": "matbang-01", "title": "Camellia mat bang"},
-        {"image_id": "soleil-01", "title": "Soleil mat bang"},
-    ]
-    fake_conn = AsyncMock()
-    fake_conn.fetch.return_value = [{"image_id": "soleil-01"}]
-    fake_connect = AsyncMock(return_value=fake_conn)
+    async def fake_embed(text):
+        return [0.5]
 
-    with patch.object(asyncpg, "connect", fake_connect):
-        kept = await filter_images_by_project(images, "soleil")
+    monkeypatch.setattr(img, "_embed_query", fake_embed)
+    monkeypatch.setattr(img, "with_rls_identity", _capture_conn([], captured))
+    await img.search_images("view biển", top_k=4, project_key="soleil")
 
-    assert [i["image_id"] for i in kept] == ["soleil-01"]
-    # The filter must scope by the requested project, not fetch everything.
-    assert fake_connect.called
+    query, vec_literal, pool, project_key = captured["args"]
+    assert query == img.IMAGE_QUERY_PROJECT_SCOPED
+    assert "i.project_key = $3" in query
+    assert vec_literal == "[0.5]"
+    assert pool == 8
+    assert project_key == "soleil"
+
+
+@pytest.mark.asyncio
+async def test_search_images_without_project_stays_unscoped(monkeypatch) -> None:
+    """No project bound -> the legacy unscoped query and args are unchanged."""
+    captured: dict = {}
+
+    async def fake_embed(text):
+        return [0.5]
+
+    monkeypatch.setattr(img, "_embed_query", fake_embed)
+    monkeypatch.setattr(img, "with_rls_identity", _capture_conn([], captured))
+    await img.search_images("view biển", top_k=4)
+
+    query, vec_literal, pool = captured["args"]
+    assert query == img.IMAGE_QUERY
+    assert "project_key" not in query
+
+
+@pytest.mark.asyncio
+async def test_search_project_images_scopes_project_in_sql(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(img, "with_rls_identity", _capture_conn([], captured))
+    await img.search_project_images(project_key="soleil")
+
+    query, kind, order_str, top_k, project_key = captured["args"]
+    assert query == img.PROJECT_IMAGES_QUERY_PROJECT_SCOPED
+    assert "i.project_key = $4" in query
+    assert project_key == "soleil"
+
+
+@pytest.mark.asyncio
+async def test_scoped_unit_rescue_honors_project_predicate(monkeypatch) -> None:
+    """Unit codes are not unique across projects: the CH-03 rescue lookup must
+    carry the project predicate too (a Soleil CH-03 question must never be
+    rescued into Camellia's CH-03 floor plan)."""
+    captured: dict = {}
+    monkeypatch.setattr(img, "with_rls_identity", _capture_conn([], captured))
+    await img._query_by_unit("CH-03", project_key="soleil")
+
+    query, unit_key, code, project_key = captured["args"]
+    assert query == img.QUERY_BY_UNIT_PROJECT_SCOPED
+    assert "i.project_key = $3" in query
+    assert project_key == "soleil"
+    assert unit_key == "unit:CH-03"

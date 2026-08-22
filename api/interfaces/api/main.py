@@ -260,16 +260,17 @@ def create_app() -> FastAPI:
         except ProjectScopeError as exc:
             # Story 10.3: carry the pickable project list in the 422 body so the
             # FE popup renders immediately without a second round-trip to
-            # GET /api/projects. Best-effort like the endpoint: a dead DB yields
+            # GET /api/projects. The catalogue read is offloaded off the event
+            # loop (M12): best-effort like the endpoint — a dead DB yields
             # projects: [] and the FE falls back to its static catalogue.
-            from api.application.services.project_config import fetch_projects  # noqa: PLC0415
+            from api.application.services.project_config import load_project_catalogue  # noqa: PLC0415
 
             return JSONResponse(
                 status_code=422,
                 content={
                     "ok": False,
                     "error": {"code": "PROJECT_SCOPE", "message": str(exc)},
-                    "projects": fetch_projects(),
+                    "projects": await load_project_catalogue(),
                 },
             )
 

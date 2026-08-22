@@ -20,11 +20,18 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.application.services.image_search import search_project_images
-from api.application.services.media_config import list_project_videos
-from api.application.services.project_config import DEFAULT_PROJECT_KEY, render_template
+from api.application.services.media_config import (
+    fetch_recent_project_images,
+    list_project_videos,
+)
+from api.application.services.project_config import (
+    DEFAULT_PROJECT_KEY,
+    bound_request_project,
+    load_project_registry_record,
+    render_template,
+)
 from api.application.services.project_scope import (
     ProjectScopeError,
-    filter_images_by_project,
     resolve_project_key,
 )
 from api.application.services.sales_kit import sales_kit_block
@@ -36,6 +43,7 @@ router = APIRouter(tags=["hello"])
 
 GREETING_TIMEOUT_S = 6.0  # single LLM greeting call; 6s bounds a stuck gateway while leaving warm calls (sub-2s) ample headroom
 GREETING_MAX_TOKENS = 400
+HELLO_IMAGE_FALLBACK_LIMIT = 8  # published-rows cap when vector search is unavailable
 
 # Em-dash is a display-only hard rule in this project; normalize it and the
 # visually similar en-dash before returning any greeting string.
@@ -114,36 +122,55 @@ async def llms_hello(payload: HelloRequest | None = None) -> HelloResponse:
     """Return an LLM-generated first greeting, falling back to a static one."""
     trace_id = "t-" + uuid.uuid4().hex[:10]
     project_key: str | None = None
+    scope_failed = False
     if payload is not None:
         try:
             project_key = await resolve_project_key(payload.project_key)
         except ProjectScopeError as exc:
             # Greeting is the first-open latch: a project-scope failure must not
-            # 500 the widget, so the greeting falls back and images/videos are
-            # omitted rather than leaking another project's media.
+            # 500 the widget, so the greeting falls back, imagery is omitted
+            # rather than leaking another project's media, and videos degrade
+            # to the static bundle (never a scoped row from the wrong project).
             logger.warning("llms-hello project resolution failed: %s", exc)
             project_key = None
-    greeting = render_template(_FALLBACK_GREETING, project_key)
-    try:
-        llm = get_llm()
-        text = await llm.complete(
-            _build_messages(project_key),
-            max_tokens=GREETING_MAX_TOKENS,
-            timeout=GREETING_TIMEOUT_S,
-        )
-        candidate = _sanitize_greeting(text)
-        if candidate:
-            greeting = candidate
-    except Exception as exc:  # noqa: BLE001 — greeting must never 500 the request
-        logger.warning("llms-hello LLM failed; using static greeting: %s", exc)
-    # Representative project imagery decorates the welcome; a failure here only
-    # drops images, never the greeting itself.
-    images = await search_project_images()
-    if project_key:
-        images = await filter_images_by_project(images, project_key)
-    # Videos ride along with the imagery; list_project_videos is a frozen config
-    # so this attach step cannot fail or block the greeting.
-    videos = list_project_videos(project_key or DEFAULT_PROJECT_KEY)
+            scope_failed = True
+    # One async registry read per request (B2): the record serves the greeting
+    # identity and the video bundle without any sync DB call below.
+    record = await load_project_registry_record(project_key)
+    with bound_request_project(record):
+        greeting = render_template(_FALLBACK_GREETING, project_key)
+        try:
+            llm = get_llm()
+            text = await llm.complete(
+                _build_messages(project_key),
+                max_tokens=GREETING_MAX_TOKENS,
+                timeout=GREETING_TIMEOUT_S,
+            )
+            candidate = _sanitize_greeting(text)
+            if candidate:
+                greeting = candidate
+        except Exception as exc:  # noqa: BLE001 — greeting must never 500 the request
+            logger.warning("llms-hello LLM failed; using static greeting: %s", exc)
+        # Representative project imagery decorates the welcome; a failure here only
+        # drops images, never the greeting itself. The project predicate rides in
+        # the search SQL (M6), so cross-project rows are never fetched; a scope
+        # failure skips the fetch entirely — an unscoped fetch would leak. The
+        # embedding-provider outage fallback keeps the gallery decorated via a
+        # plain published-rows listing (async, port-backed).
+        if project_key:
+            images = await search_project_images(project_key=project_key)
+        elif not scope_failed:
+            images = await search_project_images()
+        else:
+            images = []
+        if not images and project_key:
+            images = await fetch_recent_project_images(
+                project_key, limit=HELLO_IMAGE_FALLBACK_LIMIT
+            )
+        # Videos ride along with the imagery from the request-bound registry
+        # record (M11): one async read at the top of this handler, never a
+        # blocking sync DB call inside the attach step.
+        videos = list_project_videos(project_key or DEFAULT_PROJECT_KEY)
     if payload is not None and payload.session_id:
         logger.debug("llms-hello trace_id=%s session_id=%s", trace_id, payload.session_id)
     return HelloResponse(greeting=greeting, trace_id=trace_id, images=images, videos=videos)
@@ -155,43 +182,60 @@ def _frame(event: str, data: dict) -> str:
 
 
 async def _stream_greeting(
-    session_id: str | None, project_key: str | None
+    session_id: str | None,
+    project_key: str | None,
+    scope_failed: bool = False,
 ) -> AsyncIterator[str]:
     """Yield the greeting as token events, then a done event with trace_id.
 
     Streams the LLM response character-by-character on a token boundary so the
     frontend can render the greeting progressively, exactly like /api/query.
     Falls back to the static greeting streamed the same way on any failure.
+    The registry record is read (async, once) inside the generator because the
+    body only starts iterating after the handler has already returned.
     """
     trace_id = "t-" + uuid.uuid4().hex[:10]
-    greeting = render_template(_FALLBACK_GREETING, project_key)
-    try:
-        llm = get_llm()
-        tokens: list[str] = []
-        async for token in llm.stream(
-            _build_messages(project_key),
-            max_tokens=GREETING_MAX_TOKENS,
-        ):
-            tokens.append(token)
-            yield _frame("token", {"text": token})
-        joined = _sanitize_greeting("".join(tokens))
-        if joined:
-            greeting = joined
-    except Exception as exc:  # noqa: BLE001 — greeting must never fail the stream
-        logger.warning("llms-hello/stream LLM failed; using static greeting: %s", exc)
-        if session_id:
-            yield _frame("error", {"message": "Lời chào tạo nhanh không khả dụng; dùng lời chào mẫu."})
-        yield _frame("token", {"text": greeting})
-    # Representative project imagery rides along with the welcome; a failure only
-    # omits images from the stream, never the greeting itself.
-    images = await search_project_images()
-    if project_key:
-        images = await filter_images_by_project(images, project_key)
-    yield _frame("images", {"images": images})
-    # Attach the project video registry as its own SSE event so the widget can
-    # render playback without waiting for the done frame; frozen config, no I/O.
-    videos = list_project_videos(project_key or DEFAULT_PROJECT_KEY)
-    yield _frame("videos", {"videos": videos})
+    record = await load_project_registry_record(project_key)
+    with bound_request_project(record):
+        greeting = render_template(_FALLBACK_GREETING, project_key)
+        try:
+            llm = get_llm()
+            tokens: list[str] = []
+            async for token in llm.stream(
+                _build_messages(project_key),
+                max_tokens=GREETING_MAX_TOKENS,
+            ):
+                tokens.append(token)
+                yield _frame("token", {"text": token})
+            joined = _sanitize_greeting("".join(tokens))
+            if joined:
+                greeting = joined
+        except Exception as exc:  # noqa: BLE001 — greeting must never fail the stream
+            logger.warning("llms-hello/stream LLM failed; using static greeting: %s", exc)
+            if session_id:
+                yield _frame("error", {"message": "Lời chào tạo nhanh không khả dụng; dùng lời chào mẫu."})
+            yield _frame("token", {"text": greeting})
+        # Representative project imagery rides along with the welcome; a failure
+        # only omits images from the stream, never the greeting itself. The
+        # project predicate rides in the search SQL (M6); a scope failure skips
+        # the fetch entirely so no cross-project media can leak. Same embedding-
+        # outage fallback as the JSON variant keeps the gallery decorated.
+        if project_key:
+            images = await search_project_images(project_key=project_key)
+        elif not scope_failed:
+            images = await search_project_images()
+        else:
+            images = []
+        if not images and project_key:
+            images = await fetch_recent_project_images(
+                project_key, limit=HELLO_IMAGE_FALLBACK_LIMIT
+            )
+        yield _frame("images", {"images": images})
+        # Attach the project video registry as its own SSE event so the widget
+        # can render playback without waiting for the done frame; resolved from
+        # the request-bound registry record (async read above, M11).
+        videos = list_project_videos(project_key or DEFAULT_PROJECT_KEY)
+        yield _frame("videos", {"videos": videos})
     yield _frame("done", {"trace_id": trace_id})
 
 
@@ -200,14 +244,16 @@ async def llms_hello_stream(payload: HelloRequest | None = None) -> StreamingRes
     """Stream the first-open greeting as SSE (token events + done)."""
     session_id = payload.session_id if payload is not None else None
     project_key: str | None = None
+    scope_failed = False
     if payload is not None:
         try:
             project_key = await resolve_project_key(payload.project_key)
         except ProjectScopeError as exc:
             logger.warning("llms-hello/stream project resolution failed: %s", exc)
             project_key = None
+            scope_failed = True
     return StreamingResponse(
-        _stream_greeting(session_id, project_key),
+        _stream_greeting(session_id, project_key, scope_failed=scope_failed),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

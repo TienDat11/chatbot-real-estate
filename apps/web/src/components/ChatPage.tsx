@@ -9,7 +9,7 @@ import { App as AntApp, Button, Typography } from "antd";
 import { EnvironmentOutlined, SafetyCertificateOutlined, SwapOutlined } from "@ant-design/icons";
 import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
 import type { NearbyPlace } from "@rag-ragre/contracts";
-import { QueryRequestError, streamQuery } from "@/lib/api";
+import { fetchGreetingMedia, QueryRequestError, streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
 import type { ChatMessage } from "@/components/MessageBubble";
 import { AccessibilityControls } from "@/components/AccessibilityControls";
@@ -165,6 +165,11 @@ function ChatCanvas() {
   const [projectsReady, setProjectsReady] = useState(false);
   // The user question awaiting a project choice; re-sent once a project is picked.
   const pendingQueryRef = useRef<string | null>(null);
+  // Abort controller of the in-flight answer stream (review M5): a project
+  // switch aborts it so the old project's SSE cannot keep consuming the
+  // backend/network after the context reset, and its terminal events cannot
+  // race the new project's greeting. Null while no query is streaming.
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   const setMapModeRouted = useCallback(
     (mode: "map" | "list") => {
@@ -267,6 +272,21 @@ function ChatCanvas() {
         (patch) => patchMessage(greetingId, patch),
         () => setStreaming(false)
       );
+
+      // Projects without a curated static bundle (Soleil, future registry
+      // projects) enrich the greeting with backend media once it arrives —
+      // text-first render is never blocked, and any failure is a silent no-op.
+      if (greeting.images.length === 0) {
+        void fetchGreetingMedia(projectKeyForGreeting)
+          .then((media) => {
+            if (media.images.length === 0 && media.videos.length === 0) return;
+            patchMessage(greetingId, {
+              images: media.images,
+              videos: media.videos,
+            });
+          })
+          .catch(() => undefined);
+      }
     },
     [patchMessage]
   );
@@ -355,6 +375,13 @@ function ChatCanvas() {
       setStreaming(true);
       setInput("");
 
+      // One controller per stream; identity-checked below so terminal events
+      // of a superseded (aborted) stream cannot flip global streaming state
+      // while a newer greeting/query is running (review M5).
+      const streamAbort = new AbortController();
+      streamAbortRef.current = streamAbort;
+      const isLatestStream = () => streamAbortRef.current === streamAbort;
+
       const flushTokens = () => {
         if (tokenBufferRef.current) {
           const chunk = tokenBufferRef.current;
@@ -370,6 +397,7 @@ function ChatCanvas() {
           device_id: deviceId,
           project_key: projectKey,
           history,
+          signal: streamAbort.signal,
         },
         {
           onAck: () => {
@@ -416,7 +444,7 @@ function ChatCanvas() {
               traceId: meta.trace_id,
               latencyMs: meta.latency_ms,
             });
-            setStreaming(false);
+            if (isLatestStream()) setStreaming(false);
           },
           onError: (err) => {
             if (flushTimerRef.current !== null) {
@@ -436,10 +464,12 @@ function ChatCanvas() {
               return;
             }
             patchMessage(assistantId, { streaming: false, error: true, content: err.message });
-            message.error(err.message);
-            setStreaming(false);
-            // Keep the input text so the user can retry without retyping.
-            setInput(query);
+            if (isLatestStream()) {
+              message.error(err.message);
+              setStreaming(false);
+              // Keep the input text so the user can retry without retyping.
+              setInput(query);
+            }
           },
         }
       );
@@ -452,6 +482,12 @@ function ChatCanvas() {
   // (or greet the freshly chosen project when no question was pending).
   const handleSelectProject = useCallback(
     (key: string) => {
+      // Abort the previous project's in-flight answer stream before the
+      // context reset (review M5): it keeps consuming backend/network after
+      // the switch otherwise, and its terminal events must not race the new
+      // project's greeting. Aborted streams resolve silently (see streamQuery).
+      streamAbortRef.current?.abort();
+      streamAbortRef.current = null;
       try {
         storeProjectKey(window.localStorage, key);
       } catch {

@@ -34,6 +34,12 @@ CREATE INDEX IF NOT EXISTS idx_images_project_status
 -- One-time backfill: the current corpus predates the project tag and is
 -- entirely Camellia; tagging it here keeps existing Camellia enrichment
 -- working under the new filter (expand-then-tag, never guess later).
-UPDATE images SET project_key = 'camellia' WHERE project_key IS NULL;
+-- The NOT EXISTS guard makes a re-run a no-op once ANY image carries a
+-- project tag: rows that arrived NULL after the original run (ingest lag)
+-- stay untagged and are dropped by filter_images_by_project instead of
+-- being mislabelled Camellia.
+UPDATE images SET project_key = 'camellia'
+WHERE project_key IS NULL
+  AND NOT EXISTS (SELECT 1 FROM images WHERE project_key IS NOT NULL);
 
 COMMIT;

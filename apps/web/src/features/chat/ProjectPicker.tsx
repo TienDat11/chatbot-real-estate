@@ -11,6 +11,12 @@ import {
   type ActiveProject,
 } from "./activeProjects";
 
+// No width token exists in the design-token module (C/RADIUS/SHADOW/FS cover
+// color, corner and type scales only), so the modal width stays a local named
+// constant instead of a magic number (review n5). 560px keeps the two-line
+// project rows (name + full location) readable without truncation.
+const PROJECT_PICKER_MODAL_WIDTH = 560;
+
 export interface ProjectPickerProps {
   open: boolean;
   /** Active projects offered for selection (story 10.3). */
@@ -54,7 +60,7 @@ export function ProjectPicker({
       onCancel={onClose}
       footer={null}
       centered
-      width={560}
+      width={PROJECT_PICKER_MODAL_WIDTH}
       keyboard={!force}
       maskClosable={!force}
       closable={!force}
