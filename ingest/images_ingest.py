@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 import asyncpg
 import numpy as np
@@ -28,6 +29,17 @@ from ingest.config import settings
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = _REPO_ROOT / "ingest" / "image_captions_manifest.json"
+
+
+def build_cdn_url(r2_base: str, r2_key: str) -> str:
+    """Compose the public CDN URL from a base host and an R2 object key.
+
+    Object keys are S3-legal but not URL-safe: a literal '%' (e.g.
+    'som_95%.jpg') makes the browser block the request (QA D2:
+    ERR_BLOCKED_BY_ORB). The key is therefore percent-encoded with '/' kept
+    as the path separator so multi-segment keys stay readable.
+    """
+    return f"{r2_base.rstrip('/')}/{quote(r2_key, safe='/')}"
 
 
 def _sha256_hex(raw: bytes) -> str:
@@ -84,7 +96,7 @@ async def ingest(conn: asyncpg.Connection) -> None:
     captions: list[str] = []
     for img in images:
         width, height, content_hash = _image_meta(img["source_file"])
-        url_cdn = f"{r2_base}/{img['r2_key']}"
+        url_cdn = build_cdn_url(r2_base, img["r2_key"])
         await conn.execute(
             """
             INSERT INTO images

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from api.application.services.lead_service import (
+    DuplicateLeadError,
     create_customer_lead,
     normalize_phone,
     validate_phone,
@@ -70,15 +71,29 @@ async def submit_lead(
     """Validate consent and phone, persist the lead, and assign a sales owner."""
     if not payload.consent:
         raise HTTPException(status_code=400, detail="Consent is required")
-    lead = await create_customer_lead(
-        repo,
-        session_id=payload.session_id,
-        project_key=payload.project_key,
-        device_id=payload.device_id,
-        name=payload.name,
-        phone=payload.phone,
-        consent=payload.consent,
-        note=payload.note,
-        budget_vnd=payload.budget_vnd,
-    )
+    try:
+        lead = await create_customer_lead(
+            repo,
+            session_id=payload.session_id,
+            project_key=payload.project_key,
+            device_id=payload.device_id,
+            name=payload.name,
+            phone=payload.phone,
+            consent=payload.consent,
+            note=payload.note,
+            budget_vnd=payload.budget_vnd,
+        )
+    except DuplicateLeadError as exc:
+        # QA D3: mirror the FE contract (submitLead maps 409 -> "duplicate");
+        # detail is a structured object so clients can tell dedup from other
+        # conflicts without parsing human text.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_lead",
+                "message": "This phone number already registered for this project recently.",
+                "lead_id": exc.lead_id,
+                "created_at": exc.created_at.isoformat(),
+            },
+        ) from exc
     return LeadSubmitResponse(lead_id=lead.id)

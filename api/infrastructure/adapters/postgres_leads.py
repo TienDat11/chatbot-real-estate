@@ -7,6 +7,11 @@ from typing import Any
 
 import asyncpg
 
+from api.application.services.lead_service import (
+    LEAD_DEDUP_WINDOW_MINUTES,
+    DuplicateLeadError,
+    normalize_phone,
+)
 from api.application.services.sql_leg import build_dsn
 from api.infrastructure.ports.leads import AssignmentLogRow, LeadRow, SalesRow, SalesStats
 
@@ -61,11 +66,34 @@ class PostgresLeadRepository:
 
     async def create_lead(self, *, session_id: str | None, project_key: str | None, device_id: str | None, name: str | None, phone: str, consent: bool, note: str | None, budget_vnd: int | None) -> LeadRow:
         pool = await get_lead_pool()
+        # QA D3: normalize defensively so lock key, dedup probe and the stored
+        # row always agree even when a caller skipped the route validator.
+        stored_phone = normalize_phone(phone)
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "INSERT INTO leads (session_id, project_key, device_id, name, phone, consent, note, budget_vnd) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING " + _LEAD_COLUMNS,
-                session_id, project_key, device_id, name, phone, consent, note, budget_vnd,
-            )
+            # The advisory xact lock serializes identical submissions BEFORE
+            # the existence probe: without it, concurrent double-clicks all
+            # pass the SELECT and race to INSERT (10 rows from 10 clicks).
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))",
+                    f"{stored_phone}:{project_key or ''}",
+                )
+                duplicate = await conn.fetchrow(
+                    """SELECT id, created_at FROM leads
+                       WHERE phone = $1 AND project_key = $2
+                         AND created_at >= now() - ($3 * interval '1 minute')
+                       ORDER BY created_at DESC LIMIT 1""",
+                    stored_phone, project_key, LEAD_DEDUP_WINDOW_MINUTES,
+                )
+                if duplicate is not None:
+                    raise DuplicateLeadError(
+                        lead_id=int(duplicate["id"]),
+                        created_at=duplicate["created_at"],
+                    )
+                row = await conn.fetchrow(
+                    "INSERT INTO leads (session_id, project_key, device_id, name, phone, consent, note, budget_vnd) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING " + _LEAD_COLUMNS,
+                    session_id, project_key, device_id, name, stored_phone, consent, note, budget_vnd,
+                )
         return LeadRow(**dict(row))
 
     async def get_active_leads_for_sales(self, sales_id: int, limit: int = 50) -> list[LeadRow]:

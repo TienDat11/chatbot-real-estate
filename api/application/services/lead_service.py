@@ -16,6 +16,19 @@ _PHONE_SEPARATORS = re.compile(r"[\s,.-]")
 _PHONE_PATTERN = re.compile(r"^(0|\+84)(3[2-9]|5[6-9]|7[0-9]|8[1-9]|9[0-9])[0-9]{7}$")
 LEAD_LOCK_MINUTES = 5
 
+# QA D3: identical phone+project submissions inside this window are treated as
+# one lead (double-click / retry storms), not distinct customers.
+LEAD_DEDUP_WINDOW_MINUTES = 10
+
+
+class DuplicateLeadError(Exception):
+    """Raised when the same phone+project lead already exists in the dedup window."""
+
+    def __init__(self, *, lead_id: int, created_at: datetime) -> None:
+        self.lead_id = lead_id
+        self.created_at = created_at
+        super().__init__(f"duplicate of lead {lead_id} created at {created_at.isoformat()}")
+
 
 def normalize_phone(value: str) -> str:
     return _PHONE_SEPARATORS.sub("", value.strip())

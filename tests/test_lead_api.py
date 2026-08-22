@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi.testclient import TestClient
 
 from api.application.services.conv_state import get_context, maybe_lead_cta_hint
+from api.application.services.lead_service import DuplicateLeadError
 from api.infrastructure.ports.leads import get_lead_repository
 from api.interfaces.api.main import create_app
 from tests.test_sales_api import FakeLeadRepository
@@ -112,3 +115,45 @@ def test_submit_lead_without_session_skips_state_marking() -> None:
     )
     assert response.status_code == 201
     assert repo.leads[1].session_id is None
+
+
+class DeduplicatingFakeRepository(FakeLeadRepository):
+    """Fake mirroring the Postgres adapter dedup contract (QA D3): a second
+    create with the same identity raises DuplicateLeadError instead of
+    inserting another row."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_calls = 0
+
+    async def create_lead(self, **kwargs):
+        self.create_calls += 1
+        if self.create_calls > 1:
+            first = next(iter(self.leads.values()))
+            raise DuplicateLeadError(lead_id=first.id, created_at=first.created_at)
+        return await super().create_lead(**kwargs)
+
+
+def test_submit_lead_duplicate_returns_409_with_structured_body() -> None:
+    # QA D3: the FE maps any 409 to the "duplicate" UX state (submitLead);
+    # the detail must be a structured object so the code is machine-readable.
+    repo = DeduplicatingFakeRepository()
+    app = create_app()
+    app.dependency_overrides[get_lead_repository] = lambda: repo
+    client = TestClient(app)
+    payload = {"project_key": "camellia", "phone": "0905123456", "consent": True}
+
+    first = client.post("/api/lead", json=payload)
+    assert first.status_code == 201
+    assert repo.create_calls == 1
+
+    duplicate = client.post("/api/lead", json=payload)
+    assert duplicate.status_code == 409
+    detail = duplicate.json()["detail"]
+    assert detail["code"] == "duplicate_lead"
+    assert detail["lead_id"] == first.json()["lead_id"]
+    assert detail["created_at"] == repo.leads[1].created_at.isoformat()
+    assert isinstance(detail["message"], str) and detail["message"]
+    # The duplicate never reaches routing: one insert, one assignment log.
+    assert repo.create_calls == 2
+    assert len(repo.logs) == 1
