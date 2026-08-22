@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rag-ragre.local/schemas/price_matrix.schema.json",
+  "title": "price_matrix",
+  "description": "Event-basket price rows for data/_processed/<project>/price_matrix.json. Required keys frozen from the Soleil source; per-row shape is open because campaigns carry their own unit-type labels (1BR/2BR/Pan/Stu/...).",
+  "type": "object",
+  "required": [
+    "project",
+    "source",
+    "unit",
+    "note",
+    "types",
+    "price_per_m2_warning"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "unit": {
+      "type": "string"
+    },
+    "note": {
+      "type": "string"
+    },
+    "price_per_m2_warning": {
+      "type": "string"
+    },
+    "types": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["block", "loai"],
+        "properties": {
+          "block": { "type": "string" },
+          "ten_toa": { "type": "string" },
+          "loai": { "type": "string" },
+          "ma_can_mau": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "dien_tich_thong_thuy_m2": {
+            "type": "array",
+            "items": { "type": "number" }
+          },
+          "gia": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "tong_vnd": {
+                "type": "array",
+                "items": { "type": "number" }
+              },
+              "ty": {
+                "type": "array",
+                "items": { "type": "number" }
+              }
+            }
+          },
+          "gia_m2_ty": {
+            "type": "array",
+            "items": { "type": "number" }
+          }
+        }
+      }
+    }
+  }
+}

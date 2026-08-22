@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rag-ragre.local/schemas/unit_catalog.schema.json",
+  "title": "unit_catalog",
+  "description": "Full unit catalog for data/_processed/<project>/unit_catalog.json. blocks/units carry every purchasable unit so the EAV layer can map each row to a fact_subjects.unit subject.",
+  "type": "object",
+  "required": [
+    "project",
+    "source",
+    "note",
+    "loai_ky_hieu",
+    "blocks",
+    "units"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "note": {
+      "type": "string"
+    },
+    "loai_ky_hieu": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "blocks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "tong_can": { "type": "integer" },
+          "co_cau": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["ma_sp", "block", "tang", "loai", "dien_tich_m2"],
+        "properties": {
+          "ma_sp": { "type": "string" },
+          "block": { "type": "string" },
+          "tang": { "type": ["number", "string"] },
+          "so_can": { "type": ["string", "number"] },
+          "loai": { "type": "string" },
+          "dien_tich_m2": { "type": "number" },
+          "vi_tri": { "type": "string" },
+          "huong": { "type": ["string", "number"] }
+        }
+      }
+    }
+  }
+}

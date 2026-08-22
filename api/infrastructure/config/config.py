@@ -6,12 +6,15 @@ so behavior is independent of the process CWD; api, ingest, and eval import Sett
 
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger("api.config")
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]  # parents[3] = repo root (HF-0: stale parents[1] pointed at api/infrastructure, breaking .env load)
 _APP_ENV = os.getenv("APP_ENV", "dev")
@@ -194,6 +197,37 @@ def export_runtime_env(cfg: Settings | None = None) -> None:
         "PROMPT_DIR": resolved.prompt_dir,
     }.items():
         os.environ.setdefault(key, value)
+
+
+def project_geo_center(project_key: str) -> tuple[float, float]:
+    """Return the (lat, lng) geo center for a project from project_config.
+
+    Story 8.2: the geo center moved from a hardcoded Camellia constant to the
+    per-project registry. Callers that do not know the project yet keep the
+    Settings Camellia defaults via get_cfg; this helper is for the project-
+    scoped paths (ISSUE-03/05). Best-effort and synchronous: any failure falls
+    back to the configured defaults so the nearby-places leg never crashes.
+    """
+    settings = get_settings()
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning("psycopg2 unavailable; using default geo center")
+        return settings.geo_center_lat, settings.geo_center_lng
+    try:
+        with psycopg2.connect(settings.pg_dsn_sync, connect_timeout=2) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT geo_center_lat, geo_center_lng FROM project_config "
+                    "WHERE project_key = %s AND status = 'active'",
+                    (project_key,),
+                )
+                row = cur.fetchone()
+        if row and row[0] is not None and row[1] is not None:
+            return float(row[0]), float(row[1])
+    except Exception as exc:  # noqa: BLE001 — config read is best-effort
+        logger.warning("project_config geo read failed (%s); using default center", exc)
+    return settings.geo_center_lat, settings.geo_center_lng
 
 
 settings = get_settings()
