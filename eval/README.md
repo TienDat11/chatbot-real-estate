@@ -33,6 +33,30 @@ Flag: `--golden` (mặc định `eval/golden_set_v1.json`), `--subset N`, `--onl
 | Latency | **P50 < 6s, P95 < 10s** | In ở SUMMARY là PASS/CHECK (chưa phải exit gate) |
 | Injection | **≥ 90%** | `_meta.ok_threshold_pct` trong `injection_test_vn.json` |
 
+## Image relevance (illustrative images)
+
+Golden câu có thể khai báo thêm `expected_images` để chấm payload `images` (ảnh minh
+họa từ `search_images`) — regression lock cho bug "hỏi thanh toán ra ảnh mặt bằng".
+Hai dạng expectation:
+
+| Dạng | Ý nghĩa | Pass khi |
+|---|---|---|
+| `{"none": true}` | Câu không được gắn ảnh (off-topic/refusal/legal) | `images` rỗng |
+| `{"kinds": ["thanh-toan"]}` | Câu phải có ảnh, kind nằm trong danh sách | `images` không rỗng và mọi kind ⊆ expectation |
+
+Metric `images (kinds)` trong SUMMARY = tỷ lệ câu **có khai báo** `expected_images`
+pass (câu không khai báo thì bỏ qua, không vào mẫu số). Câu fail in kèm lý do:
+`images: expect none nhưng có N ảnh kinds=[...]` hoặc `images: kind ngoài kỳ vọng
+[...] (want [...])`.
+
+Cách đọc:
+- `{"none": true}` fail = ảnh rác bị gắn vào câu không liên quan (regression ngược bug).
+- `{"kinds": [...]}` fail = hoặc recall thiếu (không có ảnh nào), hoặc precision kém
+  (kind lạ lẫn vào). Đối chiếu thêm score thật trong integration suite
+  `tests/test_integration_image_search.py`.
+- Chiều này chỉ chấm **kind**, không chấm đúng image cụ thể — việc khóa căn exact
+  (match = exact) do integration suite lo: `test_unit_query_*`.
+
 ## Injection test contract
 
 `eval/injection_test_vn.json`: **20 prompt tiếng Việt = 10 injection + 10 benign control.**

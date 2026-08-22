@@ -263,14 +263,40 @@ async def search_project_images(
 
 
 async def search_images(
-    query_text: str, top_k: int = 4, threshold: float = 0.4
+    query_text: str,
+    top_k: int = 4,
+    threshold: float = 0.45,
+    margin: float | None = None,
+    same_kind_margin: float = 0.15,
+    cross_kind_margin: float = 0.05,
 ) -> list[dict[str, Any]]:
-    """Return up to top_k published illustrative images whose similarity passes threshold.
+    """Return up to top_k published illustrative images that pass a relevance gate.
 
-    When the query names concrete unit code(s), results are re-ranked so the exact
-    unit(s) lead and same-type units follow; otherwise raw score order is kept.
-    Degrades to [] on any embedding or DB error: image retrieval is a garnish to
-    the answer, never a reason to fail the whole pipeline (matching the other legs).
+    Two layers keep the gallery semantically tied to the question, so a query that
+    has no matching image returns nothing instead of a best-effort floor plan:
+
+    - ``threshold`` is an absolute floor on the caption-embedding cosine score.
+      Cross-topic pairs that only share project context ("The Camellia Sơn Trà",
+      "căn hộ") measure 0.40-0.46 with text-embedding-v4, so the old 0.4 floor let
+      unrelated tail images attach to any query. 0.45 rejects those while keeping
+      every genuinely topical cluster (payment 0.56+, floor plan 0.50+, price 0.62+).
+    - ``same_kind_margin`` / ``cross_kind_margin`` are relative gates against the
+      top hit, split by whether a candidate shares the top hit's ``kind``. One
+      scalar margin cannot both keep a full topical cluster and reject an
+      off-topic tail, because the two score ranges overlap: the four payment-method
+      images span 0.4586-0.5615 (widest same-kind gap 0.1029), while a floor-plan
+      at 0.509 sits only 0.104 below a 0.613 payment hit. ``same_kind_margin``
+      (0.15) is wide enough to hold the whole payment cluster; ``cross_kind_margin``
+      (0.05) is tight enough to drop the floor-plan. The legacy ``margin`` argument
+      is kept for back-compat: when passed, the single scalar drives both windows
+      (exactly the old behavior).
+
+    The vector pass fetches a candidate pool larger than ``top_k`` so both gates
+    choose from a fuller picture before the final top_k slice. When the query names
+    concrete unit code(s), results are re-ranked so the exact unit(s) lead and
+    same-type units follow (exact rescues deliberately bypass the floor); otherwise
+    raw score order is kept. Degrades to [] on any embedding or DB error: image
+    retrieval is a garnish to the answer, never a reason to fail the pipeline.
     """
     if not query_text:
         return []
@@ -279,8 +305,12 @@ async def search_images(
         # asyncpg cannot encode a bare float list as an hstore-free PG vector, so
         # the literal is passed as text and cast server-side.
         vec_literal = str([float(x) for x in vector])
+        # Fetch a superset of the final count so the floor/margin gates are not
+        # starved by the LIMIT; a topical cluster that lands just outside the top_k
+        # raw neighbors still gets a chance to pass the gates.
+        pool = max(top_k, 8)
         async with with_rls_identity() as conn:
-            recs = await conn.fetch(IMAGE_QUERY, vec_literal, top_k)
+            recs = await conn.fetch(IMAGE_QUERY, vec_literal, pool)
         rows = [dict(r) for r in recs]
     except Exception as exc:  # noqa: BLE001 — image search failure never crashes the pipeline
         logger.warning("image_search: degraded (no images): %s", exc)
@@ -295,7 +325,27 @@ async def search_images(
 
     codes = _extract_unit_codes(query_text)
     if not codes:
-        # No concrete unit target: plain semantic ranking is the honest answer.
-        return [_row_to_image(r, s, "semantic", None) for r, s in scored]
+        if not scored:
+            return []
+        # No concrete unit target: plain semantic ranking is the honest answer,
+        # gated per kind so the gallery keeps the full topical cluster yet never
+        # trails into images of a different kind that merely share project
+        # vocabulary with the top match (the score ranges overlap across kinds).
+        top_score = scored[0][1]
+        top_kind = scored[0][0].get("kind")
+        # Legacy scalar override: one margin for both windows keeps old behavior.
+        if margin is not None:
+            same_kind_margin = margin
+            cross_kind_margin = margin
+        kept: list[tuple[dict[str, Any], float]] = []
+        for r, s in scored:
+            # Inclusive bound: a gap exactly equal to the window is kept; anything
+            # beyond it by even float noise is dropped.
+            gap = top_score - s
+            window = same_kind_margin if r.get("kind") == top_kind else cross_kind_margin
+            if gap > window:
+                continue
+            kept.append((r, s))
+        return [_row_to_image(r, s, "semantic", None) for r, s in kept][:top_k]
 
     return await _rerank_by_unit(set(codes), scored, top_k)

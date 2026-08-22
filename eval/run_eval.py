@@ -365,6 +365,7 @@ class QuestionResult:
     pass_refusal: bool = False
     pass_freshness: bool = False
     pass_faithfulness: bool = False
+    pass_images: bool = False
     faithful_score: float = 0.0
     fail_reasons: list[str] = field(default_factory=list)
     error: str = ""
@@ -428,6 +429,7 @@ class MockPipeline:
             "confidence": "HIGH",
             "requires_review": bool(q.get("expect_requires_review", q.get("high_stakes", False))),
             "sources": [{"doc_id": p} for p in (q.get("gold_chunk_ids") or [])],
+            "images": _mock_images(q),
             "latency_ms": 12,
             "trace_id": "dry-mock",
         }
@@ -437,6 +439,61 @@ class MockPipeline:
             if q.get("question") == query:
                 return q
         return None
+
+
+def _mock_images(q: dict[str, Any]) -> list[dict[str, Any]]:
+    """Emit an images payload that satisfies the question's expected_images (--dry).
+
+    The mock is the harness self-test: it must produce images the checker will
+    pass, so a --dry run proves the image-relevance dimension measures end to
+    end. Questions without expected_images emit none (the checker skips them).
+    """
+    expect = q.get("expected_images") or {}
+    if not expect:
+        return []
+    if expect.get("none"):
+        return []
+    out: list[dict[str, Any]] = []
+    for i, kind in enumerate(expect.get("kinds") or []):
+        out.append(
+            {
+                "image_id": f"mock-img-{kind}-{i}",
+                "kind": kind,
+                "score": 0.9,
+                "match": "semantic",
+            }
+        )
+    return out
+
+
+def _check_images(q: dict[str, Any], images: Any) -> tuple[bool, list[str]]:
+    """Score the illustrative-images payload against expected_images (optional).
+
+    Only questions that declare expected_images are scored. ``{"none": true}``
+    requires an empty list (an off-topic question must not attach images);
+    ``{"kinds": [...]}`` requires a non-empty list whose kinds are all inside
+    the expectation. This is the regression lock for the "payment question
+    returns floor-plan images" bug at the eval layer.
+    """
+    expect = q.get("expected_images")
+    if not expect:
+        return True, []
+    items = images if isinstance(images, list) else []
+    if expect.get("none"):
+        if items:
+            kinds = sorted({str(i.get("kind")) for i in items if isinstance(i, dict)})
+            return False, [f"images: expect none nhưng có {len(items)} ảnh kinds={kinds}"]
+        return True, []
+    want = set(expect.get("kinds") or [])
+    if not want:
+        return True, []
+    if not items:
+        return False, [f"images: expect kinds {sorted(want)} nhưng không có ảnh nào"]
+    got = {str(i.get("kind")) for i in items if isinstance(i, dict)}
+    bad = got - want
+    if bad:
+        return False, [f"images: kind ngoài kỳ vọng {sorted(bad)} (want {sorted(want)})"]
+    return True, []
 
 
 # Check helpers
@@ -493,6 +550,7 @@ def _overall_pass(r: QuestionResult) -> bool:
         and r.pass_refusal
         and r.pass_freshness
         and r.pass_faithfulness
+        and r.pass_images
     )
 
 
@@ -545,6 +603,10 @@ async def evaluate_question(
     ok_fresh, why_fresh = _check_freshness(q, answer)
     res.pass_freshness = ok_fresh
     res.fail_reasons.extend(why_fresh)
+
+    ok_img, why_img = _check_images(q, payload.get("images"))
+    res.pass_images = ok_img
+    res.fail_reasons.extend(why_img)
 
     contexts: list[str] = []
     if not dry:
@@ -753,6 +815,7 @@ def _pass_rate(results: list[QuestionResult]) -> dict[str, float]:
         "refusal": sum(r.pass_refusal for r in results) / total,
         "freshness": sum(r.pass_freshness for r in results) / total,
         "faithfulness": sum(r.pass_faithfulness for r in results) / total,
+        "images": sum(r.pass_images for r in results) / total,
         "overall_pass": sum(_overall_pass(r) for r in results) / total,
     }
 
@@ -810,6 +873,7 @@ def _print_summary(results: list[QuestionResult], rates: dict[str, float], laten
         ("refusal", "refusal"),
         ("freshness", "freshness"),
         ("faithfulness", "faithfulness"),
+        ("images (kinds)", "images"),
         ("overall-pass", "overall_pass"),
     ]
     for label, key in labels:
@@ -820,6 +884,7 @@ def _print_summary(results: list[QuestionResult], rates: dict[str, float], laten
             else r.pass_refusal if key == "refusal"
             else r.pass_freshness if key == "freshness"
             else r.pass_faithfulness if key == "faithfulness"
+            else r.pass_images if key == "images"
             else 1 if _overall_pass(r) else 0
             for r in results
         )
@@ -837,9 +902,15 @@ def _print_by_category(results: list[QuestionResult]) -> None:
     for cat in sorted(cats):
         rs = cats[cat]
         n_pass = sum(
-            r.pass_content and r.pass_numeric and r.pass_routing and r.pass_refusal and r.pass_freshness for r in rs
+            r.pass_content
+            and r.pass_numeric
+            and r.pass_routing
+            and r.pass_refusal
+            and r.pass_freshness
+            and r.pass_images
+            for r in rs
         )
-        print(f"  {cat:<22}{n_pass:>3}/{len(rs):<3} (content+num+routing+refusal+freshness)")
+        print(f"  {cat:<22}{n_pass:>3}/{len(rs):<3} (content+num+routing+refusal+freshness+images)")
 
 
 def _print_failures(results: list[QuestionResult]) -> None:
@@ -953,6 +1024,7 @@ async def amain(args: argparse.Namespace, settings: EvalSettings) -> int:
                     "pass_refusal": r.pass_refusal,
                     "pass_freshness": r.pass_freshness,
                     "pass_faithfulness": r.pass_faithfulness,
+                    "pass_images": r.pass_images,
                     "faithful_score": r.faithful_score,
                     "fail_reasons": r.fail_reasons,
                     "error": r.error,
