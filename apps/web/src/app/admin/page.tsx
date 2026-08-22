@@ -1,24 +1,20 @@
-import { Card, Typography } from "antd";
+import { App as AntdApp } from "antd";
 import { AuthProvider } from "@/lib/AuthProvider";
 import { RequireRole } from "@/components/RequireRole";
+import { AdminWorkspace } from "@/features/admin/AdminWorkspace";
 
 /**
- * Admin CMS placeholder (story 8.3): exists to make role gating demonstrable
- * end-to-end. The full CMS arrives in a later issue; the page itself stays a
- * server component and only the guard runs on the client.
+ * Admin CMS page (story 8.4 / ISSUE-07). Server component shell mirroring the
+ * CRM page: AuthProvider + RequireRole gate the route to role "admin" (story
+ * 8.3 claims), and only the workspace itself renders client-side.
  */
 export default function AdminPage() {
   return (
     <AuthProvider>
       <RequireRole allowedRoles={["admin"]}>
-        <main style={{ padding: 24 }}>
-          <Card>
-            <Typography.Title level={3}>Trang quản trị</Typography.Title>
-            <Typography.Paragraph type="secondary">
-              CMS đang xây dựng — chức năng quản lý sẽ được bổ sung trong giai đoạn tiếp theo.
-            </Typography.Paragraph>
-          </Card>
-        </main>
+        <AntdApp>
+          <AdminWorkspace />
+        </AntdApp>
       </RequireRole>
     </AuthProvider>
   );
