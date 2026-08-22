@@ -40,6 +40,9 @@ _bearer_credentials_extractor = HTTPBearer(auto_error=False)
 ADMIN_ALLOWED_ROLES = frozenset({"admin"})
 SALES_ALLOWED_ROLES = frozenset({"sales"})
 VIEWER_ALLOWED_ROLES = frozenset({"viewer"})
+# Composite gate for CRM endpoints (story 9.3): both staff roles may call, the
+# route layer then applies per-lead ownership scoping on top of the role claim.
+SALES_OR_ADMIN_ALLOWED_ROLES = frozenset({"sales", "admin"})
 
 
 @dataclass(frozen=True)
@@ -183,6 +186,21 @@ async def require_viewer(
     """Viewer-only routes: verified Firebase token carrying role claim 'viewer'."""
     return await resolve_authenticated_principal(
         allowed_roles_for_dependency=VIEWER_ALLOWED_ROLES,
+        bearer_credentials=bearer_credentials,
+        firebase_token_verifier=_verifier_from_dependency_injection(),
+    )
+
+
+async def require_sales_or_admin(
+    bearer_credentials: HTTPAuthorizationCredentials | None = Depends(
+        _bearer_credentials_extractor
+    ),
+) -> AuthenticatedPrincipal:
+    """CRM routes (story 9.3): sales or admin may authenticate; per-lead
+    ownership scoping (assigned sales only, admin unrestricted) is enforced
+    downstream in the application service, not by the role claim alone."""
+    return await resolve_authenticated_principal(
+        allowed_roles_for_dependency=SALES_OR_ADMIN_ALLOWED_ROLES,
         bearer_credentials=bearer_credentials,
         firebase_token_verifier=_verifier_from_dependency_injection(),
     )

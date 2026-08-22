@@ -8,6 +8,7 @@
  */
 import type { Lead } from "@/domain/crm/lead";
 import type {
+  CrmLeadStreamRequest,
   LeadRepositoryPort,
   LeadStreamHandlers,
 } from "@/domain/crm/ports/leadRepositoryPort";
@@ -25,6 +26,17 @@ export class LeadRealtimeService {
     handlers: LeadStreamHandlers
   ): RealtimeSubscriptionHandle {
     return this.leadRepository.streamLeadsByProject(request, handlers);
+  }
+
+  /**
+   * Subscribes to the CRM table stream (story 9.3): one sales' assignments or,
+   * for admins, every lead. Isolation is enforced by transport rules as well.
+   */
+  streamLeadsForCrm(
+    request: CrmLeadStreamRequest,
+    handlers: LeadStreamHandlers
+  ): RealtimeSubscriptionHandle {
+    return this.leadRepository.streamLeadsForCrm(request, handlers);
   }
 
   /** One-shot read of a single lead by its opaque document id. */

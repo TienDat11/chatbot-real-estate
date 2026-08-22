@@ -21,6 +21,16 @@ export interface LeadStreamHandlers {
   onConnectionStateChanged?(state: RealtimeConnectionState): void;
 }
 
+/** Request for the CRM-wide lead stream (story 9.3). */
+export interface CrmLeadStreamRequest {
+  /**
+   * Firebase uid restricting the stream to one sales' assignments. Null means
+   * the caller is an admin and may see every lead — Firestore rules enforce
+   * the same decision server-side.
+   */
+  assignedSalesFirebaseUid: string | null;
+}
+
 /** Contract for reading and writing leads through any transport. */
 export interface LeadRepositoryPort {
   /**
@@ -29,6 +39,16 @@ export interface LeadRepositoryPort {
    */
   streamLeadsByProject(
     request: { projectKey: string },
+    handlers: LeadStreamHandlers
+  ): RealtimeSubscriptionHandle;
+
+  /**
+   * Subscribes to the CRM lead table (story 9.3): every lead for an admin,
+   * or only the leads assigned to one sales. The returned handle MUST be
+   * unsubscribed when the consumer unmounts.
+   */
+  streamLeadsForCrm(
+    request: CrmLeadStreamRequest,
     handlers: LeadStreamHandlers
   ): RealtimeSubscriptionHandle;
 

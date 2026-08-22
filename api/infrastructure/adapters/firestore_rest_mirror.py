@@ -80,6 +80,9 @@ def _document_fields(document: LeadMirrorDocument) -> dict[str, dict[str, Any]]:
         "assigned_sales_firebase_uid": document.assigned_sales_firebase_uid,
         "consent_recorded_at": document.consent_recorded_at,
         "last_customer_message_at": document.last_customer_message_at,
+        "rejection_reason": document.rejection_reason,
+        "reengage_at": document.reengage_at,
+        "marketing_withdrawn_at": document.marketing_withdrawn_at,
     }
     for field_name, field_value in optional_string_fields.items():
         if field_value is not None:

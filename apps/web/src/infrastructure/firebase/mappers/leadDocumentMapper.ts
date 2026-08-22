@@ -31,8 +31,18 @@ export interface LeadDocumentDto {
   budget_vnd: number | null;
   consent_service: boolean;
   consent_marketing: boolean;
+  /**
+   * The backend mirror writes `lead_status`; `status` is kept as a legacy
+   * read alias so documents written by older tooling still decode.
+   */
+  lead_status?: LeadWorkflowStatus;
   status: LeadWorkflowStatus;
   assigned_sales_id: number | null;
+  /** Firebase uid of the assigned sales (per-sales rules isolation key). */
+  assigned_sales_firebase_uid: string | null;
+  rejection_reason: string | null;
+  reengage_at: string | null;
+  marketing_withdrawn_at: string | null;
   escal_count: number;
   /** serverTimestamp() sentinel on write; Timestamp (or ISO string) on read. */
   created_at: FieldValue | Timestamp | string | null;
@@ -52,8 +62,13 @@ export function leadToLeadDocumentDto(lead: Lead): LeadDocumentDto {
     budget_vnd: lead.budgetVnd,
     consent_service: lead.consentFlags.consentService,
     consent_marketing: lead.consentFlags.consentMarketing,
+    lead_status: lead.workflowStatus,
     status: lead.workflowStatus,
     assigned_sales_id: lead.assignedSalesId,
+    assigned_sales_firebase_uid: lead.assignedSalesFirebaseUid,
+    rejection_reason: lead.rejectionReason,
+    reengage_at: lead.reengageAt,
+    marketing_withdrawn_at: lead.marketingWithdrawnAt,
     escal_count: lead.escalCount,
     // Written as serverTimestamp so Firestore stamps the authoritative time;
     // the FE domain keeps ISO-8601 strings and never fabricates timestamps.
@@ -80,8 +95,18 @@ export function mapLeadDocumentData(
       consentService: Boolean(documentData.consent_service),
       consentMarketing: Boolean(documentData.consent_marketing),
     },
-    workflowStatus: toWorkflowStatusOrFallback(documentData.status),
+    workflowStatus: toWorkflowStatusOrFallback(
+      // Mirror documents key the status as lead_status; fall back to the
+      // legacy alias so pre-mirror-era tooling documents still decode.
+      documentData.lead_status ?? documentData.status
+    ),
     assignedSalesId: documentData.assigned_sales_id ?? null,
+    assignedSalesFirebaseUid: documentData.assigned_sales_firebase_uid ?? null,
+    rejectionReason: documentData.rejection_reason ?? null,
+    reengageAt: toIso8601StringOrNull(documentData.reengage_at),
+    marketingWithdrawnAt: toIso8601StringOrNull(
+      documentData.marketing_withdrawn_at
+    ),
     escalCount: documentData.escal_count ?? 0,
     createdAt: toIso8601StringOrFallback(documentData.created_at),
     updatedAt: toIso8601StringOrFallback(documentData.updated_at),

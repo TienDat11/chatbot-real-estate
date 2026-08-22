@@ -30,6 +30,10 @@ function makeLead(overrides: Partial<Lead> = {}): Lead {
     consentFlags: { consentService: true, consentMarketing: false },
     workflowStatus: "new",
     assignedSalesId: null,
+    assignedSalesFirebaseUid: null,
+    rejectionReason: null,
+    reengageAt: null,
+    marketingWithdrawnAt: null,
     escalCount: 0,
     createdAt: "2026-08-22T08:00:00.000Z",
     updatedAt: "2026-08-22T08:00:00.000Z",
@@ -80,6 +84,30 @@ class InMemoryLeadRepository implements LeadRepositoryPort {
     const deliver = () => {
       handlers.onConnectionStateChanged?.("active");
       handlers.onLeadsChanged(this.leadsByProject.get(request.projectKey) ?? []);
+    };
+    this.subscribers.add(deliver);
+    handlers.onConnectionStateChanged?.("connecting");
+    deliver();
+    return {
+      unsubscribe: () => this.subscribers.delete(deliver),
+    };
+  }
+
+  streamLeadsForCrm(
+    request: { assignedSalesFirebaseUid: string | null },
+    handlers: LeadStreamHandlers
+  ): RealtimeSubscriptionHandle {
+    const deliver = () => {
+      handlers.onConnectionStateChanged?.("active");
+      const everyLead = [...this.leadsByProject.values()].flat();
+      handlers.onLeadsChanged(
+        request.assignedSalesFirebaseUid === null
+          ? everyLead
+          : everyLead.filter(
+              (lead) =>
+                lead.assignedSalesFirebaseUid === request.assignedSalesFirebaseUid
+            )
+      );
     };
     this.subscribers.add(deliver);
     handlers.onConnectionStateChanged?.("connecting");
@@ -160,6 +188,36 @@ describe("LeadRealtimeService", () => {
     handle.unsubscribe();
     repository.emitIncomingLead(makeLead({ id: "lead-after-unsub" }));
     expect(received).toHaveLength(2);
+  });
+
+  it("scopes the CRM stream to one sales' assignments; admins get everything", () => {
+    const repository = new InMemoryLeadRepository({ readOnly: false }, [
+      makeLead({ id: "lead-mine", assignedSalesFirebaseUid: "uid-sales-7" }),
+      makeLead({ id: "lead-other", assignedSalesFirebaseUid: "uid-sales-8" }),
+      makeLead({ id: "lead-unassigned" }),
+    ]);
+    const service = new LeadRealtimeService(repository);
+
+    const salesReceived: Lead[][] = [];
+    const salesHandle = service.streamLeadsForCrm(
+      { assignedSalesFirebaseUid: "uid-sales-7" },
+      { onLeadsChanged: (leads) => salesReceived.push(leads) }
+    );
+    expect(salesReceived.at(-1)?.map((lead) => lead.id)).toEqual(["lead-mine"]);
+
+    const adminReceived: Lead[][] = [];
+    const adminHandle = service.streamLeadsForCrm(
+      { assignedSalesFirebaseUid: null },
+      { onLeadsChanged: (leads) => adminReceived.push(leads) }
+    );
+    expect(adminReceived.at(-1)?.map((lead) => lead.id).sort()).toEqual([
+      "lead-mine",
+      "lead-other",
+      "lead-unassigned",
+    ]);
+
+    salesHandle.unsubscribe();
+    adminHandle.unsubscribe();
   });
 
   it("reads a single lead by opaque id through the repository port", async () => {

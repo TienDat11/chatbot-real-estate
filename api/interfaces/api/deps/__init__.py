@@ -9,6 +9,7 @@ from api.interfaces.api.deps.admin import (
     AuthenticatedPrincipal,
     require_admin,
     require_sales,
+    require_sales_or_admin,
     require_viewer,
 )
 
@@ -16,5 +17,6 @@ __all__ = [
     "AuthenticatedPrincipal",
     "require_admin",
     "require_sales",
+    "require_sales_or_admin",
     "require_viewer",
 ]

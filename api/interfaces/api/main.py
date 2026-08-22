@@ -235,6 +235,7 @@ def create_app() -> FastAPI:
         admin_session_router,
         sales_session_router,
     )
+    from api.interfaces.api.crm_routes import router as crm_router  # noqa: PLC0415
     from api.interfaces.api.hello import router as hello_router  # noqa: PLC0415
     from api.interfaces.api.lead import router as lead_router  # noqa: PLC0415
     from api.interfaces.api.projects import router as projects_router  # noqa: PLC0415
@@ -246,6 +247,7 @@ def create_app() -> FastAPI:
     app.include_router(projects_router)
     app.include_router(admin_session_router)
     app.include_router(sales_session_router)
+    app.include_router(crm_router)
 
     @app.get("/health")
     async def health() -> dict:
