@@ -1,5 +1,9 @@
 -- lead/sales schema (Epic 5/6 Story 6.4)
 -- Run AFTER db/schema.sql. Requires PostgreSQL 16.6+.
+-- Story 9.3: pgcrypto powers the in-SQL hmac_sha256(phone, secret) lookup
+-- behind the CRM customer_id-addressed endpoints (reveal / consent withdrawal);
+-- the secret itself only ever arrives as a bind parameter from the adapter.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- 1. sales table — môi giới/sales
 CREATE TABLE IF NOT EXISTS sales (

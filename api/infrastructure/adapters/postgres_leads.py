@@ -155,3 +155,62 @@ class PostgresLeadRepository:
                 stale_before, limit,
             )
         return [LeadRow(**dict(row)) for row in rows]
+
+    async def get_leads_by_phone(self, phone: str) -> list[LeadRow]:
+        pool = await get_lead_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT " + _LEAD_COLUMNS + " FROM leads WHERE phone = $1 ORDER BY created_at DESC",
+                phone,
+            )
+        return [LeadRow(**dict(row)) for row in rows]
+
+    async def get_leads_by_customer_id(self, customer_id: str) -> list[LeadRow]:
+        # The customer_id IS hmac_sha256(phone, secret) hex, so the lookup is a
+        # WHERE-clause HMAC recomputation (pgcrypto) rather than a stored
+        # denormalized column — the secret only ever travels as a bind param
+        # and the digest stays derivable, never persisted.
+        pool = await get_lead_pool()
+        from api.infrastructure.config.config import get_settings  # noqa: PLC0415
+
+        hmac_secret = get_settings().lead_mirror_hmac_secret
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT """ + _LEAD_COLUMNS + """ FROM leads
+                   WHERE encode(hmac(convert_to(phone, 'UTF8'), convert_to($1, 'UTF8'), 'sha256'), 'hex') = $2
+                   ORDER BY created_at DESC""",
+                hmac_secret, customer_id,
+            )
+        return [LeadRow(**dict(row)) for row in rows]
+
+    async def update_lead_crm_state(self, lead_id: int, *, status: str, rejection_reason: str | None = None, reengage_at: datetime | None = None) -> LeadRow | None:
+        pool = await get_lead_pool()
+        # mirror_status resets to 'pending' so a crash between this write and
+        # the mirror push leaves the row sweepable instead of silently stale.
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE leads
+                   SET status = $2, rejection_reason = $3, reengage_at = $4,
+                       last_action_at = now(), mirror_status = 'pending'
+                   WHERE id = $1 RETURNING """ + _LEAD_COLUMNS,
+                lead_id, status, rejection_reason, reengage_at,
+            )
+        return LeadRow(**dict(row)) if row else None
+
+    async def set_marketing_consent_withdrawn_for_customer(self, customer_id: str) -> list[LeadRow]:
+        # Withdrawal stamps the audit timestamp AND flips the effective flag so
+        # the mirror document (consent_marketing) reflects the withdrawal
+        # without every consumer having to consult the timestamp.
+        pool = await get_lead_pool()
+        from api.infrastructure.config.config import get_settings  # noqa: PLC0415
+
+        hmac_secret = get_settings().lead_mirror_hmac_secret
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """UPDATE leads
+                   SET marketing_withdrawn_at = now(), consent_marketing = false, mirror_status = 'pending'
+                   WHERE encode(hmac(convert_to(phone, 'UTF8'), convert_to($1, 'UTF8'), 'sha256'), 'hex') = $2
+                   RETURNING """ + _LEAD_COLUMNS,
+                hmac_secret, customer_id,
+            )
+        return [LeadRow(**dict(row)) for row in rows]
