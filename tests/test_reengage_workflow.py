@@ -541,6 +541,22 @@ def _pipeline_seams(monkeypatch: pytest.MonkeyPatch, lead_rows: list[LeadRow]):
     return queue_store, embedding
 
 
+def _route_app(monkeypatch: pytest.MonkeyPatch, lead_rows: list[LeadRow] | None = None):
+    """create_app with the audit store swapped for an in-memory recorder.
+
+    Story 9.5 added a Depends(get_staff_audit_store) to the trigger route;
+    without this override the audited success path would reach for PG.
+    """
+    from api.infrastructure.dependencies import get_staff_audit_store
+    from tests.test_staff_audit import RecordingStaffAuditStore
+
+    app = create_app()
+    app.dependency_overrides[get_staff_audit_store] = lambda: RecordingStaffAuditStore()
+    if lead_rows is not None:
+        _pipeline_seams(monkeypatch, lead_rows)
+    return app
+
+
 REENGAGE_URL = "/api/admin/projects/soleil/reengage-run"
 
 
@@ -555,7 +571,7 @@ def test_reengage_run_forbidden_for_sales_role(
     local_rsa_jwk: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     token = _mint_id_token(local_rsa_jwk, _base_claims("uid-sales-1", "sales"))
-    response = TestClient(create_app()).post(
+    response = TestClient(_route_app(monkeypatch)).post(
         REENGAGE_URL,
         json={"display_name": "Soleil Riverside"},
         headers={"Authorization": f"Bearer {token}"},
@@ -589,7 +605,7 @@ def test_reengage_run_admin_trigger_runs_pipeline(
         price_min_vnd=3_000_000_000,
         price_max_vnd=6_000_000_000,
     )
-    response = TestClient(create_app()).post(
+    response = TestClient(_route_app(monkeypatch)).post(
         REENGAGE_URL,
         json=request_body.model_dump(),
         headers={"Authorization": f"Bearer {token}"},
@@ -621,7 +637,7 @@ def test_reengage_run_reports_unconfigured_embedding_as_503(
     monkeypatch.setattr(admin_routes, "get_need_profile_embedding", raise_not_configured)
 
     token = _mint_id_token(local_rsa_jwk, _base_claims("uid-admin-1", "admin"))
-    response = TestClient(create_app()).post(
+    response = TestClient(_route_app(monkeypatch)).post(
         REENGAGE_URL,
         json={"display_name": "Soleil Riverside"},
         headers={"Authorization": f"Bearer {token}"},

@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.application.services.lead_mirror_service import compute_customer_id
+from api.application.ports.staff_audit import STAFF_AUDIT_ACTION_PHONE_REVEALED
 from api.infrastructure import dependencies as dependency_injection
 from api.infrastructure.ports.leads import LeadRow, get_lead_repository
 from api.infrastructure.ports.realtime_mirror import get_realtime_lead_mirror
@@ -151,6 +152,12 @@ def make_crm_client(
     app = create_app()
     app.dependency_overrides[get_lead_repository] = lambda: repo
     app.dependency_overrides[get_realtime_lead_mirror] = lambda: mirror
+    # Story 9.5: mutations now audit through the PG store — swap in an
+    # in-memory recorder so offline tests never touch a database.
+    from tests.test_staff_audit import RecordingStaffAuditStore
+    from api.infrastructure.dependencies import get_staff_audit_store
+
+    app.dependency_overrides[get_staff_audit_store] = lambda: RecordingStaffAuditStore()
     if principal is not None:
         app.dependency_overrides[require_sales_or_admin] = lambda: principal
     return TestClient(app)
@@ -199,7 +206,7 @@ def test_phone_reveal_allowed_for_assigned_sales_and_admin(
     seed_lead(repo, 21)
     mirror = RecordingLeadMirror()
 
-    with caplog.at_level(logging.INFO, logger="api.crm_customer_service"):
+    with caplog.at_level(logging.INFO, logger="api.staff_audit_service"):
         owner_response = make_crm_client(repo, mirror, ASSIGNED_SALES_PRINCIPAL).get(
             f"/api/crm/customers/{CUSTOMER_ID}/phone"
         )
@@ -211,10 +218,12 @@ def test_phone_reveal_allowed_for_assigned_sales_and_admin(
     assert owner_response.json() == {"customer_id": CUSTOMER_ID, "phone": CUSTOMER_PHONE}
     assert admin_response.status_code == 200
     assert admin_response.json()["phone"] == CUSTOMER_PHONE
-    # Every reveal emits one audit line carrying actor + customer_id + lead
-    # ids — and never the number itself.
+    # Story 9.5: every reveal emits one staff_audit line carrying actor +
+    # customer_id + lead ids — and never the number itself.
     reveal_lines = [
-        record for record in caplog.records if "crm.customer_phone_revealed" in record.message
+        record
+        for record in caplog.records
+        if f"action={STAFF_AUDIT_ACTION_PHONE_REVEALED}" in record.message
     ]
     assert len(reveal_lines) == 2
     assert CUSTOMER_PHONE not in caplog.text

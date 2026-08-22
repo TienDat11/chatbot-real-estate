@@ -42,6 +42,7 @@ _realtime_lead_mirror: RealtimeLeadMirror | None = None
 _project_registry: ProjectRegistryPort | None = None
 _need_profile_embedding: Any | None = None
 _reengage_queue_store: Any | None = None
+_staff_audit_store: Any | None = None
 
 
 def get_llm() -> LLMChatPort:
@@ -209,6 +210,18 @@ async def get_reengage_queue_store():
         else:
             _reengage_queue_store = NoopReengageQueueStore()
     return _reengage_queue_store
+
+
+def get_staff_audit_store():
+    """Build (once) the durable staff audit store (story 9.5, PG-backed)."""
+    global _staff_audit_store
+    if _staff_audit_store is None:
+        from api.infrastructure.adapters.postgres_staff_audit import (
+            PostgresStaffAuditStore,
+        )
+
+        _staff_audit_store = PostgresStaffAuditStore()
+    return _staff_audit_store
 
 
 class LazyLLMProxy:

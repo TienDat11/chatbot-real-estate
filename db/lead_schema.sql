@@ -79,6 +79,26 @@ CREATE TABLE IF NOT EXISTS sales_assignment_log (
 CREATE INDEX IF NOT EXISTS idx_sal_log_lead ON sales_assignment_log (lead_id);
 CREATE INDEX IF NOT EXISTS idx_sal_sales ON sales_assignment_log (sales_id);
 
+-- 3b. staff_audit_log — durable audit trail of staff mutations (story 9.5).
+-- Actor identity comes from the verified Firebase principal; detail JSONB
+-- carries action-specific context (old/new status, queued counts) and must
+-- NEVER contain raw PII (phones, names).
+CREATE TABLE IF NOT EXISTS staff_audit_log (
+  id                  BIGSERIAL PRIMARY KEY,
+  actor_firebase_uid  TEXT        NOT NULL,
+  actor_role          TEXT        NOT NULL,
+  actor_sales_id      INTEGER     REFERENCES sales(id),
+  action              TEXT        NOT NULL,
+  customer_id         TEXT,
+  lead_id             INTEGER,
+  detail              JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_staff_audit_created_at ON staff_audit_log (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_staff_audit_actor ON staff_audit_log (actor_firebase_uid, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_staff_audit_lead ON staff_audit_log (lead_id) WHERE lead_id IS NOT NULL;
+
 -- 4. Seed 5 sales from data/_processed/sales_contacts.json
 -- Field "name" -> full_name. Role mapping from role field.
 INSERT INTO sales (full_name, role, phone, is_active, priority)
