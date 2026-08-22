@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from api.application.services.project_config import render_template
 from api.domain.services.route_intent import Intent
 
 logger = logging.getLogger("api.sales_kit")
@@ -36,11 +37,15 @@ except OSError:  # pragma: no cover - a missing asset degrades to no kit
     _KIT_RAW = ""
 
 
-def sales_kit_block() -> str:
-    """The delimiter-wrapped SALES_CONTEXT block (empty when kit is missing)."""
+def sales_kit_block(project_key: "str | None" = None) -> str:
+    """The delimiter-wrapped SALES_CONTEXT block (empty when kit is missing).
+
+    ``project_key`` (story 10.2) renders the {ten_thuong_mai} title placeholder
+    against the project registry; None keeps the default project identity.
+    """
     if not _KIT_RAW:
         return ""
-    return f"{_DELIMITER}\n{_KIT_RAW.strip()}\n"
+    return f"{_DELIMITER}\n{render_template(_KIT_RAW.strip(), project_key)}\n"
 
 
 def inject_sales_context(intent: "Intent | None") -> bool:

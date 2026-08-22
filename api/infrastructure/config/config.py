@@ -76,14 +76,16 @@ class Settings(BaseSettings):
     rerank_model: str = "qwen3-rerank"
     enable_rerank: bool = True
 
-    # Geo (nearby places — THE CAMELLIA project area, brief §7)
+    # Geo (nearby places). The Camellia lat/lng here are the LEGACY fallback used
+    # when no project is bound or the project_config registry read fails
+    # (story 8.2/10.2 — project_geo_center() is authoritative for scoped paths).
     geo_binding: str = "static"  # static | google | off
     geo_api_key: str = ""
     geo_base_url: str = "https://maps.googleapis.com/maps/api/place"
     geo_radius_m: int = 10000
     geo_static_path: str = "db/seed/static_places.json"
-    geo_center_lat: float = 16.1052  # The Camellia: giao lộ Lê Văn Lương - Lê Đức Thọ, Thọ Quang, Sơn Trà
-    geo_center_lng: float = 108.2558
+    geo_center_lat: float = 16.1052  # legacy fallback: The Camellia
+    geo_center_lng: float = 108.2558  # legacy fallback: The Camellia
 
     # Cloudflare R2 object storage (image upload; credentials only, never hardcoded)
     r2_account_id: str = ""

@@ -40,6 +40,7 @@ from api.domain.value_objects.constants import (
 )
 from api.application.services.image_search import search_images
 from api.application.services.project_scope import filter_images_by_project
+from api.infrastructure.config.config import project_geo_center
 from api.infrastructure.dependencies import get_geo, get_reranker
 from api.application.services.generate import stream_answer
 from api.application.services.conv_state import conv_directive, get_context
@@ -338,11 +339,16 @@ class RagQueryWorkflow(Workflow):
         if not routed.routing.get("needs_geo", False):
             await ctx.store.set("geo_result", GeoResult([], degraded=False))
             return GeoDoneEv()
+        # Geo center is per-project (story 8.2/10.2): the registry row wins; the
+        # Settings defaults remain the legacy Camellia fallback when no project
+        # is bound or the registry read fails.
+        project_key = await self._store_get(ctx, "project_key")
+        center_lat, center_lng = project_geo_center(project_key or "")
         try:
             result = await asyncio.wait_for(
                 get_geo().places_around(
-                    get_cfg("geo_center_lat", 16.1052),
-                    get_cfg("geo_center_lng", 108.2558),
+                    center_lat,
+                    center_lng,
                     get_cfg("geo_radius_m", 10000),
                 ),
                 timeout=STEP_TIMEOUTS["geo"],
@@ -402,12 +408,13 @@ class RagQueryWorkflow(Workflow):
         conv_state_str = None
         if session_id:
             ctx_conv = get_context(session_id, device_id)
-            conv_dir = conv_directive(ctx_conv.state)
+            conv_dir = conv_directive(ctx_conv.state, project_key)
             conv_state_str = ctx_conv.state
         merged.meta.update(
             query=guard.clean,
             rewritten=routed.rewritten,
             as_of=as_of.isoformat() if as_of else None,
+            project_key=project_key,  # story 10.2: prompt render scope
             degraded=await ctx.store.get("degraded"),
             sql_row_count=len(sql_result.rows),
             has_approx=any(

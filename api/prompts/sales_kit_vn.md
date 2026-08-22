@@ -1,4 +1,4 @@
-# Sales kit v1 - The Camellia (SALES_KIT_V1, 2026-08)
+# Sales kit v1 - {ten_thuong_mai} (SALES_KIT_V1, 2026-08)
 # Nguồn: data/_processed/*.json + feedback ground truth. Số không nguồn -> pending_confirm.
 # pj=project_info pm=payment_methods br=business_rules uc=unit_catalog pmx=price_matrix gt=feedback_data
 

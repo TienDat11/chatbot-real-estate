@@ -187,11 +187,19 @@ def note_useful_turn(ctx: ConvContext) -> None:
     ctx.useful_turns += 1
 
 
-def conv_directive(state: str) -> str:
-    """§6.4 per-state CONVERSATION_DIRECTIVE (system-role dynamic message)."""
+def conv_directive(state: str, project_key: "str | None" = None) -> str:
+    """§6.4 per-state CONVERSATION_DIRECTIVE (system-role dynamic message).
+
+    ``project_key`` (story 10.2) resolves the project's display name so the
+    greet/qualify directives name the active project instead of a hardcoded
+    Camellia; None keeps the legacy default identity.
+    """
+    from api.application.services.project_config import fetch_project_identity
+
+    name = fetch_project_identity(project_key).get("ten_thuong_mai", "")
     return {
-        "greet": "Lượt này: chào ấm 1 câu + giới thiệu ngắn dự án The Camellia (vị trí + view biển/view núi Sơn Trà + 42 tiện ích đa tầng) + trả lời câu khách hỏi nếu có + MỘT câu hỏi mở về nhu cầu (để ở, đầu tư, cho thuê, hay làm văn phòng/khách sạn).",
-        "qualify": "Trả lời + giới thiệu ngắn dự án nếu khách chưa nói về Camellia + hỏi ĐÚNG MỘT slot còn thiếu, ưu tiên budget → bedrooms → timeline → purpose; câu hỏi nhu cầu gợi đủ 4 nhóm (ở, đầu tư, cho thuê, văn phòng/khách sạn).",
+        "greet": f"Lượt này: chào ấm 1 câu + giới thiệu ngắn dự án {name} (vị trí + view + tiện ích nổi bật) + trả lời câu khách hỏi nếu có + MỘT câu hỏi mở về nhu cầu (để ở, đầu tư, cho thuê, hay làm văn phòng/khách sạn).",
+        "qualify": f"Trả lời + giới thiệu ngắn dự án nếu khách chưa nói về {name} + hỏi ĐÚNG MỘT slot còn thiếu, ưu tiên budget → bedrooms → timeline → purpose; câu hỏi nhu cầu gợi đủ 4 nhóm (ở, đầu tư, cho thuê, văn phòng/khách sạn).",
         "recommend": "Trả lời + so sánh tối đa 3 căn từ evidence + MỘT dòng mời nhận tư vấn căn phù hợp.",
         "nurture": "Recap 2 giá trị khách quan tâm + MỘT lời mời nhận cuộc gọi 5 phút (CTA bản rõ, 1 lần).",
         "handoff_done": "Xác nhận chuyên viên sẽ gọi trong ~5 phút, không hỏi thêm; hỗ trợ thêm nếu khách hỏi.",

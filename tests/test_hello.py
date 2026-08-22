@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+from api.application.services.project_config import render_template
 from api.interfaces.api import hello as hello_mod
 
 
@@ -99,7 +100,7 @@ def test_llms_hello_degrades_to_fallback_on_llm_timeout(monkeypatch):
 
     resp = run(hello_mod.llms_hello())
 
-    assert resp.greeting == hello_mod._FALLBACK_GREETING
+    assert resp.greeting == render_template(hello_mod._FALLBACK_GREETING)
     assert len(resp.images) == 1
     assert len(resp.videos) == 1
 

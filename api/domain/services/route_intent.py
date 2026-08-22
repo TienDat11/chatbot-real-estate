@@ -46,11 +46,23 @@ _HANDOFF_KEYWORDS = (
     "hẹn xem", "xem thực tế", "xem nhà", "báo giá", "gửi bảng giá",
 )
 
-# Company/developer info (no geo, no price).
+# Company/developer info (no geo, no price). The "X là của ai" ownership phrase
+# is project-specific (story 10.2): the brand token is appended per request so
+# a Soleil user asking about Soleil still routes to COMPANY.
 _COMPANY_KEYWORDS = (
     "chủ đầu tư", "công ty", "địa ốc", "thành lâm", "developer", "doanh nghiệp",
-    "đơn vị phát triển", "chủ dự án", "camellia là của ai", "ai là chủ",
+    "đơn vị phát triển", "chủ dự án", "ai là chủ",
 )
+
+
+def _company_keywords(project_name: "str | None" = None) -> tuple[str, ...]:
+    """Company keywords plus the active project's ownership phrase.
+
+    ``project_name`` is the brand token (e.g. 'camellia' / 'soleil'); None keeps
+    the legacy Camellia token so pre-project callers classify identically.
+    """
+    token = project_name or "camellia"
+    return _COMPANY_KEYWORDS + (f"{token} là của ai",)
 
 # Price-relevant vocabulary — complements (not replaces) the LLM router.
 _PRICE_KEYWORDS = (
@@ -80,8 +92,13 @@ def _contains(text: str, keywords: tuple[str, ...]) -> bool:
     return any(k in q for k in keywords)
 
 
-def classify_intent(query: str, history: list[dict] | None = None) -> ClassifyResult:
+def classify_intent(
+    query: str, history: list[dict] | None = None, project_name: "str | None" = None
+) -> ClassifyResult:
     """Classify a raw query into one Intent; CLOSURE when it is pure politeness.
+
+    ``project_name`` (story 10.2) is the active project's brand token used to
+    build the company-ownership keyword; None keeps the legacy Camellia token.
 
     Precedence: closure check (politeness must not hide a real question, so a
     follow-up marker overrides CLOSURE) -> HANDOFF -> COMPANY -> LOCATION ->
@@ -106,7 +123,7 @@ def classify_intent(query: str, history: list[dict] | None = None) -> ClassifyRe
 
     if _contains(q, _HANDOFF_KEYWORDS):
         return ClassifyResult(Intent.HANDOFF, "matched:handoff")
-    if _contains(q, _COMPANY_KEYWORDS):
+    if _contains(q, _company_keywords(project_name)):
         return ClassifyResult(Intent.COMPANY, "matched:company")
     if _contains(q, GEO_INTENT_KEYWORDS) or _contains(q, _LOCATION_SUFFIXES):
         return ClassifyResult(Intent.LOCATION, "matched:geo")

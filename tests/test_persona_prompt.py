@@ -35,7 +35,10 @@ def test_six_sections_present():
 
 
 def test_needs_persona_line():
-    assert "chuyên viên tư vấn cao cấp của dự án The Camellia Sơn Trà" in _p()
+    # Story 10.2: the project identity is a placeholder rendered from the
+    # registry, so the template must carry it (never a hardcoded project name).
+    assert "chuyên viên tư vấn cao cấp của dự án {ten_thuong_mai}" in _p()
+    assert "The Camellia" not in _p()
 
 
 def test_hard_rules_key_phrases_preserved():

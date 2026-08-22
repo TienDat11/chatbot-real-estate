@@ -34,6 +34,7 @@ from api.application.services.conv_state import (
     register_interest,
     transition,
 )
+from api.application.services.project_config import brand_token
 from api.domain.services.conv_slots import extract_slots, lead_prefill_note
 from api.domain.services.route_intent import Intent, classify_intent
 from api.application.pipelines.workflow import (
@@ -64,7 +65,7 @@ async def _extract_and_transition(
     ctx = get_context(session_id, device_id)
     if project_key:
         ctx.project_key = project_key  # session nhớ project (story 10.1 AC)
-    intent = classify_intent(query, history).intent
+    intent = classify_intent(query, history, project_name=brand_token(project_key)).intent
     res = await extract_slots(query, ctx.slots)
     ctx.slots.update(res["merged"])
     afford_answered = res["deterministic"].get("budget_vnd") is not None or intent == Intent.PRICE
@@ -74,7 +75,7 @@ async def _extract_and_transition(
         "session_id": session_id,
         "intent": intent.value,
         "conv_state": ctx.state,
-        "directive": conv_directive(ctx.state),
+        "directive": conv_directive(ctx.state, project_key),
         "slots": dict(ctx.slots),
         "prefill_note": lead_prefill_note(ctx.slots),
         "interested_units": list(ctx.interested_units),
