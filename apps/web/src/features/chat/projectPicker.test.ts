@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryRequestError, streamQuery } from "@/lib/api";
-import { loadActiveProjects, FALLBACK_ACTIVE_PROJECTS } from "@/features/chat/activeProjects";
+import {
+  loadActiveProjects,
+  FALLBACK_ACTIVE_PROJECTS,
+  shouldForceProjectPicker,
+  sortActiveProjects,
+} from "@/features/chat/activeProjects";
 
 // Story 10.3: the backend answers 422 PROJECT_SCOPE when more than one project
 // is active and none was chosen. The FE turns that into the ProjectPicker and
@@ -75,13 +80,18 @@ describe("query resend carries identity + project scope (story 10.1-FE + 10.3)",
 });
 
 describe("loadActiveProjects (picker catalogue)", () => {
-  it("prefers a project list carried by the 422 error body", async () => {
+  it("prefers a project list carried by the 422 error body, normalized to the contract shape", async () => {
     const fromError = [
       { project_key: "camellia", ten_thuong_mai: "The Camellia" },
       { project_key: "soleil", ten_thuong_mai: "Soleil" },
     ];
     const projects = await loadActiveProjects({ projects: fromError });
-    expect(projects).toEqual(fromError);
+    // Legacy 422 rows normalize to the wave-1 contract shape (name first) and
+    // sort hot-first, then by display name (no hot flag here -> name order).
+    expect(projects).toEqual([
+      { project_key: "soleil", name: "Soleil", ten_thuong_mai: "Soleil" },
+      { project_key: "camellia", name: "The Camellia", ten_thuong_mai: "The Camellia" },
+    ]);
   });
 
   it("falls back to the endpoint when the 422 body has no projects", async () => {
@@ -90,7 +100,47 @@ describe("loadActiveProjects (picker catalogue)", () => {
       vi.fn().mockResolvedValue(jsonResponse({ projects: [{ project_key: "camellia", ten_thuong_mai: "The Camellia" }] }, 200))
     );
     const projects = await loadActiveProjects(undefined);
-    expect(projects).toEqual([{ project_key: "camellia", ten_thuong_mai: "The Camellia" }]);
+    expect(projects).toEqual([{ project_key: "camellia", name: "The Camellia", ten_thuong_mai: "The Camellia" }]);
+  });
+
+  it("keeps the wave-1 contract fields (name, location, geo, is_hot) from the endpoint", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          {
+            projects: [
+              {
+                project_key: "soleil",
+                name: "The Soleil Đà Nẵng",
+                location: "Giao lộ Phạm Văn Đồng - Võ Nguyên Giáp, quận Sơn Trà, Đà Nẵng",
+                lat: 16.0710756,
+                lng: 108.2436243,
+                is_hot: false,
+              },
+              {
+                project_key: "camellia",
+                name: "The Camellia Sơn Trà - Đà Nẵng",
+                location: "Giao lộ Lê Văn Lương - Lê Đức Thọ, phường Sơn Trà, Đà Nẵng",
+                lat: 16.1052,
+                lng: 108.2558,
+                is_hot: true,
+              },
+            ],
+          },
+          200
+        )
+      )
+    );
+    const projects = await loadActiveProjects(undefined);
+    // Hot project sorts first; the full contract fields survive normalization.
+    expect(projects[0].project_key).toBe("camellia");
+    expect(projects[0].is_hot).toBe(true);
+    expect(projects[0].location).toContain("Lê Văn Lương");
+    expect(projects[0].lat).toBe(16.1052);
+    expect(projects[0].lng).toBe(108.2558);
+    expect(projects[1].project_key).toBe("soleil");
+    expect(projects[1].is_hot).toBe(false);
   });
 
   it("falls back to the seed-grounded catalogue when no source provides a list", async () => {
@@ -104,5 +154,53 @@ describe("loadActiveProjects (picker catalogue)", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("not found", { status: 404 })));
     const projects = await loadActiveProjects({ projects: "not-an-array" });
     expect(projects).toEqual(FALLBACK_ACTIVE_PROJECTS);
+  });
+});
+
+describe("shouldForceProjectPicker (master-plan rule, story 10.1)", () => {
+  it("forces the picker when >1 project is active and no explicit choice is stored", () => {
+    expect(shouldForceProjectPicker(2, null)).toBe(true);
+    expect(shouldForceProjectPicker(3, null)).toBe(true);
+  });
+
+  it("does NOT force when the customer already made an explicit choice", () => {
+    // ragre.project_key is written only by the picker (a user decision), never
+    // by the system, so a stored key skips the gate.
+    expect(shouldForceProjectPicker(2, "camellia")).toBe(false);
+    expect(shouldForceProjectPicker(2, "soleil")).toBe(false);
+  });
+
+  it("does NOT force when at most one project is active (single-project default)", () => {
+    expect(shouldForceProjectPicker(1, null)).toBe(false);
+    expect(shouldForceProjectPicker(0, null)).toBe(false);
+  });
+});
+
+describe("sortActiveProjects (hot-first, then display name)", () => {
+  const nonHot = (key: string, name: string) => ({ project_key: key, name });
+  it("puts is_hot projects before non-hot ones regardless of input order", () => {
+    const projects: Array<{ project_key: string; name: string; is_hot?: boolean }> = [
+      nonHot("soleil", "The Soleil Đà Nẵng"),
+      nonHot("camellia", "The Camellia Sơn Trà - Đà Nẵng"),
+    ];
+    projects[1].is_hot = true;
+    const sorted = sortActiveProjects(projects);
+    expect(sorted[0].project_key).toBe("camellia");
+    expect(sorted[1].project_key).toBe("soleil");
+    // The input array itself is never mutated.
+    expect(projects[0].project_key).toBe("soleil");
+  });
+
+  it("orders same-hotness projects by display name (vi locale)", () => {
+    const sorted = sortActiveProjects([
+      nonHot("b", "Bảo An"),
+      nonHot("a", "An Phú"),
+    ]);
+    expect(sorted.map((p) => p.project_key)).toEqual(["a", "b"]);
+  });
+
+  it("leaves the fallback catalogue order unchanged (already hot-first)", () => {
+    const sorted = sortActiveProjects(FALLBACK_ACTIVE_PROJECTS);
+    expect(sorted).toEqual(FALLBACK_ACTIVE_PROJECTS);
   });
 });

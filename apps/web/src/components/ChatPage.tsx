@@ -4,14 +4,13 @@
 // any antd component renders.
 import "@ant-design/v5-patch-for-react-19";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntApp, Button, Typography } from "antd";
-import { SafetyCertificateOutlined, SwapOutlined } from "@ant-design/icons";
+import { EnvironmentOutlined, SafetyCertificateOutlined, SwapOutlined } from "@ant-design/icons";
 import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
 import type { NearbyPlace } from "@rag-ragre/contracts";
 import { QueryRequestError, streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
-import { GREETING_STATIC_TEXT, GREETING_IMAGES, GREETING_VIDEOS } from "@/lib/greetingContent";
 import type { ChatMessage } from "@/components/MessageBubble";
 import { AccessibilityControls } from "@/components/AccessibilityControls";
 import { warmPrefetchCache } from "@/lib/prefetch";
@@ -22,9 +21,16 @@ import { LeadForm, LEAD_ID_STORAGE_KEY } from "./LeadForm";
 import { STATIC_PLACES } from "@/lib/places";
 import { C, RADIUS, SHADOW } from "@/lib/tokens";
 import { getDeviceId, getSessionId, getStoredProjectKey, storeProjectKey } from "@/features/chat/identity";
-import { loadActiveProjects, FALLBACK_ACTIVE_PROJECTS } from "@/features/chat/activeProjects";
+import {
+  loadActiveProjects,
+  FALLBACK_ACTIVE_PROJECTS,
+  shouldForceProjectPicker,
+  sortActiveProjects,
+  projectDisplayName,
+} from "@/features/chat/activeProjects";
 import type { ActiveProject } from "@/features/chat/activeProjects";
 import { ProjectPicker } from "@/features/chat/ProjectPicker";
+import { greetingForProject } from "@/features/chat/greeting";
 
 const HELLO_SHOWN_KEY = "ragre.hello_shown";
 const MAX_TURNS = 4;
@@ -150,6 +156,13 @@ function ChatCanvas() {
   });
   const [activeProjects, setActiveProjects] = useState<ActiveProject[]>(FALLBACK_ACTIVE_PROJECTS);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  // Forced picker state (story 10.1): when several projects are active and the
+  // customer has not yet made an explicit choice, the picker opens immediately
+  // and no greeting/query is emitted until the choice lands.
+  const [projectPickerForced, setProjectPickerForced] = useState(false);
+  // True once the active-project list has been resolved (endpoint or fallback);
+  // the greeting waits for this so a forced picker can block it entirely.
+  const [projectsReady, setProjectsReady] = useState(false);
   // The user question awaiting a project choice; re-sent once a project is picked.
   const pendingQueryRef = useRef<string | null>(null);
 
@@ -210,47 +223,98 @@ function ChatCanvas() {
     }
   }, []);
 
-  // First-open greeting: render purely from the static FE greeting config so
-  // the intro appears instantly with no network dependency. The copy streams
-  // out character-by-character for the typing feel, and the curated images +
-  // videos attach to that first message. The sessionStorage flag is claimed
-  // synchronously so StrictMode's double-mount in dev never re-runs it.
+  // Builds + streams the first-open greeting scoped to one project. The
+  // session latch (ragre.hello_shown) guards the mount path against StrictMode's
+  // double-mount in dev; project switches bypass it (force) so the freshly
+  // chosen project's intro always renders after the context resets.
+  const fireGreeting = useCallback(
+    (projectKeyForGreeting: string, opts?: { force?: boolean }) => {
+      if (typeof window === "undefined") return;
+      const force = opts?.force ?? false;
+      if (!force) {
+        let alreadyShown = false;
+        try {
+          alreadyShown = window.sessionStorage.getItem(HELLO_SHOWN_KEY) === "1";
+        } catch {
+          alreadyShown = false;
+        }
+        if (alreadyShown) return;
+      }
+      try {
+        window.sessionStorage.setItem(HELLO_SHOWN_KEY, "1");
+      } catch {
+        // sessionStorage unavailable (private mode): non-fatal.
+      }
+
+      const greeting = greetingForProject(projectKeyForGreeting);
+      const greetingId = newId();
+      setMessages((prev) => [
+        {
+          id: greetingId,
+          role: "assistant",
+          content: "",
+          streaming: true,
+          images: greeting.images,
+          videos: greeting.videos,
+        },
+        ...prev,
+      ]);
+      setStreaming(true);
+
+      startFakeGreetingStream(
+        greetingId,
+        greeting.text,
+        (patch) => patchMessage(greetingId, patch),
+        () => setStreaming(false)
+      );
+    },
+    [patchMessage]
+  );
+
+  // First-open greeting: rendered purely from the static FE greeting config
+  // scoped to the chosen project (a Soleil first-open never greets as Camellia),
+  // so the intro is project-consistent with no network dependency. It runs only
+  // once the active-project list resolves, and is fully withheld while the
+  // picker is forced: a customer who must still choose never sees a greeting
+  // that presumes a project.
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    let alreadyShown = false;
-    try {
-      alreadyShown = window.sessionStorage.getItem(HELLO_SHOWN_KEY) === "1";
-    } catch {
-      alreadyShown = false;
-    }
-    if (alreadyShown) return;
-    try {
-      window.sessionStorage.setItem(HELLO_SHOWN_KEY, "1");
-    } catch {
-      // sessionStorage unavailable (private mode): non-fatal.
-    }
+    if (!projectsReady) return;
+    if (projectPickerForced && !projectKey) return;
+    fireGreeting(projectKey);
+  }, [projectsReady, projectPickerForced, projectKey, fireGreeting]);
 
-    const greetingId = newId();
-    setMessages((prev) => [
-      {
-        id: greetingId,
-        role: "assistant",
-        content: "",
-        streaming: true,
-        images: GREETING_IMAGES,
-        videos: GREETING_VIDEOS,
-      },
-      ...prev,
-    ]);
-    setStreaming(true);
-
-    startFakeGreetingStream(
-      greetingId,
-      GREETING_STATIC_TEXT,
-      (patch) => patchMessage(greetingId, patch),
-      () => setStreaming(false)
-    );
-  }, [patchMessage]);
+  // Resolve the active-project list once and apply the master-plan picker rule
+  // (story 10.1): with more than one active project and no stored explicit
+  // choice the picker must open immediately — the FE never silently defaults.
+  useEffect(() => {
+    let cancelled = false;
+    let storedKey: string | null = null;
+    try {
+      storedKey = getStoredProjectKey(window.localStorage);
+    } catch {
+      storedKey = null;
+    }
+    void loadActiveProjects()
+      .then((projects) => {
+        if (cancelled) return;
+        const sorted = sortActiveProjects(projects);
+        setActiveProjects(sorted);
+        const forced = shouldForceProjectPicker(sorted.length, storedKey);
+        setProjectPickerForced(forced);
+        if (forced) setProjectPickerOpen(true);
+        setProjectsReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Every source failed (endpoint + fallback): keep the static catalogue
+        // and force nothing; the backend 422 path still raises the picker on
+        // demand so the chat never dead-ends silently.
+        setProjectsReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Opens the ProjectPicker with the best available active-project list: the
   // one carried by the 422 body when present, otherwise the endpoint/fallback.
@@ -384,7 +448,8 @@ function ChatCanvas() {
   );
 
   // Applies a picked project: persist it, reset the conversation context so the
-  // new project answers fresh, then re-send the question that prompted the pick.
+  // new project answers fresh, then re-send the question that prompted the pick
+  // (or greet the freshly chosen project when no question was pending).
   const handleSelectProject = useCallback(
     (key: string) => {
       try {
@@ -395,6 +460,7 @@ function ChatCanvas() {
       }
       setProjectKey(key);
       setProjectPickerOpen(false);
+      setProjectPickerForced(false);
       // A fresh session id detaches the new project's context from the old one
       // on the backend (`device_id:session_id` scope key).
       try {
@@ -406,9 +472,16 @@ function ChatCanvas() {
       setLeadCtaHint(null);
       const pending = pendingQueryRef.current;
       pendingQueryRef.current = null;
-      if (pending) handleSend(pending);
+      if (pending) {
+        handleSend(pending);
+      } else {
+        // No question in flight: a forced picker (or a voluntary switch) lands
+        // on a fresh conversation, so the intro must follow the chosen project
+        // (story 10.1/10.2) — never a stale default project.
+        fireGreeting(key, { force: true });
+      }
     },
-    [handleSend]
+    [handleSend, fireGreeting]
   );
 
   // Suggestion clicks from MessageList arrive via the ASK_EVENT custom event.
@@ -425,10 +498,30 @@ function ChatCanvas() {
   // stored key (nothing picked yet) reads as a generic welcome line.
   const currentProject =
     activeProjects.find((p) => p.project_key === projectKey) ?? null;
-  const headerTitle = currentProject ? currentProject.ten_thuong_mai : "Tư vấn bất động sản";
+  const headerTitle = currentProject
+    ? projectDisplayName(currentProject)
+    : "Tư vấn bất động sản";
   const headerSubtitle = currentProject
-    ? `Chuyên viên tư vấn dự án ${currentProject.ten_thuong_mai}`
+    ? `Chuyên viên tư vấn dự án ${projectDisplayName(currentProject)}`
     : "Chuyên viên tư vấn bất động sản";
+
+  // The map camera follows the active project: two active projects sit
+  // kilometres apart, so the map must fly to the chosen project's coordinates
+  // instead of always rendering the default project.
+  const mapProject = useMemo(() => {
+    if (
+      currentProject &&
+      typeof currentProject.lat === "number" &&
+      typeof currentProject.lng === "number"
+    ) {
+      return {
+        lat: currentProject.lat,
+        lng: currentProject.lng,
+        name: projectDisplayName(currentProject),
+      };
+    }
+    return DEFAULT_PROJECT;
+  }, [currentProject]);
 
   return (
     <div
@@ -512,6 +605,54 @@ function ChatCanvas() {
             <span style={{ color: C.primary, fontSize: 14 }}>📞</span>
             <span style={{ fontWeight: 600, letterSpacing: 0.5 }}>09x xxx xxxx</span>
           </div>
+          <div
+            role="status"
+            aria-label={
+              currentProject
+                ? `Dự án đang tư vấn: ${projectDisplayName(currentProject)}`
+                : "Chưa chọn dự án"
+            }
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              maxWidth: 320,
+              minWidth: 0,
+              background: C.primarySoft,
+              border: `1px solid ${C.primaryBorder}`,
+              borderRadius: RADIUS.pill,
+              padding: "6px 14px",
+            }}
+          >
+            <EnvironmentOutlined style={{ color: C.primary, fontSize: 14, flexShrink: 0 }} />
+            <span
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: C.text,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {currentProject ? projectDisplayName(currentProject) : "Chưa chọn dự án"}
+            </span>
+            {currentProject?.is_hot ? (
+              <span
+                style={{
+                  background: C.warning,
+                  color: "#fff",
+                  borderRadius: RADIUS.pill,
+                  padding: "1px 8px",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  flexShrink: 0,
+                }}
+              >
+                Nổi bật
+              </span>
+            ) : null}
+          </div>
           <Button
             type="default"
             onClick={() => void openProjectPicker()}
@@ -546,7 +687,7 @@ function ChatCanvas() {
             <div style={{ flex: 1, minHeight: 0 }}>
               <MapPanel
                 places={places}
-                project={DEFAULT_PROJECT}
+                project={mapProject}
                 mode={mapMode}
                 onModeChange={setMapModeRouted}
               />
@@ -605,7 +746,7 @@ function ChatCanvas() {
         sessionId={sessionIdRef.current}
         deviceId={deviceId}
         projectKey={projectKey}
-        projectName={currentProject?.ten_thuong_mai}
+        projectName={currentProject ? projectDisplayName(currentProject) : undefined}
         notePrefill={buildLeadNote(messages)}
         onClose={() => setLeadFormOpen(false)}
         onSuccess={() => setLeadDone(true)}
@@ -616,6 +757,7 @@ function ChatCanvas() {
         currentProjectKey={projectKey}
         onSelect={handleSelectProject}
         onClose={() => setProjectPickerOpen(false)}
+        force={projectPickerForced}
       />
     </div>
   );

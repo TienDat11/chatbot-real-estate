@@ -1,9 +1,15 @@
 "use client";
 
+import { useMemo } from "react";
 import { Button, Modal } from "antd";
-import { ApartmentOutlined, CheckOutlined } from "@ant-design/icons";
+import { ApartmentOutlined, CheckOutlined, FireOutlined } from "@ant-design/icons";
 import { C, FS, RADIUS } from "@/lib/tokens";
-import type { ActiveProject } from "./activeProjects";
+import {
+  sortActiveProjects,
+  projectDisplayLocation,
+  projectDisplayName,
+  type ActiveProject,
+} from "./activeProjects";
 
 export interface ProjectPickerProps {
   open: boolean;
@@ -15,13 +21,22 @@ export interface ProjectPickerProps {
   onSelect: (projectKey: string) => void;
   /** Dismiss without choosing; the pending question stays unanswered. */
   onClose: () => void;
+  /**
+   * Master-plan rule (story 10.1): when >1 project is active and none was
+   * chosen the picker is FORCED — no "Để sau" escape and no mask/keyboard
+   * dismissal, so the customer always picks before any query runs.
+   */
+  force?: boolean;
 }
 
 /**
- * Multi-project chooser shown when the backend answers 422 PROJECT_SCOPE:
- * more than one project is active and none was chosen. Senior-first: 17px
- * labels, 48px touch targets, one navy accent, explicit per-project copy so a
- * caller never has to guess what project a question was scoped to.
+ * Multi-project chooser. Shown (a) forced on load when >1 project is active
+ * and no explicit choice is stored, and (b) when the backend answers 422
+ * PROJECT_SCOPE after a question without a project. Each row shows the display
+ * name (bold), the full location, and a "Nổi bật" badge for hot projects;
+ * rows are sorted hot-first (Camellia first), then by name. Senior-first:
+ * 17px labels, 48px touch targets, one navy accent, explicit per-project copy
+ * so a caller never has to guess what project a question was scoped to.
  */
 export function ProjectPicker({
   open,
@@ -29,15 +44,20 @@ export function ProjectPicker({
   currentProjectKey,
   onSelect,
   onClose,
+  force = false,
 }: ProjectPickerProps) {
+  const sorted = useMemo(() => sortActiveProjects(projects), [projects]);
+
   return (
     <Modal
       open={open}
       onCancel={onClose}
       footer={null}
       centered
-      width={520}
-      keyboard
+      width={560}
+      keyboard={!force}
+      maskClosable={!force}
+      closable={!force}
       title={
         <span style={{ fontSize: 20, fontWeight: 700, color: C.text }}>
           Chọn dự án để được tư vấn
@@ -50,8 +70,11 @@ export function ProjectPicker({
         được tư vấn đúng dự án.
       </p>
       <div role="listbox" aria-label="Danh sách dự án" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {projects.map((project) => {
+        {sorted.map((project) => {
           const selected = project.project_key === currentProjectKey;
+          const hot = project.is_hot === true;
+          const name = projectDisplayName(project);
+          const location = projectDisplayLocation(project) ?? project.ten_phap_ly;
           return (
             <button
               key={project.project_key}
@@ -65,12 +88,12 @@ export function ProjectPicker({
                 gap: 14,
                 width: "100%",
                 minHeight: 56,
-                padding: "10px 16px",
+                padding: "12px 16px",
                 textAlign: "left",
                 fontFamily: "inherit",
                 cursor: "pointer",
-                background: selected ? C.primarySoft : C.surface,
-                border: "2px solid " + (selected ? C.primary : C.borderStrong),
+                background: selected ? C.primarySoft : hot ? C.warningSoft : C.surface,
+                border: "2px solid " + (selected ? C.primary : hot ? C.warning : C.borderStrong),
                 borderRadius: RADIUS.input,
                 transition: "border-color .15s, background .15s",
               }}
@@ -85,8 +108,8 @@ export function ProjectPicker({
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  background: selected ? C.primary : C.surfaceAlt,
-                  color: selected ? "#fff" : C.primary,
+                  background: hot && !selected ? C.warningSoft : selected ? C.primary : C.surfaceAlt,
+                  color: hot && !selected ? C.warning : selected ? "#fff" : C.primary,
                   fontSize: 18,
                 }}
               >
@@ -95,16 +118,41 @@ export function ProjectPicker({
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span
                   style={{
-                    display: "block",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
                     fontSize: FS.body,
                     fontWeight: 700,
                     lineHeight: "24px",
                     color: C.text,
                   }}
                 >
-                  {project.ten_thuong_mai}
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {name}
+                  </span>
+                  {hot && (
+                    <span
+                      role="status"
+                      style={{
+                        flexShrink: 0,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                        background: C.warning,
+                        color: "#fff",
+                        borderRadius: RADIUS.pill,
+                        padding: "1px 10px",
+                        fontSize: 12,
+                        fontWeight: 700,
+                        lineHeight: "20px",
+                      }}
+                    >
+                      <FireOutlined aria-hidden="true" style={{ fontSize: 12 }} />
+                      Nổi bật
+                    </span>
+                  )}
                 </span>
-                {(project.vi_tri || project.ten_phap_ly) && (
+                {location && (
                   <span
                     style={{
                       display: "block",
@@ -116,7 +164,7 @@ export function ProjectPicker({
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {project.vi_tri ?? project.ten_phap_ly}
+                    {location}
                   </span>
                 )}
               </span>
@@ -130,19 +178,21 @@ export function ProjectPicker({
           );
         })}
       </div>
-      <Button
-        block
-        onClick={onClose}
-        style={{
-          marginTop: 16,
-          height: 48,
-          fontSize: 16,
-          fontWeight: 600,
-          borderRadius: RADIUS.btn,
-        }}
-      >
-        Để sau
-      </Button>
+      {!force && (
+        <Button
+          block
+          onClick={onClose}
+          style={{
+            marginTop: 16,
+            height: 48,
+            fontSize: 16,
+            fontWeight: 600,
+            borderRadius: RADIUS.btn,
+          }}
+        >
+          Để sau
+        </Button>
+      )}
     </Modal>
   );
 }

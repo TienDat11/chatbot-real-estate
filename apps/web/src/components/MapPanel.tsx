@@ -58,6 +58,10 @@ export interface MapPanelProps {
 // keep the project star + nearby places visible at the default zoom.
 export const DEFAULT_PROJECT: { lat: number; lng: number; name: string } =
   { lat: 16.1052, lng: 108.2558, name: "The Camellia" };
+
+/** Zoom used when the map opens and when the active project changes. */
+export const MAP_PROJECT_ZOOM = 13.5;
+
 const OSM_TILE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
@@ -65,6 +69,35 @@ const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenS
 // change) can replace the previous polyline without leaking layers.
 const ROUTE_SOURCE_ID = "directions-route";
 const ROUTE_LAYER_ID = "directions-route-line";
+
+/* project-change recenter ----------------------------------------------- */
+
+/** Minimal maplibre surface `recenterForProject` needs (mockable in vitest). */
+export interface RecenterMapLike {
+  flyTo(opts: { center: [number, number]; zoom?: number; duration?: number }): void;
+  getLayer?(id: string): unknown;
+  getSource?(id: string): unknown;
+  removeLayer?(id: string): void;
+  removeSource?(id: string): void;
+}
+
+/**
+ * Moves the map camera to a new project's geo center and drops the previous
+ * project's route overlay. Two active projects sit kilometres apart, so a
+ * project switch must never leave the old project's route polyline or camera
+ * position on screen. Markers are removed separately by the caller (they live
+ * outside the maplibre style graph), so this helper stays a pure map-side
+ * function that vitest can drive with a mock map instance.
+ */
+export function recenterForProject(
+  map: RecenterMapLike,
+  project: { lat: number; lng: number },
+  zoom = MAP_PROJECT_ZOOM
+): void {
+  if (map.getLayer?.(ROUTE_LAYER_ID)) map.removeLayer?.(ROUTE_LAYER_ID);
+  if (map.getSource?.(ROUTE_SOURCE_ID)) map.removeSource?.(ROUTE_SOURCE_ID);
+  map.flyTo({ center: [project.lng, project.lat], zoom, duration: 800 });
+}
 
 /* marker builders ------------------------------------------------------- */
 function projectMarkerElement(name: string): HTMLButtonElement {
@@ -173,7 +206,7 @@ export function MapPanel({
           layers: [{ id: "osm", type: "raster", source: "osm" }],
         },
         center: [project.lng, project.lat],
-        zoom: 13.5,
+        zoom: MAP_PROJECT_ZOOM,
       });
       mapRef.current = map;
       // Wait for style so isStyleLoaded() is true for the marker effect.
@@ -196,6 +229,20 @@ export function MapPanel({
       }
     };
   }, [tileUrl, project.lng, project.lat, mode]);
+
+  /* Recenter when the active project changes. The map object is reused (not
+     rebuilt), so the camera + route overlay must move explicitly: two active
+     projects sit kilometres apart and the old project's polyline must not
+     survive the switch. Markers are refreshed by the markers effect below
+     (it watches the same project lat/lng + name). */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || mode !== "map") return;
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+    if (popupRef.current) { popupRef.current.remove(); popupRef.current = null; }
+    recenterForProject(map as RecenterMapLike, project, MAP_PROJECT_ZOOM);
+  }, [project.lat, project.lng, mode]);
 
   /* Recreate markers when data/filter/map become ready. */
   useEffect(() => {
