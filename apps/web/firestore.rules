@@ -16,12 +16,15 @@ rules_version = '2';
 //     - consent_service:  boolean (required)
 //     - consent_marketing:boolean (required)
 //     - status:           string  (workflow status: new/assigned/called/...)
-//     - assigned_sales_id:number  (optional)
+//     - assigned_sales_id:number  (optional, PG sales.id)
+//     - assigned_sales_firebase_uid: string (optional — isolation key; sales
+//       may only read leads whose value equals their own auth uid)
 //     - escal_count:      number  (required)
 //     - created_at:       timestamp (required)
 //     - updated_at:       timestamp (required)
 //     - closed_at:        timestamp (optional)
-//   Read: authenticated sales/admin only. Write: server-only (see IAM note).
+//   Read: admin sees all; a sales sees only leads assigned to them. Write:
+//   server-only (see IAM note).
 //
 // notes/{noteId}
 //   CRM notes attached to a lead. Read: authenticated sales/admin only.
@@ -75,9 +78,16 @@ service cloud.firestore {
     // ---------------- leads ----------------
 
     match /leads/{leadId} {
-      // Read only for authenticated sales/admin. Lead documents hold masked
-      // contact data only, but access is still restricted to staff.
-      allow read: if isSalesOrAdmin();
+      // Read: role gate + per-sales isolation. Admins see every lead; a
+      // sales only sees leads the BE mirror assigned to their own uid via
+      // assigned_sales_firebase_uid — sales A must never read the leads
+      // assigned to sales B. Unassigned leads stay admin-only until the
+      // backend routes them. List queries must include
+      // where('assigned_sales_firebase_uid', '==', request.auth.uid) to
+      // match this rule.
+      allow read: if isSalesOrAdmin()
+        && (callerSalesProfile().data.role == 'admin'
+            || resource.data.assigned_sales_firebase_uid == request.auth.uid);
 
       // Server-only writes: the BE REST mirror writes leads with a
       // service-account OAuth2 token, which is authorized by IAM
