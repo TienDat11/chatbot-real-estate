@@ -146,14 +146,14 @@ function ChatCanvas() {
   const [deviceId, setDeviceId] = useState("");
   // Story 10.3: the chosen active project, persisted so the next visit skips
   // the picker; an empty key means the backend will answer 422 PROJECT_SCOPE.
-  const [projectKey, setProjectKey] = useState<string>(() => {
-    if (typeof window === "undefined") return "";
-    try {
-      return getStoredProjectKey(window.localStorage) ?? "";
-    } catch {
-      return "";
-    }
-  });
+  // Starts empty on server AND client: the stored key is applied only in the
+  // mount effect below, so the first client render matches the SSR HTML
+  // exactly (hydration-safe, QA D4).
+  const [projectKey, setProjectKey] = useState("");
+  // True once the mount effect has run: localStorage-backed state (project
+  // key, device id) exists only after it, so the header renders the
+  // server-consistent placeholder until then (QA D4).
+  const [mounted, setMounted] = useState(false);
   const [activeProjects, setActiveProjects] = useState<ActiveProject[]>(FALLBACK_ACTIVE_PROJECTS);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   // Forced picker state (story 10.1): when several projects are active and the
@@ -210,6 +210,13 @@ function ChatCanvas() {
   );
 
   useEffect(() => {
+    setMounted(true);
+    try {
+      setProjectKey(getStoredProjectKey(window.localStorage) ?? "");
+    } catch {
+      // Storage unavailable (private mode): keep the empty key; the backend
+      // 422 path still raises the picker on demand.
+    }
     try {
       setDeviceId(getDeviceId(window.localStorage));
       sessionIdRef.current = getSessionId(window.sessionStorage);
@@ -531,9 +538,12 @@ function ChatCanvas() {
   }, [handleSend]);
 
   // The active project name for the header and lead form; a project without a
-  // stored key (nothing picked yet) reads as a generic welcome line.
-  const currentProject =
-    activeProjects.find((p) => p.project_key === projectKey) ?? null;
+  // stored key (nothing picked yet) reads as a generic welcome line. Gated on
+  // `mounted` so the pre-mount render keeps the exact server HTML placeholder
+  // instead of a client-only project name (hydration mismatch, QA D4).
+  const currentProject = mounted
+    ? activeProjects.find((p) => p.project_key === projectKey) ?? null
+    : null;
   const headerTitle = currentProject
     ? projectDisplayName(currentProject)
     : "Tư vấn bất động sản";

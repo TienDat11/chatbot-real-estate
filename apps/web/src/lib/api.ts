@@ -220,14 +220,16 @@ function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
       }
       break;
     case API_SSE_EVENTS.SOURCES:
-      handlers.onSources?.(asArray<Source>(evt.data));
+      // Backend emits an object `{"sources": [...]}`, not a bare array (QA D1).
+      handlers.onSources?.((evt.data as { sources?: Source[] } | null)?.sources ?? asArray<Source>(evt.data));
       break;
     case API_SSE_EVENTS.PLACES:
       // Backend emits an object `{"places": [...]}`, not a bare array.
       handlers.onPlaces?.((evt.data as { places?: NearbyPlace[] } | null)?.places ?? asArray<NearbyPlace>(evt.data));
       break;
     case API_SSE_EVENTS.FACTS:
-      handlers.onFacts?.(asArray<FactEvidence>(evt.data));
+      // Backend emits an object `{"facts": [...]}`, not a bare array (QA D1).
+      handlers.onFacts?.((evt.data as { facts?: FactEvidence[] } | null)?.facts ?? asArray<FactEvidence>(evt.data));
       break;
     case API_SSE_EVENTS.IMAGES:
       // Backend emits an object `{"images": [...]}`, not a bare array.

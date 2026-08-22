@@ -67,6 +67,10 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
   }, [open, form]);
 
   const handleFinish = async (values: LeadFormValues) => {
+    // antd's loading state blocks button clicks, but Enter in any input still
+    // fires onFinish: gate that path so one submission can never overlap a
+    // duplicate (QA D3-FE).
+    if (submitting) return;
     setSubmitting(true);
     setNetworkError(null);
     try {

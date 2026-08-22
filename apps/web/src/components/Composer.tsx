@@ -16,6 +16,9 @@ interface ComposerProps {
   streaming: boolean;
 }
 
+/** Stable id/name for the chat textarea so it is addressable (a11y, QA D5). */
+export const COMPOSER_INPUT_ID = "chat-composer";
+
 /**
  * Question input: Enter sends, Shift+Enter inserts a newline.
  * Send is disabled while streaming or when the input is empty.
@@ -41,6 +44,8 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
       }}
     >
       <Input.TextArea
+        id={COMPOSER_INPUT_ID}
+        name={COMPOSER_INPUT_ID}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={handleKeyDown}
