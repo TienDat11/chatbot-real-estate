@@ -124,6 +124,27 @@ class FakeLeadRepository:
     async def get_sales_stats(self, sales_id: int) -> SalesStats:
         return SalesStats(today={"assigned": 0, "called": 0, "heard": 0, "booked": 0, "no_answer": 0, "escalated": 0}, avg_answer_seconds=None)
 
+    async def get_sales_by_id(self, sales_id: int) -> SalesRow | None:
+        return next((sales for sales in self.sales if sales.id == sales_id), None)
+
+    async def set_lead_mirror_status(self, lead_id: int, *, mirror_status: str) -> LeadRow | None:
+        lead = self.leads.get(lead_id)
+        if lead is None:
+            return None
+        lead = replace(lead, mirror_status=mirror_status)
+        self.leads[lead_id] = lead
+        return lead
+
+    async def list_stale_mirror_leads(self, *, stale_before, limit: int) -> list[LeadRow]:
+        # Fake rows store naive local timestamps; normalize the cutoff the same way.
+        cutoff = stale_before.replace(tzinfo=None) if stale_before.tzinfo is not None else stale_before
+        stale = [
+            lead
+            for lead in sorted(self.leads.values(), key=lambda item: item.created_at)
+            if lead.mirror_status in ("pending", "failed") and lead.created_at < cutoff
+        ]
+        return stale[:limit]
+
 
 def test_choose_next_sales_is_lru_before_priority() -> None:
     older = datetime(2026, 1, 1)

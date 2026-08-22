@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS leads (
   device_id             TEXT,                 -- anonymous persistent device (D7); PII once paired with phone
   name                  TEXT,
   phone                 TEXT        NOT NULL,
-  consent               BOOLEAN     NOT NULL DEFAULT false,
+  consent               BOOLEAN     NOT NULL DEFAULT false,  -- LEGACY single flag (9.2 transition); split below is authoritative
   note                  TEXT,
   budget_vnd            NUMERIC(20,0),
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -36,7 +36,17 @@ CREATE TABLE IF NOT EXISTS leads (
   lock_expires_at       TIMESTAMPTZ,
   escal_count           INT         NOT NULL DEFAULT 0,
   last_action_at        TIMESTAMPTZ,
-  closed_at             TIMESTAMPTZ
+  closed_at             TIMESTAMPTZ,
+  -- Story 9.2: consent split + PG->Firestore mirror bookkeeping
+  rejection_reason      TEXT,
+  reengage_at           TIMESTAMPTZ,
+  mirror_status         TEXT        NOT NULL DEFAULT 'pending'
+    CHECK (mirror_status IN ('pending','done','failed')),
+  consent_service       BOOLEAN     NOT NULL DEFAULT false,
+  consent_marketing     BOOLEAN     NOT NULL DEFAULT false,
+  consent_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  consent_version       TEXT,
+  marketing_withdrawn_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_leads_active ON leads (assigned_sales_id, status, lock_expires_at)
@@ -47,6 +57,9 @@ CREATE INDEX IF NOT EXISTS idx_leads_status ON leads (status);
 -- and per-project lead filtering for the CRM (story 9.3).
 CREATE INDEX IF NOT EXISTS idx_leads_project ON leads (project_key);
 CREATE INDEX IF NOT EXISTS idx_leads_device ON leads (device_id);
+-- Story 9.2: reconciliation sweep scans unconverged mirror rows only.
+CREATE INDEX IF NOT EXISTS idx_leads_mirror_stale ON leads (created_at)
+  WHERE mirror_status IN ('pending','failed');
 
 -- 3. sales_assignment_log — nhật ký gán/phát hành lead
 CREATE TABLE IF NOT EXISTS sales_assignment_log (

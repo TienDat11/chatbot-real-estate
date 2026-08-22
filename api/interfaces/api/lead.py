@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from api.application.services.lead_mirror_service import sync_lead_mirror_after_commit
 from api.application.services.lead_service import (
     create_customer_lead,
     normalize_phone,
@@ -17,6 +18,10 @@ from api.application.services.project_scope import (
     validate_project_key,
 )
 from api.infrastructure.ports.leads import LeadRepository, get_lead_repository
+from api.infrastructure.ports.realtime_mirror import (
+    RealtimeLeadMirror,
+    get_realtime_lead_mirror,
+)
 
 router = APIRouter(prefix="/api", tags=["lead"])
 
@@ -66,6 +71,7 @@ class LeadSubmitResponse(BaseModel):
 async def submit_lead(
     payload: LeadSubmitRequest,
     repo: LeadRepository = Depends(get_lead_repository),
+    mirror: RealtimeLeadMirror = Depends(get_realtime_lead_mirror),
 ) -> LeadSubmitResponse:
     """Validate consent and phone, persist the lead, and assign a sales owner."""
     if not payload.consent:
@@ -81,4 +87,8 @@ async def submit_lead(
         note=payload.note,
         budget_vnd=payload.budget_vnd,
     )
+    # Story 9.2: PG is committed at this point — dual-write the Firestore
+    # mirror as a pure side effect. Failures are flagged on the row and
+    # retried by the reconciliation sweep, never surfaced to the customer.
+    await sync_lead_mirror_after_commit(lead, repo=repo, mirror=mirror)
     return LeadSubmitResponse(lead_id=lead.id)

@@ -10,7 +10,7 @@ import asyncpg
 from api.application.services.sql_leg import build_dsn
 from api.infrastructure.ports.leads import AssignmentLogRow, LeadRow, SalesRow, SalesStats
 
-_LEAD_COLUMNS = "id, session_id, project_key, device_id, name, phone, consent, note, budget_vnd, created_at, status, assigned_sales_id, lock_expires_at, escal_count, last_action_at, closed_at"
+_LEAD_COLUMNS = "id, session_id, project_key, device_id, name, phone, consent, note, budget_vnd, created_at, status, assigned_sales_id, lock_expires_at, escal_count, last_action_at, closed_at, rejection_reason, reengage_at, mirror_status, consent_service, consent_marketing, consent_at, consent_version, marketing_withdrawn_at"
 _lead_pool: asyncpg.Pool | None = None
 
 
@@ -62,9 +62,11 @@ class PostgresLeadRepository:
     async def create_lead(self, *, session_id: str | None, project_key: str | None, device_id: str | None, name: str | None, phone: str, consent: bool, note: str | None, budget_vnd: int | None) -> LeadRow:
         pool = await get_lead_pool()
         async with pool.acquire() as conn:
+            # consent_service mirrors the legacy single flag on INSERT (9.2 split
+            # transition) so fresh rows never lose the consent backfill.
             row = await conn.fetchrow(
-                "INSERT INTO leads (session_id, project_key, device_id, name, phone, consent, note, budget_vnd) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING " + _LEAD_COLUMNS,
-                session_id, project_key, device_id, name, phone, consent, note, budget_vnd,
+                "INSERT INTO leads (session_id, project_key, device_id, name, phone, consent, consent_service, note, budget_vnd) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING " + _LEAD_COLUMNS,
+                session_id, project_key, device_id, name, phone, consent, consent, note, budget_vnd,
             )
         return LeadRow(**dict(row))
 
@@ -122,3 +124,34 @@ class PostgresLeadRepository:
             rows = await conn.fetch("SELECT action, COUNT(*) AS count FROM sales_assignment_log WHERE sales_id = $1 AND created_at >= CURRENT_DATE GROUP BY action", sales_id)
         counts = {str(row["action"]): int(row["count"]) for row in rows}
         return SalesStats(today={"assigned": counts.get("assign", 0), "called": counts.get("call", 0), "heard": counts.get("call", 0), "booked": counts.get("booked", 0), "no_answer": counts.get("no_answer", 0), "escalated": counts.get("escalate", 0)}, avg_answer_seconds=None)
+
+    async def get_sales_by_id(self, sales_id: int) -> SalesRow | None:
+        pool = await get_lead_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT s.id, s.access_key, s.full_name, s.role, s.phone, s.is_active,
+                          s.priority, s.last_seen_at,
+                          MAX(l.created_at) FILTER (WHERE l.action IN ('assign', 'escalate')) AS last_assigned_at
+                   FROM sales s LEFT JOIN sales_assignment_log l ON l.sales_id = s.id
+                   WHERE s.id = $1 GROUP BY s.id""",
+                sales_id,
+            )
+        return SalesRow(**dict(row)) if row else None
+
+    async def set_lead_mirror_status(self, lead_id: int, *, mirror_status: str) -> LeadRow | None:
+        pool = await get_lead_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE leads SET mirror_status = $2 WHERE id = $1 RETURNING " + _LEAD_COLUMNS,
+                lead_id, mirror_status,
+            )
+        return LeadRow(**dict(row)) if row else None
+
+    async def list_stale_mirror_leads(self, *, stale_before: datetime, limit: int) -> list[LeadRow]:
+        pool = await get_lead_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT " + _LEAD_COLUMNS + " FROM leads WHERE mirror_status IN ('pending', 'failed') AND created_at < $1 ORDER BY created_at ASC LIMIT $2",
+                stale_before, limit,
+            )
+        return [LeadRow(**dict(row)) for row in rows]

@@ -157,6 +157,17 @@ class Settings(BaseSettings):
     # Ops-only web key (session-cookie exchange later); never used for token verify.
     firebase_web_api_key: str = ""
 
+    # Lead mirror (story 9.2, hybrid D1). The HMAC secret keys the deterministic
+    # customer_id digest (HMAC-SHA256 of the lead phone); it must stay stable
+    # per deployment once chosen, otherwise mirror documents orphan behind a
+    # new digest. The reconciliation sweep retries pending/failed mirror writes
+    # so the write-only Firestore mirror eventually converges with PG.
+    lead_mirror_hmac_secret: str = "rag-real-estate-lead-mirror-default-secret"
+    lead_mirror_reconciliation_enabled: bool = True
+    lead_mirror_stale_after_minutes: int = 300
+    lead_mirror_stale_batch_limit: int = 50
+    lead_mirror_sweep_interval_seconds: int = 300
+
     @property
     def firebase_firestore_rest_base_url(self) -> str:
         """Firestore REST v1 root — the no-SDK write path for the mirror."""
