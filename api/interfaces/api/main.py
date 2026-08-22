@@ -7,7 +7,8 @@ Routes:
   GET  /ready           — PG reachable + LightRAG init flag
   GET  /sources/{doc_id}— registry metadata + validity status
 
-Lifespan: no eager LightRAG init (pools are lazy; closed on shutdown).
+Lifespan: no eager LightRAG init (pools are lazy; closed on shutdown). The
+lead-mirror reconciliation sweep starts only under FIREBASE_BINDING=firestore.
 SSE event order: routing -> places -> sources -> facts -> token -> done (error before done on failure).
 """
 
@@ -16,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager, suppress
 from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
@@ -165,11 +167,60 @@ async def _sse_stream(
 
 
 # App factory.
+def _maybe_start_lead_mirror_reconciliation() -> asyncio.Task | None:
+    """Start the mirror reconciliation sweep only when it can do work.
+
+    The guard lives here (not inside the loop) so the default off-binding
+    deployment pays zero cost — not even an import of the reconciliation
+    module or a created task.
+    """
+    binding = str(get_cfg("firebase_binding", "") or "").strip().lower()
+    if binding != "firestore":
+        return None
+    if not bool(get_cfg("lead_mirror_reconciliation_enabled", True)):
+        return None
+    from api.application.services.lead_mirror_reconciliation import (  # noqa: PLC0415
+        run_lead_mirror_reconciliation_loop,
+    )
+
+    return asyncio.create_task(run_lead_mirror_reconciliation_loop())
+
+
+async def _close_persistence_pools() -> None:
+    """Close every module-level asyncpg pool; shutdown-only, best-effort."""
+    from api.application.services.audit import close_audit_pool  # noqa: PLC0415
+    from api.domain.services.nl2sql_guard import close_nl2sql_pool  # noqa: PLC0415
+    from api.application.services.sql_leg import close_ro_pool  # noqa: PLC0415
+    from api.infrastructure.adapters.postgres_leads import close_lead_pool  # noqa: PLC0415
+
+    for closer in (close_ro_pool, close_nl2sql_pool, close_audit_pool, close_lead_pool):
+        try:
+            await closer()
+        except Exception:  # noqa: BLE001
+            logger.warning("pool close fail", exc_info=True)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Startup: conditionally launch the lead-mirror reconciliation sweep.
+
+    Shutdown: cancel the sweep (it only sleeps between batches, so cancel is
+    safe) and close every persistence pool.
+    """
+    reconciliation_task = _maybe_start_lead_mirror_reconciliation()
+    yield
+    if reconciliation_task is not None:
+        reconciliation_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await reconciliation_task
+    await _close_persistence_pools()
+
+
 def create_app() -> FastAPI:
     from api.infrastructure.config.config import export_runtime_env  # noqa: PLC0415
 
     export_runtime_env()
-    app = FastAPI(title="rag-real-estate", version="0.1.0", docs_url="/docs", openapi_url="/openapi.json")
+    app = FastAPI(title="rag-real-estate", version="0.1.0", docs_url="/docs", openapi_url="/openapi.json", lifespan=_lifespan)
 
     # CORS from Settings ("*" default for internal MVP — tighten on deploy).
     origins = get_cfg("cors_origins", "*")
@@ -195,19 +246,6 @@ def create_app() -> FastAPI:
     app.include_router(projects_router)
     app.include_router(admin_session_router)
     app.include_router(sales_session_router)
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        from api.application.services.audit import close_audit_pool  # noqa: PLC0415
-        from api.domain.services.nl2sql_guard import close_nl2sql_pool  # noqa: PLC0415
-        from api.application.services.sql_leg import close_ro_pool  # noqa: PLC0415
-        from api.infrastructure.adapters.postgres_leads import close_lead_pool  # noqa: PLC0415
-
-        for closer in (close_ro_pool, close_nl2sql_pool, close_audit_pool, close_lead_pool):
-            try:
-                await closer()
-            except Exception:  # noqa: BLE001
-                logger.warning("pool close fail", exc_info=True)
 
     @app.get("/health")
     async def health() -> dict:
