@@ -25,9 +25,15 @@ from api.application.pipelines.reengage_workflow import (
 )
 from api.application.ports.embedding import NeedProfileEmbeddingNotConfiguredError
 from api.application.ports.reengage_queue import ReengageQueueNotConfiguredError
+from api.application.ports.staff_audit import (
+    STAFF_AUDIT_ACTION_REENGAGE_RUN_TRIGGERED,
+    StaffAuditStore,
+)
+from api.application.services.staff_audit_service import record_staff_action
 from api.infrastructure.dependencies import (
     get_need_profile_embedding,
     get_reengage_queue_store,
+    get_staff_audit_store,
 )
 from api.infrastructure.ports.leads import get_lead_repository
 from api.interfaces.api.deps import AuthenticatedPrincipal, require_admin, require_sales
@@ -107,6 +113,7 @@ async def trigger_reengage_run_for_project(
     project_key: str,
     request_body: ReengageRunRequest,
     _authenticated_principal: AuthenticatedPrincipal = Depends(require_admin),
+    audit_store: StaffAuditStore = Depends(get_staff_audit_store),
 ) -> ReengageRunResponse:
     """Manually fire ReengageMatchWorkflow for one activated project.
 
@@ -130,6 +137,16 @@ async def trigger_reengage_run_for_project(
         )
     except (NeedProfileEmbeddingNotConfiguredError, ReengageQueueNotConfiguredError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    # Only successful runs are audited: a failed trigger changed nothing.
+    await record_staff_action(
+        audit_store,
+        principal=_authenticated_principal,
+        action=STAFF_AUDIT_ACTION_REENGAGE_RUN_TRIGGERED,
+        detail={
+            "project_key": project_key,
+            "queued_count": workflow_result["queued_count"],
+        },
+    )
     return ReengageRunResponse(
         queued_count=workflow_result["queued_count"],
         entries=[

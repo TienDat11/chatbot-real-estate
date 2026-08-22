@@ -35,6 +35,8 @@ from api.infrastructure.ports.realtime_mirror import (
     RealtimeLeadMirror,
     get_realtime_lead_mirror,
 )
+from api.infrastructure.dependencies import get_staff_audit_store
+from api.application.ports.staff_audit import StaffAuditStore
 from api.interfaces.api.deps import AuthenticatedPrincipal, require_sales_or_admin
 
 router = APIRouter(prefix="/api/crm", tags=["crm"])
@@ -145,6 +147,7 @@ async def reveal_customer_phone(
         require_sales_or_admin
     ),
     repo: LeadRepository = Depends(get_lead_repository),
+    audit_store: StaffAuditStore = Depends(get_staff_audit_store),
 ) -> CrmCustomerPhoneRevealResponse:
     """Full-phone reveal, restricted to the assigned sales (or an admin).
 
@@ -152,7 +155,10 @@ async def reveal_customer_phone(
     customer_id, lead ids — never the number itself)."""
     try:
         revealed_phone = await reveal_customer_phone_for_assigned_sales_only(
-            repo, customer_id=customer_id, principal=authenticated_principal
+            repo,
+            customer_id=customer_id,
+            principal=authenticated_principal,
+            audit_store=audit_store,
         )
     except CrmCustomerNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -174,6 +180,7 @@ async def patch_lead_crm_status(
     ),
     repo: LeadRepository = Depends(get_lead_repository),
     mirror: RealtimeLeadMirror = Depends(get_realtime_lead_mirror),
+    audit_store: StaffAuditStore = Depends(get_staff_audit_store),
 ) -> CrmLeadStatusPatchResponse:
     """Update a lead's CRM status in PG, then refresh the Firestore mirror so
     realtime clients converge without re-reading PG."""
@@ -186,6 +193,7 @@ async def patch_lead_crm_status(
             rejection_reason=payload.rejection_reason,
             reengage_at=payload.reengage_at,
             principal=authenticated_principal,
+            audit_store=audit_store,
         )
     except CrmLeadNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -213,6 +221,7 @@ async def withdraw_marketing_consent(
     ),
     repo: LeadRepository = Depends(get_lead_repository),
     mirror: RealtimeLeadMirror = Depends(get_realtime_lead_mirror),
+    audit_store: StaffAuditStore = Depends(get_staff_audit_store),
 ) -> CrmWithdrawMarketingConsentResponse:
     """Stamp marketing-withdrawal on every lead of the customer and re-push
     each row to the realtime mirror (``consent_marketing`` flips to false)."""

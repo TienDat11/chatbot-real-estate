@@ -19,7 +19,6 @@ re-reading PG — the same hybrid-D1 contract as lead submission (story 9.2).
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -32,11 +31,16 @@ from api.application.services.lead_service import (
     normalize_phone,
     validate_phone,
 )
+from api.application.services.staff_audit_service import record_staff_action
+from api.application.ports.staff_audit import (
+    STAFF_AUDIT_ACTION_LEAD_STATUS_UPDATED,
+    STAFF_AUDIT_ACTION_MARKETING_CONSENT_WITHDRAWN,
+    STAFF_AUDIT_ACTION_PHONE_REVEALED,
+    StaffAuditStore,
+)
 from api.infrastructure.ports.leads import LeadRepository, LeadRow
 from api.infrastructure.ports.realtime_mirror import RealtimeLeadMirror
 from api.interfaces.api.deps import AuthenticatedPrincipal
-
-logger = logging.getLogger("api.crm_customer_service")
 
 # Mirrors the broker-board PATCH contract (story 6.4) so the CRM surface never
 # widens the state machine the DB CHECK constraint already enforces.
@@ -136,24 +140,24 @@ async def reveal_customer_phone_for_assigned_sales_only(
     *,
     customer_id: str,
     principal: AuthenticatedPrincipal,
+    audit_store: StaffAuditStore | None = None,
 ) -> str:
     """Owner-gated raw-phone reveal: only the assigned sales (or an admin).
 
-    Every successful reveal emits one audit log line. The line deliberately
-    records actor + customer_id + lead ids — never the number itself, so the
-    audit trail cannot become a secondary PII leak channel.
+    Every successful reveal emits one durable audit entry. The entry
+    deliberately records actor + customer_id + lead ids — never the number
+    itself, so the audit trail cannot become a secondary PII leak channel.
     """
     leads = await repo.get_leads_by_customer_id(customer_id)
     if not leads:
         raise CrmCustomerNotFoundError("No leads found for this customer")
     _ensure_principal_owns_any_customer_lead(principal, leads)
-    logger.info(
-        "crm.customer_phone_revealed actor_firebase_uid=%s actor_role=%s "
-        "customer_id=%s lead_ids=%s",
-        principal.firebase_uid,
-        principal.role,
-        customer_id,
-        [lead.id for lead in leads],
+    await record_staff_action(
+        audit_store,
+        principal=principal,
+        action=STAFF_AUDIT_ACTION_PHONE_REVEALED,
+        customer_id=customer_id,
+        detail={"revealed_lead_ids": [lead.id for lead in leads]},
     )
     return leads[0].phone
 
@@ -167,6 +171,7 @@ async def update_lead_crm_status_and_mirror(
     rejection_reason: str | None,
     reengage_at: datetime | None,
     principal: AuthenticatedPrincipal,
+    audit_store: StaffAuditStore | None = None,
 ) -> LeadStatusUpdateOutcome:
     """Patch a lead's CRM status, then refresh the realtime mirror document."""
     if status not in CRM_ALLOWED_LEAD_STATUSES:
@@ -189,6 +194,16 @@ async def update_lead_crm_status_and_mirror(
     mirror_status = await sync_lead_mirror_after_commit(
         updated_lead, repo=repo, mirror=mirror
     )
+    await record_staff_action(
+        audit_store,
+        principal=principal,
+        action=STAFF_AUDIT_ACTION_LEAD_STATUS_UPDATED,
+        customer_id=compute_customer_id(updated_lead.phone),
+        lead_id=lead_id,
+        # old/new status pair is the audit-relevant context; the rejection
+        # reason is free-text a customer may have written — keep it out.
+        detail={"old_status": existing_lead.status, "new_status": updated_lead.status},
+    )
     return LeadStatusUpdateOutcome(
         updated_lead=updated_lead, mirror_status=mirror_status
     )
@@ -200,6 +215,7 @@ async def withdraw_customer_marketing_consent_and_mirror(
     *,
     customer_id: str,
     principal: AuthenticatedPrincipal,
+    audit_store: StaffAuditStore | None = None,
 ) -> list[LeadRow]:
     """Stamp marketing consent withdrawal on every lead of the customer.
 
@@ -218,4 +234,11 @@ async def withdraw_customer_marketing_consent_and_mirror(
     )
     for withdrawn_lead in withdrawn_leads:
         await sync_lead_mirror_after_commit(withdrawn_lead, repo=repo, mirror=mirror)
+    await record_staff_action(
+        audit_store,
+        principal=principal,
+        action=STAFF_AUDIT_ACTION_MARKETING_CONSENT_WITHDRAWN,
+        customer_id=customer_id,
+        detail={"withdrawn_lead_ids": [lead.id for lead in withdrawn_leads]},
+    )
     return withdrawn_leads
