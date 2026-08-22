@@ -1,10 +1,10 @@
 /**
  * Active-project catalogue for the ProjectPicker (story 10.3, wave-1 UX).
  *
- * The backend 422 PROJECT_SCOPE error carries no project list, so the picker
- * needs a best-effort source. Order of preference (all FE-side, never touching
- * backend files):
- *   1. a `projects` array in the 422 error body, if the backend ever includes it;
+ * The backend 422 PROJECT_SCOPE error now carries the active project list
+ * (`projects` in the error body), so it is the first-choice source. Order of
+ * preference (all FE-side, never touching backend files):
+ *   1. the `projects` array in the 422 error body (main.py attaches it);
  *   2. GET /api/projects (the wave-1 endpoint being added in parallel), shaped
  *      as `{"projects":[{"project_key","name","location","lat","lng","is_hot"}]}`
  *      already sorted with `is_hot` first;

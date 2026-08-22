@@ -72,6 +72,10 @@ export class QueryRequestError extends Error {
  * Story 10.1-FE: every query carries the persistent device id and the chosen
  * project key. project_key may be an empty string while no project is picked,
  * which the backend's default rule maps to the PROJECT_SCOPE 422.
+ *
+ * `signal` lets the caller cancel an in-flight stream (e.g. a project switch,
+ * review M5); an aborted stream resolves silently instead of surfacing
+ * onError, because cancellation is intentional, not a failure.
  */
 export async function streamQuery(
   req: {
@@ -81,6 +85,8 @@ export async function streamQuery(
     project_key?: string;
     as_of?: string;
     history?: { role: "user" | "assistant"; content: string }[];
+    /** Aborts the fetch + SSE read loop; no error is reported when set. */
+    signal?: AbortSignal;
   },
   handlers: QueryStreamHandlers
 ): Promise<void> {
@@ -93,8 +99,10 @@ export async function streamQuery(
         Accept: "text/event-stream",
       },
       body: JSON.stringify(req),
+      signal: req.signal,
     });
   } catch (cause) {
+    if (req.signal?.aborted) return;
     const err = new Error("Không kết nối được máy chủ. Vui lòng thử lại.", { cause });
     handlers.onError?.(err);
     return;
@@ -145,6 +153,7 @@ export async function streamQuery(
       dispatchChunk(buffer, handlers);
     }
   } catch (cause) {
+    if (req.signal?.aborted) return;
     const err = new Error("Lỗi khi đọc luồng phản hồi.", { cause });
     handlers.onError?.(err);
   } finally {
@@ -272,6 +281,12 @@ function tryJson(raw: string): unknown {
 
 const API_HELLO_ENDPOINT = "/api/llms-hello";
 
+// Greeting media is a progressive enhancement (text renders first), so a
+// hanging hello endpoint must not leave the patch pending indefinitely
+// (review M9). 5s aligns with the lib timeout convention
+// (routeDirections DEFAULT_TIMEOUT_MS).
+const GREETING_MEDIA_TIMEOUT_MS = 5000;
+
 /** Media attached to a project greeting by POST /api/llms-hello. */
 export interface GreetingMediaPayload {
   images: Image[];
@@ -286,6 +301,7 @@ export async function fetchGreetingMedia(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ project_key: projectKey }),
+    signal: AbortSignal.timeout(GREETING_MEDIA_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`llms-hello failed: ${response.status}`);

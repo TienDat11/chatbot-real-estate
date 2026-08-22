@@ -366,9 +366,16 @@ export function MapPanel({
     }
   }
 
-  // User dismissed the popup: keep the 5.2 deep-link behaviour (no origin
-  // coordinate, so no location is requested or shared).
-  function cancelDirections() {
+  // User dismissed the popup (ESC / backdrop / close X): close ONLY. Never
+  // trigger the deep-link fallback from a dismiss — closing a popup must not
+  // open a new tab (popup trap, review M3).
+  function dismissDirections() {
+    setDirectionsOpen(false);
+  }
+
+  // User explicitly pressed "Không": an active decline keeps the 5.2 deep-link
+  // behaviour (no origin coordinate, so no location is requested or shared).
+  function declineDirections() {
     const flow = activeDirectionsRef.current;
     if (flow) {
       const outcome = flow.cancel();
@@ -564,10 +571,24 @@ export function MapPanel({
         open={directionsOpen}
         title="Cho phép lấy vị trí của bạn?"
         onOk={approveDirections}
-        onCancel={cancelDirections}
-        okText={directionsBusy ? "Đang tính đường..." : "Đồng ý"}
-        cancelText="Không"
-        confirmLoading={directionsBusy}
+        onCancel={dismissDirections}
+        footer={
+          <>
+            {/* Explicit decline is the ONLY path to the deep-link fallback;
+                dismiss paths (ESC/backdrop/X) go through dismissDirections so
+                they cannot spawn a tab (review M3). */}
+            <Button onClick={declineDirections} disabled={directionsBusy}>
+              Không
+            </Button>
+            <Button
+              type="primary"
+              loading={directionsBusy}
+              onClick={approveDirections}
+            >
+              {directionsBusy ? "Đang tính đường..." : "Đồng ý"}
+            </Button>
+          </>
+        }
         centered
       >
         <p style={{ fontSize: 16, lineHeight: 1.65, color: INK, marginTop: 8 }}>
