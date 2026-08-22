@@ -23,10 +23,12 @@ from api.domain.value_objects.constants import (
     MODEL_ROLE_FIELD,
     RERANK_BINDINGS,
 )
+from api.infrastructure.ports.firebase_auth import FirebaseAuthTokenVerifier
 from api.infrastructure.ports.geo import GeoPort
 from api.infrastructure.ports.llm import LLMChatPort
 from api.infrastructure.ports.rag import RagPort
 from api.infrastructure.ports.rerank import RerankPort
+from api.infrastructure.ports.realtime_mirror import RealtimeLeadMirror
 from api.infrastructure.ports.sql import SqlPort
 
 _llm: OpenAICompatibleLLM | None = None
@@ -34,6 +36,8 @@ _reranker: RerankPort | None = None
 _geo: GeoPort | None = None
 _rag: RagPort | None = None
 _sql: SqlPort | None = None
+_firebase_auth_verifier: FirebaseAuthTokenVerifier | None = None
+_realtime_lead_mirror: RealtimeLeadMirror | None = None
 
 
 def get_llm() -> LLMChatPort:
@@ -105,6 +109,48 @@ def get_sql() -> SqlPort:
     if _sql is None:
         _sql = PostgresSql()
     return _sql
+
+
+def get_firebase_auth_verifier() -> FirebaseAuthTokenVerifier:
+    """Build (once) the JWKS verifier — always live, independent of the mirror binding.
+
+    Auth must not depend on the realtime binding: a future transport swap
+    replaces the mirror adapter only, never the token verifier.
+    """
+    global _firebase_auth_verifier
+    if _firebase_auth_verifier is None:
+        from api.infrastructure.adapters.firebase_auth_jwks import FirebaseAuthJwksVerifier
+
+        s = get_settings()
+        _firebase_auth_verifier = FirebaseAuthJwksVerifier(
+            project_id=s.firebase_project_id,
+            jwks_url=s.firebase_jwks_url,
+            issuer=s.firebase_auth_issuer,
+            audience=s.firebase_project_id,
+        )
+    return _firebase_auth_verifier
+
+
+async def get_realtime_lead_mirror() -> RealtimeLeadMirror:
+    """Build (once) the lead mirror — Noop when the firebase binding is off."""
+    global _realtime_lead_mirror
+    if _realtime_lead_mirror is None:
+        from api.infrastructure.adapters.noop_realtime_mirror import NoopRealtimeLeadMirror
+
+        s = get_settings()
+        binding = (s.firebase_binding or "").strip().lower()
+        if binding == "firestore":
+            from api.infrastructure.adapters.firestore_rest_mirror import FirestoreRestLeadMirror
+
+            _realtime_lead_mirror = FirestoreRestLeadMirror(
+                project_id=s.firebase_project_id,
+                service_account_client_email=s.firebase_service_account_client_email,
+                service_account_private_key=s.firebase_service_account_private_key,
+                rest_base_url=s.firebase_firestore_rest_base_url,
+            )
+        else:
+            _realtime_lead_mirror = NoopRealtimeLeadMirror()
+    return _realtime_lead_mirror
 
 
 class LazyLLMProxy:

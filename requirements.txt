@@ -44,3 +44,6 @@ ragas
 pytest
 pytest-asyncio
 ruff
+
+# --- Firebase auth (BE verifies ID tokens; no firebase-admin per stack lock) ---
+PyJWT[crypto]>=2.8,<3
