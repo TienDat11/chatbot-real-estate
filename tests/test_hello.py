@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+from api.application.services.project_config import render_template
 from api.interfaces.api import hello as hello_mod
 
 
@@ -66,7 +67,7 @@ def test_llms_hello_happy_path_attaches_images_and_videos(monkeypatch):
     async def fake_images(top_k=6, kind="matbang"):
         return [_image(i) for i in range(4)]
 
-    def fake_videos():
+    def fake_videos(project_key="camellia"):
         # list_project_videos is a frozen, synchronous config read.
         return [_video(i) for i in range(3)]
 
@@ -91,7 +92,7 @@ def test_llms_hello_degrades_to_fallback_on_llm_timeout(monkeypatch):
     async def fake_images(top_k=6, kind="matbang"):
         return [_image(0)]
 
-    def fake_videos():
+    def fake_videos(project_key="camellia"):
         return [_video(0)]
 
     monkeypatch.setattr(hello_mod, "search_project_images", fake_images)
@@ -99,7 +100,7 @@ def test_llms_hello_degrades_to_fallback_on_llm_timeout(monkeypatch):
 
     resp = run(hello_mod.llms_hello())
 
-    assert resp.greeting == hello_mod._FALLBACK_GREETING
+    assert resp.greeting == render_template(hello_mod._FALLBACK_GREETING)
     assert len(resp.images) == 1
     assert len(resp.videos) == 1
 
@@ -112,7 +113,7 @@ def test_llms_hello_images_empty_when_search_degrades(monkeypatch):
     async def empty_images(top_k=6, kind="matbang"):
         return []
 
-    def fake_videos():
+    def fake_videos(project_key="camellia"):
         return [_video(0)]
 
     monkeypatch.setattr(hello_mod, "search_project_images", empty_images)

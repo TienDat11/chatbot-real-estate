@@ -14,3 +14,6 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "e2e: real-browser end-to-end tests (need FE+BE dev servers; tests/e2e)",
+]

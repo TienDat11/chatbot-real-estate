@@ -22,6 +22,8 @@ CREATE INDEX IF NOT EXISTS idx_sales_active ON sales (is_active) WHERE is_active
 CREATE TABLE IF NOT EXISTS leads (
   id                    BIGSERIAL PRIMARY KEY,
   session_id            TEXT,
+  project_key           TEXT,                 -- project registry key (story 10.1, G1: required at submit)
+  device_id             TEXT,                 -- anonymous persistent device (D7); PII once paired with phone
   name                  TEXT,
   phone                 TEXT        NOT NULL,
   consent               BOOLEAN     NOT NULL DEFAULT false,
@@ -41,6 +43,10 @@ CREATE INDEX IF NOT EXISTS idx_leads_active ON leads (assigned_sales_id, status,
   WHERE status = 'assigned';
 CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads (phone);
 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads (status);
+-- Re-approach lookups: "khách này đã từ chối dự án nào" per device (story 9.4)
+-- and per-project lead filtering for the CRM (story 9.3).
+CREATE INDEX IF NOT EXISTS idx_leads_project ON leads (project_key);
+CREATE INDEX IF NOT EXISTS idx_leads_device ON leads (device_id);
 
 -- 3. sales_assignment_log — nhật ký gán/phát hành lead
 CREATE TABLE IF NOT EXISTS sales_assignment_log (

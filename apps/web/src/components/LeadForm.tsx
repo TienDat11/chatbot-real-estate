@@ -32,6 +32,12 @@ export interface LeadFormProps {
   open: boolean;
   /** Chat session id (sessionStorage "ragre.session_id"), sent with the lead. */
   sessionId: string;
+  /** Anonymous persistent device id (localStorage, story 10.1-FE), sent along. */
+  deviceId: string;
+  /** Chosen active project key (required by the backend, story 10.1/G1). */
+  projectKey: string;
+  /** Project commercial name for the consent copy, when one is picked. */
+  projectName?: string;
   /** Best-effort context note (<= 200 chars) built from the latest answer facts. */
   notePrefill?: string;
   /** ESC / overlay / close button: never blocks the chat. */
@@ -45,7 +51,7 @@ export interface LeadFormProps {
  * navy accent, explicit consent, no dead ends (every failure keeps the typed
  * values and offers a retry or a close).
  */
-export function LeadForm({ open, sessionId, notePrefill, onClose, onSuccess }: LeadFormProps) {
+export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, notePrefill, onClose, onSuccess }: LeadFormProps) {
   const [form] = Form.useForm<LeadFormValues>();
   const [status, setStatus] = useState<LeadFormStatus>("form");
   const [submitting, setSubmitting] = useState(false);
@@ -65,7 +71,9 @@ export function LeadForm({ open, sessionId, notePrefill, onClose, onSuccess }: L
     setNetworkError(null);
     try {
       const result = await submitLead({
+        project_key: projectKey,
         session_id: sessionId || undefined,
+        device_id: deviceId || undefined,
         name: values.name?.trim() || undefined,
         phone: normalizePhone(values.phone),
         consent: values.consent === true,
@@ -166,7 +174,7 @@ export function LeadForm({ open, sessionId, notePrefill, onClose, onSuccess }: L
       {status === "form" && (
         <>
           <p style={{ fontSize: 15, lineHeight: "24px", color: C.textMuted, margin: "0 0 16px" }}>
-            Để lại số điện thoại, chuyên viên của The Camellia sẽ gọi tư vấn trong khoảng 5 phút
+            Để lại số điện thoại, chuyên viên của {projectName ?? "dự án"} sẽ gọi tư vấn trong khoảng 5 phút
             (giờ hành chính).
           </p>
           <Form<LeadFormValues>
@@ -232,7 +240,7 @@ export function LeadForm({ open, sessionId, notePrefill, onClose, onSuccess }: L
             >
               <Checkbox style={{ fontSize: 16, lineHeight: "24px", alignItems: "flex-start" }}>
                 <span style={{ fontSize: 16, lineHeight: "24px", color: C.text }}>
-                  Tôi đồng ý nhận cuộc gọi tư vấn sản phẩm The Camellia. Thông tin không chia sẻ
+                  Tôi đồng ý nhận cuộc gọi tư vấn sản phẩm {projectName ?? "dự án"}. Thông tin không chia sẻ
                   cho bên thứ ba.
                 </span>
               </Checkbox>

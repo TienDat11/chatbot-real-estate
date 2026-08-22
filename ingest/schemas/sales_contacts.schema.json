@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rag-ragre.local/schemas/sales_contacts.schema.json",
+  "title": "sales_contacts",
+  "description": "Sales/contact roster for data/_processed/<project>/sales_contacts.json. contacts may be empty during extraction; the publish gate (validate_project --publish) enforces non-empty because a project cannot go live without a reachable sales desk.",
+  "type": "object",
+  "required": [
+    "project",
+    "note",
+    "chu_dau_tu",
+    "contacts"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "note": {
+      "type": "string"
+    },
+    "chu_dau_tu": {
+      "type": ["object", "string"],
+      "additionalProperties": true,
+      "properties": {
+        "ten": { "type": "string" },
+        "gcn_dkkd": { "type": "string" },
+        "tru_so": { "type": "string" },
+        "nguoi_dai_dien_phap_luat": { "type": "string" },
+        "ngan_hang_giao_dich": { "type": "string" }
+      }
+    },
+    "contacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "type": "string" },
+          "phone": { "type": "string" },
+          "email": { "type": "string" }
+        }
+      }
+    }
+  }
+}

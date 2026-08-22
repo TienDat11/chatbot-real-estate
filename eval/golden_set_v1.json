@@ -14,6 +14,7 @@
       "expected_routing": {"needs_rag": true, "needs_sql": false, "structured_path": "none"},
       "gold_chunk_ids": ["ldd-2024"],
       "expected_answer_contains": ["có giấy chứng nhận", "tranh chấp", "kê biên", "Điều 45"],
+      "expected_images": {"none": true},
       "notes": "Điều 45 Luật Đất đai 2024 — 5 điều kiện; eval chấp nhận 1-2 token khớp."
     },
     {
@@ -134,6 +135,7 @@
       "expected_routing": {"needs_rag": false, "needs_sql": true, "structured_path": "spec"},
       "expected_facts": {"deposit_pct": 25.0, "interest_rate_pct": 8.5, "term_months": 180},
       "expected_answer_contains": ["25%", "8.5%", "180"],
+      "expected_images": {"kinds": ["thanh-toan"]},
       "notes": "bank_a: 25%/180 tháng/8.5%."
     },
     {
@@ -152,6 +154,7 @@
       "expected_routing": {"needs_rag": false, "needs_sql": true, "structured_path": "spec"},
       "expected_answer_contains": ["A10-01", "A10-02"],
       "expected_facts": {"area_m2": 85.5},
+      "expected_images": {"kinds": ["matbang"]},
       "notes": "Hard filter trên fact area_m2 (facts table)."
     },
     {
@@ -245,6 +248,7 @@
       "category": "refusal",
       "expected_routing": {"needs_rag": true, "needs_sql": false, "structured_path": "none"},
       "expected_answer_contains": ["không liên quan", "không thể", "không phải"],
+      "expected_images": {"none": true},
       "notes": "Query ngoài domain → từ chối lịch sự. Routing fallback-safe (needs_rag=true) theo §4.2; nếu guard chặn trước thì routing bỏ qua."
     },
     {

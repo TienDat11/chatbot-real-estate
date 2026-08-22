@@ -1,0 +1,110 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model (prototype — review before sharing the app)
+// ===============================================================
+//
+// leads/{leadId}
+//   Document ID: opaque (HMAC-SHA256 of the customer phone, computed backend-only)
+//   Fields (snake_case mirror of the Postgres LeadRow):
+//     - project_key:      string  (required)
+//     - device_id:        string  (optional, anonymous device id)
+//     - name:             string  (optional)
+//     - masked_phone:     string  (optional, pre-masked display phone)
+//     - note:             string  (optional)
+//     - budget_vnd:       number  (optional)
+//     - consent_service:  boolean (required)
+//     - consent_marketing:boolean (required)
+//     - status:           string  (workflow status: new/assigned/called/...)
+//     - assigned_sales_id:number  (optional)
+//     - escal_count:      number  (required)
+//     - created_at:       timestamp (required)
+//     - updated_at:       timestamp (required)
+//     - closed_at:        timestamp (optional)
+//   Read: authenticated sales/admin only. Write: server-only (see IAM note).
+//
+// notes/{noteId}
+//   CRM notes attached to a lead. Read: authenticated sales/admin only.
+//   Write: server-only (see IAM note).
+//
+// sales/{firebaseUid}
+//   Sales profile keyed by Firebase Auth uid. Owned fields: firebase_uid,
+//   full_name, role ('sales' | 'admin'), is_active.
+//   Read: the owner only (checked via firebase_uid + get()). Write: server-only
+//   (see IAM note).
+// ===============================================================
+// IAM NOTE — server writer (BE REST mirror, firestore_rest_mirror.py):
+// The backend writes leads via the Firestore REST API authenticated with a
+// service-account OAuth2 token. Per Firebase docs, server client libraries
+// and the REST/RPC APIs bypass security rules entirely and are authorized by
+// Google IAM instead — so the `allow write: if false` rules below do NOT
+// block the mirror; they keep every client-side write locked. PROVISIONING
+// REQUIREMENT: the service account must hold IAM `roles/datastore.user` on
+// the project (see docs/adr/0003-firestore-server-writer-authz.md).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ---------------- Helpers ----------------
+
+    // True when the request carries a Firebase Auth identity.
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // The caller's own sales profile document (document id == auth uid).
+    // Returns the whole document so `role` can be read off it; rules with a
+    // missing profile evaluate to deny, which is the intended fail-closed path.
+    function callerSalesProfile() {
+      return get(/databases/$(database)/documents/sales/$(request.auth.uid));
+    }
+
+    // Role gate used by every sales-facing collection. The profile is the
+    // role source (document data), never a client-supplied field on the
+    // document being accessed — prevents self-escalation.
+    function isSalesOrAdmin() {
+      return isAuthenticated()
+        && callerSalesProfile().data != null
+        && callerSalesProfile().data.role in ['sales', 'admin'];
+    }
+
+    // Owner check for a sales profile: uid must match the stored firebase_uid.
+    function isSalesProfileOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.firebase_uid;
+    }
+
+    // ---------------- leads ----------------
+
+    match /leads/{leadId} {
+      // Read only for authenticated sales/admin. Lead documents hold masked
+      // contact data only, but access is still restricted to staff.
+      allow read: if isSalesOrAdmin();
+
+      // Server-only writes: the BE REST mirror writes leads with a
+      // service-account OAuth2 token, which is authorized by IAM
+      // (roles/datastore.user on the SA), not by these rules — REST/RPC
+      // server access bypasses rules entirely. Clients never write leads.
+      allow write: if false;
+    }
+
+    // ---------------- notes ----------------
+
+    match /notes/{noteId} {
+      allow read: if isSalesOrAdmin();
+
+      // Server-only writes, same IAM-governed mirror path as leads.
+      allow write: if false;
+    }
+
+    // ---------------- sales profiles ----------------
+
+    match /sales/{firebaseUid} {
+      // Owner-only read. The sales profile contains staff PII (name, phone),
+      // so no blanket isAuthenticated() read is allowed.
+      allow read: if isSalesProfileOwner();
+
+      // Server-only writes: profiles are provisioned by ops (a sales must
+      // never self-promote to admin), so owner writes stay locked too.
+      allow write: if false;
+    }
+  }
+}

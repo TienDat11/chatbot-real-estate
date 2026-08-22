@@ -8,6 +8,7 @@ Frame-parsing only: uses the pure generator, not a live LLM.
 import asyncio
 import json
 
+from api.application.services.project_config import render_template
 from api.interfaces.api.hello import _frame, _sanitize_greeting, _FALLBACK_GREETING
 
 
@@ -24,9 +25,11 @@ def test_frame_shape():
 
 
 def test_fallback_greeting_is_dash_safe():
-    assert "\u2014" not in _FALLBACK_GREETING
-    assert "\u2013" not in _FALLBACK_GREETING
-    assert "42 tiện ích" in _FALLBACK_GREETING
+    greeting = render_template(_FALLBACK_GREETING)
+    assert "\u2014" not in greeting
+    assert "\u2013" not in greeting
+    assert "tiện ích nổi bật" in greeting
+    assert "{ten_thuong_mai}" not in greeting  # placeholder must render
 
 
 def test_stream_emits_tokens_then_done():
@@ -42,7 +45,7 @@ def test_stream_emits_tokens_then_done():
     hello_mod.get_llm = lambda: FakeLLM()
 
     async def collect():
-        return [frame async for frame in hello_mod._stream_greeting("s1")]
+        return [frame async for frame in hello_mod._stream_greeting("s1", None)]
 
     try:
         frames = asyncio.run(collect())

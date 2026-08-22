@@ -90,5 +90,9 @@ docs/
 data/
 uploads/
 
+# --- database dumps (full DB incl. leads PII — never commit) ---
+db/backups/
+*.dump
+
 # --- local tooling (ffmpeg static builds, etc.) ---
 tools/

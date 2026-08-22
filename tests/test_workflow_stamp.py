@@ -42,7 +42,7 @@ def test_sql_leg_stamps_affordability_path(monkeypatch):
     }
     captured = {}
 
-    async def fake_run_sql_leg(spec, as_of, query):
+    async def fake_run_sql_leg(spec, as_of, query, project_key=None):
         captured["spec"] = spec
         return SqlLegResult([], {"mode": "affordability"}, degraded=False)
 
@@ -75,7 +75,7 @@ def test_sql_leg_skips_sql_when_not_needed(monkeypatch):
 
     called = []
 
-    async def fake_run_sql_leg(spec, as_of, query):
+    async def fake_run_sql_leg(spec, as_of, query, project_key=None):
         called.append(spec)
         return SqlLegResult([], {"mode": "none"}, degraded=False)
 

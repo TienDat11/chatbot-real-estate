@@ -39,6 +39,8 @@ from api.domain.value_objects.constants import (
     SSE_EVENT_TOKEN,
 )
 from api.application.services.image_search import search_images
+from api.application.services.project_config import request_project_snapshot
+from api.infrastructure.config.config import project_geo_center
 from api.infrastructure.dependencies import get_geo, get_reranker
 from api.application.services.generate import stream_answer
 from api.application.services.conv_state import conv_directive, get_context
@@ -154,6 +156,20 @@ class RagQueryWorkflow(Workflow):
         if inspect.isawaitable(res):
             await res
 
+    async def _store_get(self, ctx: Context, key: str):
+        """Read one store key, returning None when the step runs standalone.
+
+        The guard step seeds most keys, but steps are also invoked directly in
+        tests with a partial store (e.g. wf.sql_leg(ctx, SqlRequestEv())); a
+        missing key must read as absent. The state store documents ValueError
+        as its missing-path error, so only that type is treated as "absent" —
+        a genuine store failure (serialization, IO) must surface loudly (M7).
+        """
+        try:
+            return await ctx.store.get(key)
+        except ValueError:  # "Path not found in state" — the documented miss
+            return None
+
     async def _flag(self, ctx: Context, *flags: str) -> None:
         """Append degradation flags (dedup) to shared state, atomically."""
         async with ctx.store.edit_state() as state:
@@ -180,6 +196,8 @@ class RagQueryWorkflow(Workflow):
         await ctx.store.set("t0", t0)
         await ctx.store.set("query", ev.query)
         await ctx.store.set("session_id", session_id)
+        await ctx.store.set("project_key", getattr(ev, "project_key", None))
+        await ctx.store.set("device_id", getattr(ev, "device_id", None))
         await ctx.store.set("as_of_date", parse_as_of(getattr(ev, "as_of", None)))
         await ctx.store.set("degraded", [])
         # Screen every user history turn with the same rule set as the query (L1);
@@ -262,6 +280,7 @@ class RagQueryWorkflow(Workflow):
                     routed.hl_keywords,
                     routed.ll_keywords,
                     await ctx.store.get("as_of_date"),
+                    await self._store_get(ctx, "project_key"),
                 ),
                 timeout=STEP_TIMEOUTS["rag"],
             )
@@ -297,7 +316,12 @@ class RagQueryWorkflow(Workflow):
         )
         try:
             result = await asyncio.wait_for(
-                run_sql_leg(spec, await ctx.store.get("as_of_date"), guard.clean),
+                run_sql_leg(
+                    spec,
+                    await ctx.store.get("as_of_date"),
+                    guard.clean,
+                    await self._store_get(ctx, "project_key"),
+                ),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -317,11 +341,24 @@ class RagQueryWorkflow(Workflow):
         if not routed.routing.get("needs_geo", False):
             await ctx.store.set("geo_result", GeoResult([], degraded=False))
             return GeoDoneEv()
+        # Geo center is per-project (story 8.2/10.2): the per-request registry
+        # record wins; the Settings defaults remain the legacy Camellia fallback
+        # when the record carries no coordinates. Direct workflow runs outside
+        # the request-bound snapshot (eval/tests) keep the legacy sync read.
+        project_key = await self._store_get(ctx, "project_key")
+        record = request_project_snapshot()
+        if record is not None:
+            center_lat, center_lng = record.geo_center or (
+                get_cfg("geo_center_lat", 16.1052),
+                get_cfg("geo_center_lng", 108.2558),
+            )
+        else:
+            center_lat, center_lng = project_geo_center(project_key or "")
         try:
             result = await asyncio.wait_for(
                 get_geo().places_around(
-                    get_cfg("geo_center_lat", 16.1052),
-                    get_cfg("geo_center_lng", 108.2558),
+                    center_lat,
+                    center_lng,
                     get_cfg("geo_radius_m", 10000),
                 ),
                 timeout=STEP_TIMEOUTS["geo"],
@@ -365,21 +402,30 @@ class RagQueryWorkflow(Workflow):
 
         merged: Merged = await merge_context(guard.clean, chunks, sql_result.rows, as_of)
         session_id = await ctx.store.get("session_id")
+        project_key = await self._store_get(ctx, "project_key")
+        device_id = await self._store_get(ctx, "device_id")
 
         # Illustrative image enrichment is best-effort: search_images never raises,
         # so a degraded/empty result only omits images, never the pipeline.
-        images = await search_images(routed.rewritten)
+        # Project scoping (story 10.4 / M6): the project predicate rides in the
+        # search SQL itself; the unscoped legacy call is kept for project-less
+        # runs (eval, direct workflow tests) whose search seam is single-arg.
+        if project_key:
+            images = await search_images(routed.rewritten, project_key=project_key)
+        else:
+            images = await search_images(routed.rewritten)
         await ctx.store.set("images", images)
         conv_dir = None
         conv_state_str = None
         if session_id:
-            ctx_conv = get_context(session_id)
-            conv_dir = conv_directive(ctx_conv.state)
+            ctx_conv = get_context(session_id, device_id)
+            conv_dir = conv_directive(ctx_conv.state, project_key)
             conv_state_str = ctx_conv.state
         merged.meta.update(
             query=guard.clean,
             rewritten=routed.rewritten,
             as_of=as_of.isoformat() if as_of else None,
+            project_key=project_key,  # story 10.2: prompt render scope
             degraded=await ctx.store.get("degraded"),
             sql_row_count=len(sql_result.rows),
             has_approx=any(
@@ -495,11 +541,26 @@ class RagQueryPipeline:
         session_id: str | None = None,
         as_of: str | None = None,
         history: list[dict] | None = None,
+        project_key: str | None = None,
+        device_id: str | None = None,
         on_event: EventCallback | None = None,
     ) -> dict:
-        wf = RagQueryWorkflow(on_event=on_event if on_event is not None else self._on_event)
-        handler = wf.run(query=query, session_id=session_id, as_of=as_of, history=history or [])
-        return await handler
+        # One async registry read per request (B2/M1): the record is bound into
+        # the request snapshot so every downstream legacy helper (identity,
+        # geo, media) reads it without touching the DB synchronously.
+        from api.application.services.project_config import (  # noqa: PLC0415
+            bound_request_project,
+            load_project_registry_record,
+        )
+
+        record = await load_project_registry_record(project_key)
+        with bound_request_project(record):
+            wf = RagQueryWorkflow(on_event=on_event if on_event is not None else self._on_event)
+            handler = wf.run(
+                query=query, session_id=session_id, as_of=as_of, history=history or [],
+                project_key=project_key, device_id=device_id,
+            )
+            return await handler
 
 
 def _places_payload(result: GeoResult | None) -> list[dict[str, Any]]:

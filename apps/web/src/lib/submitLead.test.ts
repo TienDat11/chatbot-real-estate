@@ -4,7 +4,7 @@ import { LeadSubmitError, readErrorDetail, submitLead } from "@/lib/api";
 // Story 5.7 submit flow: POST /api/lead is classified into success (201),
 // duplicate (409), validation (other 4xx) and network (fetch failure / 5xx).
 // fetch is stubbed globally so no HTTP server is needed.
-const PAYLOAD = { phone: "0905123456", consent: true };
+const PAYLOAD = { project_key: "camellia", phone: "0905123456", consent: true };
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {

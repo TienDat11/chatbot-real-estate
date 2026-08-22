@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS documents (
   content_hash  TEXT        NOT NULL,                 -- sha256 of original file (AD-7)
   version       INT         NOT NULL DEFAULT 1,       -- bumped on re-import of a new version
   lightrag_doc_id TEXT,                               -- A2: id in LightRAG (1:1 with doc_id)
+  project_key    TEXT,                               -- project registry key ('camellia'|'soleil'|...)
   metadata      JSONB       NOT NULL DEFAULT '{}',    -- per-kind attributes (data-contract.md)
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -33,6 +34,9 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_effective
   ON documents (status, effective_from, effective_to);
 CREATE INDEX IF NOT EXISTS idx_documents_kind ON documents (kind);
+-- Project-scoped lookups: active docs for one project (story 8.2 registry)
+CREATE INDEX IF NOT EXISTS idx_documents_project_kind_status
+  ON documents (project_key, kind, status);
 
 -- 2. document_chunks — provenance + text_hash (B3); maps chunk -> doc so the
 --    validity filter can drop expired chunks (the vector store is LightRAG-managed)
@@ -70,6 +74,7 @@ CREATE TABLE IF NOT EXISTS images (
   doc_id             TEXT REFERENCES documents(doc_id) ON DELETE CASCADE,
   chunk_id           TEXT REFERENCES document_chunks(chunk_id) ON DELETE CASCADE,
   linked_subject_key TEXT,
+  project_key        TEXT,                  -- project scoping for image enrichment (story 10.4)
   metadata           JSONB NOT NULL DEFAULT '{}',
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -79,6 +84,8 @@ CREATE INDEX IF NOT EXISTS idx_images_kind ON images (kind);
 CREATE INDEX IF NOT EXISTS idx_images_doc ON images (doc_id);
 CREATE INDEX IF NOT EXISTS idx_images_link ON images (linked_subject_key);
 CREATE INDEX IF NOT EXISTS idx_images_status ON images (status) WHERE status = 'published';
+CREATE INDEX IF NOT EXISTS idx_images_project_status
+  ON images (project_key, status) WHERE status = 'published';
 
 -- 12. image_embeddings — per-image vector store (cosine); dims 1024 = text-embedding-v4 LOCK
 CREATE TABLE IF NOT EXISTS image_embeddings (
@@ -94,6 +101,35 @@ CREATE TABLE IF NOT EXISTS image_embeddings (
 CREATE INDEX IF NOT EXISTS idx_image_emb_hnsw
   ON image_embeddings USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_image_emb_img ON image_embeddings (image_id, caption_hash);
+
+-- 13. project_config — per-project registry hub (story 8.2 / master plan D4).
+--     One row per project key; carries the display/legal identity, geo center
+--     (replaces the hardcoded Camellia coordinates in config), hotline, the
+--     R2 video/media bundle the greeting widget plays, and sales-kit/persona
+--     file names. status='inactive' hides the project from the frontend switcher
+--     and the media endpoint; publish_at stamps when it went live.
+CREATE TABLE IF NOT EXISTS project_config (
+  project_key     TEXT PRIMARY KEY,
+  ten_phap_ly     TEXT NOT NULL,
+  ten_thuong_mai  TEXT NOT NULL,
+  vi_tri          TEXT NOT NULL,
+  -- Story 10.3: detailed Vietnamese address served to the FE project picker
+  -- (falls back to vi_tri for rows seeded before the location migration).
+  location        TEXT,
+  -- HOT-project flag: marks Camellia so the picker leads with it (is_hot DESC).
+  is_hot          BOOLEAN NOT NULL DEFAULT false,
+  geo_center_lat  DOUBLE PRECISION,
+  geo_center_lng  DOUBLE PRECISION,
+  hotline         TEXT,
+  media           JSONB NOT NULL DEFAULT '[]',    -- R2 video/media contract (media_config list)
+  sales_kit_file  TEXT,
+  persona_file    TEXT,
+  status          TEXT NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active', 'inactive')),
+  publish_at      TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- 3. campaigns — price / loan-policy periods (B7: price & policy MUST belong to a campaign)
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -268,6 +304,8 @@ ALTER TABLE images            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE images            FORCE ROW LEVEL SECURITY;
 ALTER TABLE image_embeddings  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE image_embeddings  FORCE ROW LEVEL SECURITY;
+ALTER TABLE project_config    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_config    FORCE ROW LEVEL SECURITY;
 
 -- SELECT policy: only rows backed by a published doc (MVP static)
 DROP POLICY IF EXISTS facts_pub_select ON facts;
@@ -319,6 +357,12 @@ CREATE POLICY image_emb_pub_select ON image_embeddings FOR SELECT USING (
   EXISTS (SELECT 1 FROM images i
           WHERE i.image_id = image_embeddings.image_id AND i.status = 'published'));
 
+-- project_config SELECT policy: only active (published) projects are visible
+DROP POLICY IF EXISTS project_config_pub_select ON project_config;
+CREATE POLICY project_config_pub_select ON project_config FOR SELECT USING (status = 'active');
+DROP POLICY IF EXISTS project_config_write ON project_config;
+CREATE POLICY project_config_write ON project_config FOR ALL TO ragre USING (true) WITH CHECK (true);
+
 -- Image write policies: only the owner/ingest role (ragre) may write
 DROP POLICY IF EXISTS images_write ON images;
 CREATE POLICY images_write ON images FOR ALL TO ragre USING (true) WITH CHECK (true);
@@ -336,7 +380,8 @@ BEGIN
 END
 $$;
 GRANT SELECT ON documents, document_chunks, campaigns, fact_subjects, facts,
-  chunk_fact_refs, fact_aliases, v_unit_offers, images, image_embeddings TO ro_query;
+  chunk_fact_refs, fact_aliases, v_unit_offers, images, image_embeddings,
+  project_config TO ro_query;
 GRANT EXECUTE ON FUNCTION v_unit_offers_as_of(date) TO ro_query;
 GRANT USAGE ON SCHEMA public TO ro_query;
 

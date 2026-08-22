@@ -22,7 +22,7 @@ def test_submit_lead_returns_201_with_lead_id_and_call_window() -> None:
     client, repo = make_client()
     response = client.post(
         "/api/lead",
-        json={"session_id": "session-1", "phone": "0905 123 456", "consent": True},
+        json={"project_key": "camellia", "session_id": "session-1", "phone": "0905 123 456", "consent": True},
     )
     assert response.status_code == 201
     body = response.json()
@@ -40,7 +40,7 @@ def test_submit_lead_normalizes_plus84_prefix() -> None:
     client, repo = make_client()
     response = client.post(
         "/api/lead",
-        json={"phone": "+84 905 123 456", "consent": True},
+        json={"project_key": "camellia", "phone": "+84 905 123 456", "consent": True},
     )
     assert response.status_code == 201
     assert repo.leads[1].phone == "+84905123456"
@@ -48,14 +48,14 @@ def test_submit_lead_normalizes_plus84_prefix() -> None:
 
 def test_submit_lead_rejects_missing_consent_with_400() -> None:
     client, _ = make_client()
-    response = client.post("/api/lead", json={"phone": "0905123456", "consent": False})
+    response = client.post("/api/lead", json={"project_key": "camellia", "phone": "0905123456", "consent": False})
     assert response.status_code == 400
     assert response.json()["detail"] == "Consent is required"
 
 
 def test_submit_lead_rejects_invalid_phone_with_422() -> None:
     client, repo = make_client()
-    response = client.post("/api/lead", json={"phone": "0301234567", "consent": True})
+    response = client.post("/api/lead", json={"project_key": "camellia", "phone": "0301234567", "consent": True})
     assert response.status_code == 422
     assert repo.leads == {}
 
@@ -63,7 +63,7 @@ def test_submit_lead_rejects_invalid_phone_with_422() -> None:
 def test_submit_lead_rejects_invalid_phone_that_is_otherwise_vietnamese() -> None:
     # 09x is a valid prefix, but 9 digits after it is not a valid VN number.
     client, _ = make_client()
-    response = client.post("/api/lead", json={"phone": "090512345", "consent": True})
+    response = client.post("/api/lead", json={"project_key": "camellia", "phone": "090512345", "consent": True})
     assert response.status_code == 422
 
 
@@ -72,6 +72,7 @@ def test_submit_lead_strips_name_and_note_whitespace() -> None:
     response = client.post(
         "/api/lead",
         json={
+            "project_key": "camellia",
             "session_id": "s1",
             "name": "  Anh Test  ",
             "phone": "0905123456",
@@ -94,7 +95,7 @@ def test_submit_lead_marks_session_handoff_done() -> None:
     client, _ = make_client()
     response = client.post(
         "/api/lead",
-        json={"session_id": session_id, "phone": "0905123456", "consent": True},
+        json={"project_key": "camellia", "session_id": session_id, "phone": "0905123456", "consent": True},
     )
     assert response.status_code == 201
     assert ctx.slots.get("phone_given") is True
@@ -107,7 +108,7 @@ def test_submit_lead_without_session_skips_state_marking() -> None:
     client, repo = make_client()
     response = client.post(
         "/api/lead",
-        json={"phone": "0905123456", "consent": True},
+        json={"project_key": "camellia", "phone": "0905123456", "consent": True},
     )
     assert response.status_code == 201
     assert repo.leads[1].session_id is None

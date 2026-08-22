@@ -42,6 +42,8 @@ def lead_row(lead_id: int, *, assigned_sales_id: int | None = None, status: str 
     return LeadRow(
         id=lead_id,
         session_id="session-1",
+        project_key=None,
+        device_id=None,
         name="Khách test",
         phone="0905123456",
         consent=True,
@@ -80,6 +82,8 @@ class FakeLeadRepository:
         lead = replace(
             lead,
             session_id=kwargs["session_id"],
+            project_key=kwargs.get("project_key"),
+            device_id=kwargs.get("device_id"),
             name=kwargs["name"],
             phone=kwargs["phone"],
             consent=kwargs["consent"],
@@ -138,6 +142,8 @@ async def test_submit_lead_assigns_highest_priority_when_all_unassigned() -> Non
     lead = await create_customer_lead(
         repo,
         session_id="session-1",
+        project_key="camellia",
+        device_id=None,
         name="Anh Test",
         phone="0905123456",
         consent=True,
@@ -155,6 +161,8 @@ async def test_no_answer_reassigns_to_next_sales_immediately() -> None:
     lead = await create_customer_lead(
         repo,
         session_id="session-1",
+        project_key="camellia",
+        device_id=None,
         name=None,
         phone="0905123456",
         consent=True,
@@ -181,7 +189,7 @@ def test_sales_key_auth_and_customer_submit_http() -> None:
 
     submitted = client.post(
         "/api/lead",
-        json={"session_id": "session-http", "phone": "0905 123 456", "consent": True},
+        json={"project_key": "camellia", "session_id": "session-http", "phone": "0905 123 456", "consent": True},
     )
     assert submitted.status_code == 201
     assert submitted.json()["will_call_within_minutes"] == 5
@@ -199,5 +207,5 @@ def test_customer_submit_rejects_missing_consent_and_invalid_phone() -> None:
     app.dependency_overrides[get_lead_repository] = lambda: repo
     client = TestClient(app)
 
-    assert client.post("/api/lead", json={"phone": "0905123456", "consent": False}).status_code == 400
-    assert client.post("/api/lead", json={"phone": "123", "consent": True}).status_code == 422
+    assert client.post("/api/lead", json={"project_key": "camellia", "phone": "0905123456", "consent": False}).status_code == 400
+    assert client.post("/api/lead", json={"project_key": "camellia", "phone": "123", "consent": True}).status_code == 422

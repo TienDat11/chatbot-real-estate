@@ -121,8 +121,16 @@ def _normalize_chunks(raw_chunks: list | None) -> list[dict]:
     return out
 
 
-async def _post_filter(chunks: list[dict], as_of: date | None) -> list[dict]:
-    """Drop chunks whose doc is not published or not effective at as_of."""
+async def _post_filter(
+    chunks: list[dict], as_of: date | None, project_key: str | None = None
+) -> list[dict]:
+    """Drop chunks whose doc is not published or not effective at as_of.
+
+    ``project_key`` (story 10.4): the documents.project_key column is the
+    per-project tag from ISSUE-01, so scoping here is a plain column filter —
+    a Soleil query never keeps Camellia chunks even if LightRAG (which has no
+    workspace filter in 1.5.6) surfaces them.
+    """
     if not chunks:
         return []
     ids = [c["id"] for c in chunks if c.get("id")]
@@ -130,15 +138,24 @@ async def _post_filter(chunks: list[dict], as_of: date | None) -> list[dict]:
         return []
     as_of = as_of or date.today()  # as_of=None -> now
     pool = await get_ro_pool()
-    sql = """SELECT c.chunk_id, d.doc_id, d.status, d.effective_from, d.effective_to
+    sql = """SELECT c.chunk_id, d.doc_id, d.status, d.effective_from, d.effective_to,
+                    d.project_key
              FROM document_chunks c
              JOIN documents d ON d.doc_id = c.doc_id
              WHERE c.chunk_id = ANY($1)"""
+    args: list[Any] = [ids]
+    if project_key:
+        # Chunks whose doc carries the project tag; NULL-tagged docs are excluded
+        # so an untagged legacy doc never leaks into a project's answer.
+        sql += " AND d.project_key = $2"
+        args.append(project_key)
     async with pool.acquire() as conn:
-        recs = await conn.fetch(sql, ids)
+        recs = await conn.fetch(sql, *args)
     valid: set[str] = set()
     for r in recs:
         if r["status"] != "published":
+            continue
+        if project_key and r["project_key"] != project_key:
             continue
         if r["effective_from"] and r["effective_from"] > as_of:
             continue
@@ -148,7 +165,13 @@ async def _post_filter(chunks: list[dict], as_of: date | None) -> list[dict]:
     return [c for c in chunks if c.get("id") in valid]
 
 
-async def run_rag_leg(rewritten: str, hl: list[str], ll: list[str], as_of: date | None) -> RagLegResult:
+async def run_rag_leg(
+    rewritten: str,
+    hl: list[str],
+    ll: list[str],
+    as_of: date | None,
+    project_key: str | None = None,
+) -> RagLegResult:
     """Run LightRAG hybrid + validity post-filter; any error degrades (never crashes)."""
     # 1. Get instance (lazy) — first call also runs initialize_storages (0.3-3s).
     try:
@@ -177,9 +200,9 @@ async def run_rag_leg(rewritten: str, hl: list[str], ll: list[str], as_of: date 
     if not chunks:
         return RagLegResult([], degraded=False, error=None)  # no chunks — not an error
 
-    # 4. Validity post-filter (registry JOIN).
+    # 4. Validity + project post-filter (registry JOIN).
     try:
-        kept = await asyncio.wait_for(_post_filter(chunks, as_of), timeout=1.5)
+        kept = await asyncio.wait_for(_post_filter(chunks, as_of, project_key), timeout=1.5)
     except Exception as exc:  # noqa: BLE001
         logger.warning("rag_leg: post-filter failed: %s", exc)
         return RagLegResult([], degraded=True, error=f"post-filter: {exc}")

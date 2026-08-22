@@ -1,0 +1,121 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rag-ragre.local/schemas/project_info.schema.json",
+  "title": "project_info",
+  "description": "Canonical project identity + scale + amenities for data/_processed/<project>/project_info.json. Required keys are frozen from the Soleil source (master plan §2 story 8.1); additional keys observed in real sources (ha_tang, lien_he, phi_dich_vu, ...) remain allowed so no source data is dropped.",
+  "type": "object",
+  "required": [
+    "project",
+    "ten_phap_ly",
+    "ten_thuong_mai",
+    "vi_tri",
+    "source",
+    "chu_dau_tu",
+    "quan_ly_van_hanh",
+    "thiet_ke",
+    "thi_cong",
+    "quy_mo",
+    "co_cau_can_ho",
+    "tien_ich",
+    "phap_ly",
+    "ban_giao_noi_that"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ten_phap_ly": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ten_thuong_mai": {
+      "type": "string",
+      "minLength": 1
+    },
+    "vi_tri": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string"
+    },
+    "chu_dau_tu": {
+      "type": "string",
+      "minLength": 1
+    },
+    "quan_ly_van_hanh": {
+      "type": "string"
+    },
+    "thiet_ke": {
+      "type": "string"
+    },
+    "thi_cong": {
+      "type": "string"
+    },
+    "quy_mo": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "tong_dien_tich_dat_m2": { "type": "number" },
+        "mat_do_xay_dung_pct": { "type": "number" },
+        "tong_dien_tich_san_ham_m2": { "type": "number" },
+        "so_tang_ham": { "type": "integer" },
+        "tong_san_pham": { "type": "integer" }
+      }
+    },
+    "co_cau_can_ho": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "note": { "type": "string" }
+      }
+    },
+    "tien_ich": {
+      "type": "string"
+    },
+    "phap_ly": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "quyet_dinh_chu_truong",
+        "quyet_dinh_6608",
+        "gcn_pccc",
+        "so_huu",
+        "ranh_gioi",
+        "doi_tuong_giao_dich",
+        "so_do",
+        "bao_hanh",
+        "kinh_phi_bao_tri",
+        "chuyen_nhuong",
+        "gia_han_ban_giao"
+      ]
+    },
+    "ban_giao_noi_that": {
+      "type": "string"
+    },
+    "media": {
+      "description": "Curated display media for the greeting widget; contract mirrors api/application/services/media_config.py (title/kind/url_cdn/poster_url/width/height/duration/bytes_mb). Optional until a project's media pass is ingested.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["title", "kind", "url_cdn"],
+        "properties": {
+          "title": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "enum": ["brand", "drone", "poster", "image"]
+          },
+          "url_cdn": { "type": "string" },
+          "poster_url": { "type": "string" },
+          "width": { "type": ["integer", "null"] },
+          "height": { "type": ["integer", "null"] },
+          "duration": { "type": ["number", "null"] },
+          "bytes_mb": { "type": ["number", "null"] }
+        }
+      }
+    }
+  }
+}

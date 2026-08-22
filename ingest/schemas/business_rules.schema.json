@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://rag-ragre.local/schemas/business_rules.schema.json",
+  "title": "business_rules",
+  "description": "Business/policy rules for data/_processed/<project>/business_rules.json. The rules object is deliberately open: each project carries a different mix of pricing, deposit, sales-floor and VIP policy sections, so only the top-level contract is pinned.",
+  "type": "object",
+  "required": [
+    "project",
+    "source",
+    "rules"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "project": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string"
+    },
+    "rules": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": true,
+      "properties": {
+        "discount_matrix": { "type": ["object", "array"] },
+        "early_booking": { "type": ["object", "array"] },
+        "deposit": { "type": ["object", "array"] },
+        "htls": { "type": ["object", "array"] },
+        "uy_thac_cho_thue": { "type": ["object", "array"] },
+        "vip": { "type": ["object", "array"] },
+        "kpbt": { "type": ["object", "array"] },
+        "thanh_toan_som": { "type": ["object", "array"] },
+        "sale_floor": { "type": ["object", "array"] },
+        "price_quality": { "type": ["object", "array"] },
+        "contacts_update": { "type": ["object", "array"] }
+      }
+    }
+  }
+}
