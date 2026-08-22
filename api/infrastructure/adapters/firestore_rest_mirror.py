@@ -6,6 +6,13 @@ private key, exchanged at Google's token endpoint for a short-lived access
 token scoped to datastore. The token is cached module-level until shortly
 before expiry so steady-state writes cost one PATCH, not a token round-trip.
 
+Authorization model (see docs/adr/0003-firestore-server-writer-authz.md):
+server-authenticated REST/RPC access is governed by Google IAM, NOT by the
+Firestore security rules — rules only evaluate mobile/web client requests.
+PROVISIONING REQUIREMENT: the service account must be granted IAM
+`roles/datastore.user` on the Firebase/GCP project; without it the mirror's
+writes fail with 403 regardless of what firestore.rules says.
+
 PG stays the source of truth (hybrid D1): this adapter only writes the
 denormalized lead snapshot consumed by realtime clients, and never reads back.
 """

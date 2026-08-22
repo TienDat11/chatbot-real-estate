@@ -3,7 +3,10 @@
 firebase-admin is banned by the stack lock, so the backend verifies Firebase
 ID tokens itself: fetch Google's JWKS over HTTPS once, cache keys per kid, and
 verify RS256 signatures with PyJWT. A token kid that is not yet cached triggers
-a one-shot refresh because Google rotates signing keys periodically.
+a one-shot refresh because Google rotates signing keys periodically. The JWKS
+cache lives on the verifier instance (each instance targets one jwks_url /
+audience), so a second instance for another project can never read or poison
+the first instance's keys.
 
 Every failure path is translated to the port-level exception hierarchy so
 application callers never import PyJWT.
@@ -31,9 +34,8 @@ logger = logging.getLogger("api.adapters.firebase_auth_jwks")
 # JWKS cache freshness window; Google rotates keys, so re-fetch at least this often.
 _JWKS_CACHE_TTL_SECONDS = 3600
 
+# Shared HTTP client only; the JWKS key cache is per-verifier-instance state.
 _jwks_http_client: httpx.AsyncClient | None = None
-_jwks_by_kid: dict[str, Any] = {}
-_jwks_cached_at: float = 0.0
 
 
 async def get_client() -> httpx.AsyncClient:
@@ -50,10 +52,6 @@ async def close_client() -> None:
     if _jwks_http_client is not None:
         await _jwks_http_client.aclose()
         _jwks_http_client = None
-
-
-def _jwks_cache_is_fresh() -> bool:
-    return time.monotonic() - _jwks_cached_at < _JWKS_CACHE_TTL_SECONDS
 
 
 async def _fetch_jwks(jwks_url: str) -> dict[str, Any]:
@@ -77,22 +75,28 @@ class FirebaseAuthJwksVerifier:
         self.jwks_url = jwks_url
         self.issuer = issuer
         self.audience = audience
+        # Per-instance JWKS cache: instance-scoped so a verifier built for a
+        # different project/audience never shares rotation state with this one.
+        self._jwks_by_kid: dict[str, Any] = {}
+        self._jwks_cached_at: float = 0.0
+
+    def _jwks_cache_is_fresh(self) -> bool:
+        return time.monotonic() - self._jwks_cached_at < _JWKS_CACHE_TTL_SECONDS
 
     async def _key_for_kid(self, kid: str) -> Any:
         """Return the cached RSA key for a kid, refreshing the JWKS once if unknown/stale."""
-        global _jwks_by_kid, _jwks_cached_at
-        cached_key = _jwks_by_kid.get(kid)
-        if cached_key is not None and _jwks_cache_is_fresh():
+        cached_key = self._jwks_by_kid.get(kid)
+        if cached_key is not None and self._jwks_cache_is_fresh():
             return cached_key
         # Unknown kid or stale cache — Google may have rotated keys, so refresh once.
         jwks_document = await _fetch_jwks(self.jwks_url)
-        _jwks_by_kid = {
+        self._jwks_by_kid = {
             entry["kid"]: _rsa_public_key_from_jwk(entry)
             for entry in jwks_document.get("keys", [])
             if "kid" in entry
         }
-        _jwks_cached_at = time.monotonic()
-        return _jwks_by_kid.get(kid)
+        self._jwks_cached_at = time.monotonic()
+        return self._jwks_by_kid.get(kid)
 
     async def verify_id_token(self, id_token: str) -> VerifiedFirebaseUser:
         try:
