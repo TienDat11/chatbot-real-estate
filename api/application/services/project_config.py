@@ -115,9 +115,56 @@ def brand_token(project_key: str | None = None) -> str:
     return token or (project_key or DEFAULT_PROJECT_KEY)
 
 
+def fetch_projects() -> list[dict[str, Any]]:
+    """Return the active project catalogue for GET /api/projects (story 10.3).
+
+    Mirrors the best-effort contract of fetch_project_identity/project_geo_center
+    (short sync psycopg2 read, degrade instead of crash): a dead DB yields an
+    empty list so the endpoint returns ``projects: []`` (200) and the FE picker
+    falls back to its static catalogue. ``location`` falls back to vi_tri for
+    rows seeded before the location column existed. Ordering is HOT-first then
+    name so Camellia always leads the picker.
+    """
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning("psycopg2 unavailable; projects catalogue empty")
+        return []
+    try:
+        with psycopg2.connect(settings.pg_dsn_sync, connect_timeout=2) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT project_key, ten_thuong_mai, "
+                    "COALESCE(location, vi_tri) AS location, "
+                    "geo_center_lat, geo_center_lng, is_hot "
+                    "FROM project_config WHERE status = 'active' "
+                    "ORDER BY is_hot DESC, ten_thuong_mai"
+                )
+                rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001 — catalogue read is best-effort
+        logger.warning("project_config projects read failed (%s); returning []", exc)
+        return []
+    projects = [
+        {
+            "project_key": row[0],
+            "name": row[1],
+            "location": row[2],
+            "lat": float(row[3]) if row[3] is not None else None,
+            "lng": float(row[4]) if row[4] is not None else None,
+            "is_hot": bool(row[5]),
+        }
+        for row in rows
+    ]
+    # Deterministic contract order regardless of DB collation: HOT first, then by
+    # (case-insensitive) name.
+    projects.sort(key=lambda p: (not p["is_hot"], (p["name"] or "").lower()))
+    return projects
+
+
 __all__ = [
     "DEFAULT_PROJECT_KEY",
     "fetch_project_identity",
     "render_template",
     "brand_token",
+    "fetch_projects",
 ]

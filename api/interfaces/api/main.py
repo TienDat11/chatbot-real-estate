@@ -180,13 +180,15 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    from api.interfaces.api.lead import router as lead_router  # noqa: PLC0415
-    from api.interfaces.api.sales import router as sales_router  # noqa: PLC0415
     from api.interfaces.api.hello import router as hello_router  # noqa: PLC0415
+    from api.interfaces.api.lead import router as lead_router  # noqa: PLC0415
+    from api.interfaces.api.projects import router as projects_router  # noqa: PLC0415
+    from api.interfaces.api.sales import router as sales_router  # noqa: PLC0415
 
     app.include_router(lead_router)
     app.include_router(sales_router)
     app.include_router(hello_router)
+    app.include_router(projects_router)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -256,9 +258,19 @@ def create_app() -> FastAPI:
         try:
             project_key = await resolve_project_key(req.project_key)
         except ProjectScopeError as exc:
+            # Story 10.3: carry the pickable project list in the 422 body so the
+            # FE popup renders immediately without a second round-trip to
+            # GET /api/projects. Best-effort like the endpoint: a dead DB yields
+            # projects: [] and the FE falls back to its static catalogue.
+            from api.application.services.project_config import fetch_projects  # noqa: PLC0415
+
             return JSONResponse(
                 status_code=422,
-                content={"ok": False, "error": {"code": "PROJECT_SCOPE", "message": str(exc)}},
+                content={
+                    "ok": False,
+                    "error": {"code": "PROJECT_SCOPE", "message": str(exc)},
+                    "projects": fetch_projects(),
+                },
             )
 
         accept = request.headers.get("accept") or ""
