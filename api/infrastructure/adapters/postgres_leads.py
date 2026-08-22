@@ -214,3 +214,19 @@ class PostgresLeadRepository:
                 hmac_secret, customer_id,
             )
         return [LeadRow(**dict(row)) for row in rows]
+
+    async def list_marketing_eligible_rejected_leads(self) -> list[LeadRow]:
+        # Marketing-consent gate as a PG pre-filter (story 9.4): only leads a
+        # re-approach campaign may ever touch. Legacy NULL consent_marketing
+        # rows are excluded — the gate is opt-in by definition.
+        pool = await get_lead_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT """ + _LEAD_COLUMNS + """ FROM leads
+                   WHERE status = 'lost'
+                     AND rejection_reason IS NOT NULL
+                     AND COALESCE(consent_marketing, false) = true
+                     AND marketing_withdrawn_at IS NULL
+                   ORDER BY created_at DESC""",
+            )
+        return [LeadRow(**dict(row)) for row in rows]

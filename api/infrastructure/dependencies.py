@@ -40,6 +40,8 @@ _sql: SqlPort | None = None
 _firebase_auth_verifier: FirebaseAuthTokenVerifier | None = None
 _realtime_lead_mirror: RealtimeLeadMirror | None = None
 _project_registry: ProjectRegistryPort | None = None
+_need_profile_embedding: Any | None = None
+_reengage_queue_store: Any | None = None
 
 
 def get_llm() -> LLMChatPort:
@@ -165,6 +167,48 @@ async def get_realtime_lead_mirror() -> RealtimeLeadMirror:
         else:
             _realtime_lead_mirror = NoopRealtimeLeadMirror()
     return _realtime_lead_mirror
+
+
+async def get_need_profile_embedding():
+    """Build (once) the need-profile embedder for the re-approach pipeline.
+
+    Any OpenAI-compatible binding works; missing credentials fail at wiring
+    time so the admin trigger maps it to a clean 503 instead of a mid-run 401.
+    """
+    global _need_profile_embedding
+    if _need_profile_embedding is None:
+        from api.infrastructure.adapters.openai_compatible_embedding import (
+            OpenAICompatibleNeedProfileEmbedding,
+        )
+
+        _need_profile_embedding = OpenAICompatibleNeedProfileEmbedding()
+    return _need_profile_embedding
+
+
+async def get_reengage_queue_store():
+    """Build (once) the re-approach queue store — Noop when firebase is off."""
+    global _reengage_queue_store
+    if _reengage_queue_store is None:
+        from api.infrastructure.adapters.noop_reengage_queue_store import (
+            NoopReengageQueueStore,
+        )
+
+        s = get_settings()
+        binding = (s.firebase_binding or "").strip().lower()
+        if binding == "firestore":
+            from api.infrastructure.adapters.firestore_reengage_queue_store import (
+                FirestoreReengageQueueStore,
+            )
+
+            _reengage_queue_store = FirestoreReengageQueueStore(
+                project_id=s.firebase_project_id,
+                service_account_client_email=s.firebase_service_account_client_email,
+                service_account_private_key=s.firebase_service_account_private_key,
+                rest_base_url=s.firebase_firestore_rest_base_url,
+            )
+        else:
+            _reengage_queue_store = NoopReengageQueueStore()
+    return _reengage_queue_store
 
 
 class LazyLLMProxy:
