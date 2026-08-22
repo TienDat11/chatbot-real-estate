@@ -135,3 +135,36 @@ def list_project_videos(project_key: str = "camellia") -> list[dict[str, Any]]:
     if from_registry is not None:
         return from_registry
     return [dict(item) for item in VIDEO_MEDIA]
+
+
+def list_project_images(project_key: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Return recently published gallery rows for a project, no embeddings.
+
+    Fallback path for the greeting when vector search is unavailable (e.g. an
+    embedding-provider quota outage): plain published-rows listing scoped by
+    project_key so the welcome stays decorated without any external call.
+    """
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning("psycopg2 unavailable; greeting image fallback empty")
+        return []
+    try:
+        with psycopg2.connect(settings.pg_dsn_sync, connect_timeout=2) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT image_id, kind, title, caption, alt_text, url_cdn, "
+                    "width, height FROM images "
+                    "WHERE project_key = %s AND status = 'published' "
+                    "ORDER BY updated_at DESC LIMIT %s",
+                    (project_key, limit),
+                )
+                rows = cur.fetchall()
+    except Exception as exc:  # noqa: BLE001 — decoration must never 500 a greeting
+        logger.warning("greeting image fallback read failed: %s", exc)
+        return []
+    columns = (
+        "image_id", "kind", "title", "caption", "alt_text",
+        "url_cdn", "width", "height",
+    )
+    return [dict(zip(columns, row)) for row in rows]

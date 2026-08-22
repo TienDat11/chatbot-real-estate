@@ -9,7 +9,7 @@ import { App as AntApp, Button, Typography } from "antd";
 import { EnvironmentOutlined, SafetyCertificateOutlined, SwapOutlined } from "@ant-design/icons";
 import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
 import type { NearbyPlace } from "@rag-ragre/contracts";
-import { QueryRequestError, streamQuery } from "@/lib/api";
+import { fetchGreetingMedia, QueryRequestError, streamQuery } from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
 import type { ChatMessage } from "@/components/MessageBubble";
 import { AccessibilityControls } from "@/components/AccessibilityControls";
@@ -267,6 +267,21 @@ function ChatCanvas() {
         (patch) => patchMessage(greetingId, patch),
         () => setStreaming(false)
       );
+
+      // Projects without a curated static bundle (Soleil, future registry
+      // projects) enrich the greeting with backend media once it arrives —
+      // text-first render is never blocked, and any failure is a silent no-op.
+      if (greeting.images.length === 0) {
+        void fetchGreetingMedia(projectKeyForGreeting)
+          .then((media) => {
+            if (media.images.length === 0 && media.videos.length === 0) return;
+            patchMessage(greetingId, {
+              images: media.images,
+              videos: media.videos,
+            });
+          })
+          .catch(() => undefined);
+      }
     },
     [patchMessage]
   );

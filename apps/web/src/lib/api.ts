@@ -264,9 +264,38 @@ function tryJson(raw: string): unknown {
   }
 }
 
-// The first-open greeting is now static FE content (see greetingContent.ts), so
-// there is no /llms-hello fetch path left in the client. Streaming query answers
-// remain the only interactive API the chat talks to.
+// The first-open greeting text is static FE content (see greetingContent.ts),
+// so it renders with zero network dependency. Projects without a curated
+// static media bundle (Soleil and any future registry project) enrich the
+// greeting progressively instead: text renders first, then project-scoped
+// images/videos arrive from the backend hello endpoint and patch in.
+
+const API_HELLO_ENDPOINT = "/api/llms-hello";
+
+/** Media attached to a project greeting by POST /api/llms-hello. */
+export interface GreetingMediaPayload {
+  images: Image[];
+  videos: Video[];
+}
+
+/** Fetch project-scoped greeting media; rejects on non-2xx so callers can no-op. */
+export async function fetchGreetingMedia(
+  projectKey: string
+): Promise<GreetingMediaPayload> {
+  const response = await fetch(API_HELLO_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_key: projectKey }),
+  });
+  if (!response.ok) {
+    throw new Error(`llms-hello failed: ${response.status}`);
+  }
+  const data = (await response.json()) as {
+    images?: Image[];
+    videos?: Video[];
+  };
+  return { images: data.images ?? [], videos: data.videos ?? [] };
+}
 
 /* ------------------------------------------------------------------ */
 /* Lead submission (Story 5.7) - POST /api/lead.                      */

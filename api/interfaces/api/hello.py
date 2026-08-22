@@ -20,10 +20,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.application.services.image_search import search_project_images
-from api.application.services.media_config import list_project_videos
+from api.application.services.media_config import list_project_images, list_project_videos
 from api.application.services.project_config import DEFAULT_PROJECT_KEY, render_template
-from api.application.services.project_scope import (
-    ProjectScopeError,
+from api.application.services.project_scope import (    ProjectScopeError,
     filter_images_by_project,
     resolve_project_key,
 )
@@ -36,6 +35,7 @@ router = APIRouter(tags=["hello"])
 
 GREETING_TIMEOUT_S = 6.0  # single LLM greeting call; 6s bounds a stuck gateway while leaving warm calls (sub-2s) ample headroom
 GREETING_MAX_TOKENS = 400
+HELLO_IMAGE_FALLBACK_LIMIT = 8  # published-rows cap when vector search is unavailable
 
 # Em-dash is a display-only hard rule in this project; normalize it and the
 # visually similar en-dash before returning any greeting string.
@@ -137,10 +137,14 @@ async def llms_hello(payload: HelloRequest | None = None) -> HelloResponse:
     except Exception as exc:  # noqa: BLE001 — greeting must never 500 the request
         logger.warning("llms-hello LLM failed; using static greeting: %s", exc)
     # Representative project imagery decorates the welcome; a failure here only
-    # drops images, never the greeting itself.
+    # drops images, never the greeting itself. Search goes through the embedding
+    # provider, so an embedding-quota outage would empty the gallery — fall
+    # back to a plain published-rows listing to keep the welcome decorated.
     images = await search_project_images()
     if project_key:
         images = await filter_images_by_project(images, project_key)
+    if not images and project_key:
+        images = list_project_images(project_key, limit=HELLO_IMAGE_FALLBACK_LIMIT)
     # Videos ride along with the imagery; list_project_videos is a frozen config
     # so this attach step cannot fail or block the greeting.
     videos = list_project_videos(project_key or DEFAULT_PROJECT_KEY)
@@ -183,10 +187,13 @@ async def _stream_greeting(
             yield _frame("error", {"message": "Lời chào tạo nhanh không khả dụng; dùng lời chào mẫu."})
         yield _frame("token", {"text": greeting})
     # Representative project imagery rides along with the welcome; a failure only
-    # omits images from the stream, never the greeting itself.
+    # omits images from the stream, never the greeting itself. Same embedding-
+    # outage fallback as the JSON variant keeps the gallery decorated.
     images = await search_project_images()
     if project_key:
         images = await filter_images_by_project(images, project_key)
+    if not images and project_key:
+        images = list_project_images(project_key, limit=HELLO_IMAGE_FALLBACK_LIMIT)
     yield _frame("images", {"images": images})
     # Attach the project video registry as its own SSE event so the widget can
     # render playback without waiting for the done frame; frozen config, no I/O.
