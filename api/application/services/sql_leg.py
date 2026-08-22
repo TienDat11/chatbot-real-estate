@@ -240,7 +240,9 @@ def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
     raise SpecError(f"không build được filter field={field_name} op={op} trên {source}")
 
 
-def build_sql(spec: dict, as_of: date | None) -> tuple[str, list[Any]]:
+def build_sql(
+    spec: dict, as_of: date | None, project_key: str | None = None
+) -> tuple[str, list[Any]]:
     """Build the parameterized SQL; raise SpecError for an invalid pre-validated spec."""
     source = spec["source"]
     params: list[Any] = []
@@ -252,6 +254,14 @@ def build_sql(spec: dict, as_of: date | None) -> tuple[str, list[Any]]:
         # pins CURRENT_DATE for backward-compatible consumers).
         sql = f"SELECT {cols} FROM v_unit_offers_as_of(${_next(params, as_of)})"
         where: list[str] = []
+        if project_key:
+            # The offer view is not project-aware (legacy single-project view), so
+            # scope it to the project's subjects at the SQL level — a Soleil query
+            # must never surface a Camellia offer (story 10.4).
+            where.append(
+                f"subject_id IN (SELECT id FROM fact_subjects "
+                f"WHERE project_key = ${_next(params, project_key)})"
+            )
         for f in spec.get("filters") or []:
             where.append(_filter_sql(source, f, params))
         if where:
@@ -271,6 +281,10 @@ def build_sql(spec: dict, as_of: date | None) -> tuple[str, list[Any]]:
                  f"EXISTS (SELECT 1 FROM documents d WHERE d.doc_id = f.source_doc_id "
                  f"AND d.status = 'published' AND d.effective_from <= ${_next(params, as_of)} "
                  f"AND (d.effective_to IS NULL OR d.effective_to > ${_next(params, as_of)}))"]
+        if project_key:
+            # fact_subjects.project_key is the per-subject project tag; NULL-tagged
+            # subjects are excluded so legacy data never leaks into a project answer.
+            where.append(f"fs.project_key = ${_next(params, project_key)}")
         for f in spec.get("filters") or []:
             where.append(_filter_sql(source, f, params))
         sql += " WHERE " + " AND ".join(where)
@@ -445,12 +459,16 @@ async def _fetch_estimates(pool: asyncpg.Pool | None = None) -> list[dict]:
     return [dict(r) for r in recs]
 
 
-async def run_affordability(spec: dict, as_of: date | None, fetch=None) -> SqlLegResult:
+async def run_affordability(
+    spec: dict, as_of: date | None, fetch=None, project_key: str | None = None
+) -> SqlLegResult:
     """Deterministic affordability leg: estimates -> analyze -> fe evidence + meta.
 
     Numbers come only from v_unit_estimates via analyze_affordability (ADR-0002
     D2). The fetch is injectable so tests never touch the pool. budget_vnd below
     the 1M VND floor (FIX-3) is a spec violation -> degraded, never fabricated.
+    ``project_key`` (story 10.4): estimates carry a project_key column, so the
+    affordance analysis only sees rows of the requested project.
     """
     budget = spec.get("budget_vnd")
     if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1_000_000:
@@ -466,6 +484,10 @@ async def run_affordability(spec: dict, as_of: date | None, fetch=None) -> SqlLe
     fetch_fn = fetch or _fetch_estimates
     try:
         rows = await fetch_fn()
+        if project_key:
+            # The estimates view spans every project; keep only the requested one
+            # so a Soleil budget query never prices Camellia units (story 10.4).
+            rows = [r for r in rows if r.get("project_key") == project_key]
         if not rows:
             # No estimates at all is a data problem, not an answer: degrade so
             # the pipeline falls back to RAG + audit instead of reporting
@@ -514,7 +536,9 @@ async def run_affordability(spec: dict, as_of: date | None, fetch=None) -> SqlLe
 
 
 # Runner.
-async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlLegResult:
+async def run_sql_leg(
+    spec: dict | None, as_of: date | None, query: str, project_key: str | None = None
+) -> SqlLegResult:
     """Run R1 (spec-builder), R2 (nl2sql), or the affordability leg when routed.
 
     Any error/timeout returns a degraded SqlLegResult so the caller falls back to
@@ -536,7 +560,7 @@ async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlL
     # must run before validate_spec (mirrors nl2sql placement).
     if spec.get("structured_path") == "affordability":
         try:
-            return await run_affordability(spec, as_of)
+            return await run_affordability(spec, as_of, project_key=project_key)
         except Exception as exc:  # noqa: BLE001 — leg failure degrades, never crashes
             logger.warning("sql_leg: affordability degraded: %s", exc)
             return SqlLegResult([], {"mode": "affordability", "error": str(exc)}, degraded=True)
@@ -547,7 +571,7 @@ async def run_sql_leg(spec: dict | None, as_of: date | None, query: str) -> SqlL
         return SqlLegResult([], {"mode": "spec", "error": f"spec invalid: {exc}", "degraded_reason": "spec_invalid"}, degraded=True)
 
     try:
-        sql, params = build_sql(spec, as_of)
+        sql, params = build_sql(spec, as_of, project_key)
         rows: list[dict] = []
         async with with_rls_identity(timeout_s=1.5) as conn:
             recs = await conn.fetch(sql, *params)

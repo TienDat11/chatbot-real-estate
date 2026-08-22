@@ -79,6 +79,8 @@ async def create_customer_lead(
     repo: LeadRepository,
     *,
     session_id: str | None,
+    project_key: str | None,
+    device_id: str | None,
     name: str | None,
     phone: str,
     consent: bool,
@@ -87,6 +89,8 @@ async def create_customer_lead(
 ) -> LeadRow:
     lead = await repo.create_lead(
         session_id=session_id,
+        project_key=project_key,
+        device_id=device_id,
         name=name,
         phone=phone,
         consent=consent,
@@ -96,8 +100,10 @@ async def create_customer_lead(
     # Session state is in-memory only, so mark here instead of in the route to
     # keep every caller of this service consistent (plan §6.7). Anonymous
     # sessions get no marker: get_context would mint a throwaway key.
+    # device_id prefixes the same cache key the chat context lives under (D7),
+    # so the handoff flags gate the next CTA on the device's conversation.
     if session_id:
-        mark_phone_given(session_id)
+        mark_phone_given(session_id, device_id)
     _, assigned = await _assign(repo, lead.id)
     return assigned or lead
 

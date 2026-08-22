@@ -49,6 +49,7 @@ _ANON_SEQ = [0]  # monotonic counter for anonymous session keys
 class ConvContext:
     session_id: str
     state: str = "greet"
+    project_key: "str | None" = None        # session-bound project (story 10.1)
     slots: dict = field(default_factory=dict)   # budget_vnd, bedrooms, view, timeline, purpose, phone_given
     useful_turns: int = 0                        # turns with facts/card/answer value
     last_cta_turn: "int | None" = None
@@ -76,28 +77,46 @@ _PURPOSE_HOTEL = ("làm khách sạn", "khách sạn", "condotel")
 
 # --- LRU access -------------------------------------------------------------
 
-def get_context(session_id: "str | None") -> ConvContext:
+def context_key(session_id: "str | None", device_id: "str | None" = None) -> str:
+    """Return the canonical LRU cache key for a (session, device) pair.
+
+    D7 (story 10.1): when the client sends a device_id, the cache key is the
+    stable ``f"{device_id}:{session_id}"`` prefix so "mọi phiên của 1 thiết bị"
+    is findable later (story 9.4 re-approach). Without a device_id the legacy
+    anon-* path is unchanged, so pre-10.1 callers behave exactly as before.
+
+    Exported so the lead service marks the SAME key the chat context lives
+    under — otherwise mark_phone_given would land on a different entry and the
+    phone_given/handoff_done flags would never gate the next CTA.
+    """
+    if not session_id:
+        _ANON_SEQ[0] += 1
+        session_id = f"anon-{_ANON_SEQ[0]}-{time.time_ns()}"
+    if device_id:
+        session_id = f"{device_id}:{session_id}"
+    return session_id
+
+
+def get_context(session_id: "str | None", device_id: "str | None" = None) -> ConvContext:
     """Return the live context, creating a fresh one when absent/expired.
 
     Guards against None/empty session_id (edge-case): a missing id must never
     collapse into a shared cache key — each anonymous caller gets its own
     context, so no cross-session state bleed.
     """
-    if not session_id:
-        _ANON_SEQ[0] += 1
-        session_id = f"anon-{_ANON_SEQ[0]}-{time.time_ns()}"
+    key = context_key(session_id, device_id)
     now = time.time()
-    _LRU_CACHE.touch(session_id)
-    ctx = _LRU_CACHE.get(session_id)
+    _LRU_CACHE.touch(key)
+    ctx = _LRU_CACHE.get(key)
     if ctx is None or (now - ctx.updated_at) > TTL_SECONDS:
-        ctx = ConvContext(session_id=session_id)
-        _LRU_CACHE.put(session_id, ctx)
+        ctx = ConvContext(session_id=key)
+        _LRU_CACHE.put(key, ctx)
     return ctx
 
 
-def mark_phone_given(session_id: str) -> None:
+def mark_phone_given(session_id: str, device_id: "str | None" = None) -> None:
     """POST /api/lead ok -> phone_given + handoff_done (plan §6.7, 1 line in lead svc)."""
-    ctx = get_context(session_id)
+    ctx = get_context(session_id, device_id)
     ctx.slots["phone_given"] = True
     ctx.state = "handoff_done"
     ctx.updated_at = time.time()
@@ -186,6 +205,6 @@ def register_interest(ctx: ConvContext, unit_key: "str | None") -> None:
 
 __all__ = [
     "ConvContext", "CTA_VARIANTS", "SESSIONS_MAX", "TTL_SECONDS", "CONVERSION_STATES",
-    "get_context", "mark_phone_given", "transition", "maybe_lead_cta_hint",
+    "get_context", "context_key", "mark_phone_given", "transition", "maybe_lead_cta_hint",
     "note_useful_turn", "conv_directive", "register_interest",
 ]

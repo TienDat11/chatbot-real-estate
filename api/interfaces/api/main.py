@@ -41,7 +41,14 @@ class HistoryTurn(BaseModel):
 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=MAX_QUERY_LENGTH)
+    # Story 10.1: the question is scoped to one project. The FE contract marks
+    # the field required, but the BE schema stays lenient so legacy clients
+    # that omit it still reach the default-rule in resolve_project_key (exactly
+    # one active project -> that project; >1 active -> 422 PROJECT_SCOPE).
+    project_key: str | None = None
     session_id: str | None = None
+    # D7: anonymous persistent device id (UUID v4) — stable context prefix.
+    device_id: str | None = Field(default=None, max_length=64)
     as_of: str | None = None
     history: list[HistoryTurn] | None = None
 
@@ -107,7 +114,9 @@ def _normalize_history(history: list[HistoryTurn] | None) -> list[dict[str, str]
     ]
 
 
-async def _sse_stream(pipe, req: QueryRequest, as_of: str | None) -> AsyncIterator[str]:
+async def _sse_stream(
+    pipe, req: QueryRequest, as_of: str | None, project_key: str, device_id: str | None
+) -> AsyncIterator[str]:
     """Run the pipeline emitting SSE; always emits `done` (even after errors)."""
     from api.application.pipelines.workflow import QueryRejected  # noqa: PLC0415
 
@@ -120,7 +129,10 @@ async def _sse_stream(pipe, req: QueryRequest, as_of: str | None) -> AsyncIterat
 
     async def run_pipe() -> None:
         try:
-            payload = await pipe.run(req.query, req.session_id, as_of, history, on_event=on_event)
+            payload = await pipe.run(
+                req.query, req.session_id, as_of, history,
+                project_key=project_key, device_id=device_id, on_event=on_event,
+            )
             await q.put(("__done__", payload))
         except QueryRejected as exc:
             await q.put(("__rejected__", {"message": exc.reason}))
@@ -233,12 +245,27 @@ def create_app() -> FastAPI:
     async def query(req: QueryRequest, request: Request) -> "StreamingResponse | dict":
         from api.application.pipelines.workflow import QueryRejected  # noqa: PLC0415
         from api.application.pipelines.conv_workflow import RagQueryPipelineConv  # noqa: PLC0415
+        from api.application.services.project_scope import (  # noqa: PLC0415
+            ProjectScopeError,
+            resolve_project_key,
+        )
+
+        # Story 10.1 [RV-22/08]: resolve the active project BEFORE any leg runs —
+        # >1 active project with no explicit choice is a 422 that prompts the
+        # ProjectPicker; exactly one active project is the safe default.
+        try:
+            project_key = await resolve_project_key(req.project_key)
+        except ProjectScopeError as exc:
+            return JSONResponse(
+                status_code=422,
+                content={"ok": False, "error": {"code": "PROJECT_SCOPE", "message": str(exc)}},
+            )
 
         accept = request.headers.get("accept") or ""
         if "text/event-stream" in accept:
             pipe = RagQueryPipelineConv()
             return StreamingResponse(
-                _sse_stream(pipe, req, req.as_of),
+                _sse_stream(pipe, req, req.as_of, project_key, req.device_id),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -248,6 +275,8 @@ def create_app() -> FastAPI:
             payload = await pipe.run(
                 req.query, req.session_id, req.as_of,
                 _normalize_history(req.history),
+                project_key=project_key,
+                device_id=req.device_id,
             )
             return payload
         except QueryRejected as exc:

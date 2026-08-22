@@ -39,6 +39,7 @@ from api.domain.value_objects.constants import (
     SSE_EVENT_TOKEN,
 )
 from api.application.services.image_search import search_images
+from api.application.services.project_scope import filter_images_by_project
 from api.infrastructure.dependencies import get_geo, get_reranker
 from api.application.services.generate import stream_answer
 from api.application.services.conv_state import conv_directive, get_context
@@ -154,6 +155,18 @@ class RagQueryWorkflow(Workflow):
         if inspect.isawaitable(res):
             await res
 
+    async def _store_get(self, ctx: Context, key: str):
+        """Read one store key, returning None when the step runs standalone.
+
+        The guard step seeds most keys, but steps are also invoked directly in
+        tests with a partial store (e.g. wf.sql_leg(ctx, SqlRequestEv())); a
+        missing key must read as absent, not raise "Path not found in state".
+        """
+        try:
+            return await ctx.store.get(key)
+        except Exception:  # noqa: BLE001 — missing key reads as None
+            return None
+
     async def _flag(self, ctx: Context, *flags: str) -> None:
         """Append degradation flags (dedup) to shared state, atomically."""
         async with ctx.store.edit_state() as state:
@@ -180,6 +193,8 @@ class RagQueryWorkflow(Workflow):
         await ctx.store.set("t0", t0)
         await ctx.store.set("query", ev.query)
         await ctx.store.set("session_id", session_id)
+        await ctx.store.set("project_key", getattr(ev, "project_key", None))
+        await ctx.store.set("device_id", getattr(ev, "device_id", None))
         await ctx.store.set("as_of_date", parse_as_of(getattr(ev, "as_of", None)))
         await ctx.store.set("degraded", [])
         # Screen every user history turn with the same rule set as the query (L1);
@@ -262,6 +277,7 @@ class RagQueryWorkflow(Workflow):
                     routed.hl_keywords,
                     routed.ll_keywords,
                     await ctx.store.get("as_of_date"),
+                    await self._store_get(ctx, "project_key"),
                 ),
                 timeout=STEP_TIMEOUTS["rag"],
             )
@@ -297,7 +313,12 @@ class RagQueryWorkflow(Workflow):
         )
         try:
             result = await asyncio.wait_for(
-                run_sql_leg(spec, await ctx.store.get("as_of_date"), guard.clean),
+                run_sql_leg(
+                    spec,
+                    await ctx.store.get("as_of_date"),
+                    guard.clean,
+                    await self._store_get(ctx, "project_key"),
+                ),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -365,15 +386,22 @@ class RagQueryWorkflow(Workflow):
 
         merged: Merged = await merge_context(guard.clean, chunks, sql_result.rows, as_of)
         session_id = await ctx.store.get("session_id")
+        project_key = await self._store_get(ctx, "project_key")
+        device_id = await self._store_get(ctx, "device_id")
 
         # Illustrative image enrichment is best-effort: search_images never raises,
         # so a degraded/empty result only omits images, never the pipeline.
+        # Project scoping (story 10.4): search_images itself is media-lane owned
+        # (has concurrent uncommitted changes), so the project filter is applied as
+        # a post-filter on the returned list instead of inside the search.
         images = await search_images(routed.rewritten)
+        if project_key:
+            images = await filter_images_by_project(images, project_key)
         await ctx.store.set("images", images)
         conv_dir = None
         conv_state_str = None
         if session_id:
-            ctx_conv = get_context(session_id)
+            ctx_conv = get_context(session_id, device_id)
             conv_dir = conv_directive(ctx_conv.state)
             conv_state_str = ctx_conv.state
         merged.meta.update(
@@ -495,10 +523,15 @@ class RagQueryPipeline:
         session_id: str | None = None,
         as_of: str | None = None,
         history: list[dict] | None = None,
+        project_key: str | None = None,
+        device_id: str | None = None,
         on_event: EventCallback | None = None,
     ) -> dict:
         wf = RagQueryWorkflow(on_event=on_event if on_event is not None else self._on_event)
-        handler = wf.run(query=query, session_id=session_id, as_of=as_of, history=history or [])
+        handler = wf.run(
+            query=query, session_id=session_id, as_of=as_of, history=history or [],
+            project_key=project_key, device_id=device_id,
+        )
         return await handler
 
 

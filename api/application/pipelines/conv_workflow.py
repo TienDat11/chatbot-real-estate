@@ -56,9 +56,14 @@ def _panel_hint(intent: Intent) -> str:
     }.get(intent, "none")
 
 
-async def _extract_and_transition(query: str, session_id: str, history: list[dict] | None) -> dict:
+async def _extract_and_transition(
+    query: str, session_id: str, history: list[dict] | None,
+    project_key: str | None, device_id: str | None,
+) -> dict:
     """Load context, extract slots, transition, return conv metadata dict."""
-    ctx = get_context(session_id)
+    ctx = get_context(session_id, device_id)
+    if project_key:
+        ctx.project_key = project_key  # session nhớ project (story 10.1 AC)
     intent = classify_intent(query, history).intent
     res = await extract_slots(query, ctx.slots)
     ctx.slots.update(res["merged"])
@@ -73,6 +78,7 @@ async def _extract_and_transition(query: str, session_id: str, history: list[dic
         "slots": dict(ctx.slots),
         "prefill_note": lead_prefill_note(ctx.slots),
         "interested_units": list(ctx.interested_units),
+        "project_key": project_key,
     }
 
 
@@ -83,6 +89,8 @@ class ConvRunEv(Event):
     session_id: "str | None"
     as_of: "str | None"
     history: "list[dict] | None"
+    project_key: "str | None"
+    device_id: "str | None"
 
 
 class RagRgreConvWorkflow(Workflow):
@@ -106,12 +114,14 @@ class RagRgreConvWorkflow(Workflow):
         session_id = getattr(ev, "session_id", None) or "anon"
         history = getattr(ev, "history", None) or []
         as_of = getattr(ev, "as_of", None)
-        conv = await _extract_and_transition(query, session_id, history)
+        project_key = getattr(ev, "project_key", None)
+        device_id = getattr(ev, "device_id", None)
+        conv = await _extract_and_transition(query, session_id, history, project_key, device_id)
         await ctx.store.set("conv", conv)
         # CTA hint gated §6.5: (d) uses the PREVIOUS answer review status
         # (routing emits before legs; first turn treats None as clean).
         requires_review = bool(conv["slots"].get("last_answer_reviewed"))
-        cta = maybe_lead_cta_hint(get_context(session_id), requires_review=requires_review)
+        cta = maybe_lead_cta_hint(get_context(session_id, device_id), requires_review=requires_review)
         payload = {
             "intent": conv["intent"],
             "conv_state": conv["conv_state"],
@@ -119,7 +129,10 @@ class RagRgreConvWorkflow(Workflow):
             "lead_cta_hint": cta,
         }
         await self._emit(SSE_EVENT_ROUTING, payload)
-        return ConvRunEv(conv=conv, query=query, session_id=session_id, as_of=as_of, history=history)
+        return ConvRunEv(
+            conv=conv, query=query, session_id=session_id, as_of=as_of, history=history,
+            project_key=project_key, device_id=device_id,
+        )
 
     @step()
     async def run_inner(self, ctx: Context, ev: ConvRunEv) -> StopEvent:
@@ -130,10 +143,12 @@ class RagRgreConvWorkflow(Workflow):
             session_id=ev.session_id,
             as_of=ev.as_of,
             history=ev.history or [],
+            project_key=ev.project_key,
+            device_id=ev.device_id,
         )
         result = await handler
         # Persist the review status + useful-turn flag for the NEXT routing event.
-        sctx = get_context(ev.session_id)
+        sctx = get_context(ev.session_id, ev.device_id)
         if isinstance(result, dict):
             sctx.slots["last_answer_reviewed"] = bool(result.get("requires_review", False))
             if not result.get("requires_review", False) and result.get("answer"):
@@ -158,10 +173,15 @@ class RagQueryPipelineConv:
         session_id: "str | None" = None,
         as_of: "str | None" = None,
         history: "list[dict] | None" = None,
+        project_key: "str | None" = None,
+        device_id: "str | None" = None,
         on_event: "EventCallback | None" = None,
     ) -> dict:
         wf = RagRgreConvWorkflow(on_event=on_event if on_event is not None else self._on_event)
-        return await wf.run(query=query, session_id=session_id, as_of=as_of, history=history or [])
+        return await wf.run(
+            query=query, session_id=session_id, as_of=as_of, history=history or [],
+            project_key=project_key, device_id=device_id,
+        )
 
 
 __all__ = [

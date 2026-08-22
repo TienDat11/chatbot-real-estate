@@ -42,7 +42,7 @@ def test_stream_emits_tokens_then_done():
     hello_mod.get_llm = lambda: FakeLLM()
 
     async def collect():
-        return [frame async for frame in hello_mod._stream_greeting("s1")]
+        return [frame async for frame in hello_mod._stream_greeting("s1", None)]
 
     try:
         frames = asyncio.run(collect())

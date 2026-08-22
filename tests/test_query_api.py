@@ -40,7 +40,7 @@ class FakePipeline:
 
     last_history: list[dict[str, str]] | None = None
 
-    async def run(self, query, session_id, as_of, history, on_event=None):
+    async def run(self, query, session_id, as_of, history, on_event=None, **kwargs):
         FakePipeline.last_history = history
         return dict(_PAYLOAD)
 
@@ -51,6 +51,14 @@ def client(monkeypatch) -> TestClient:
     # attribute swaps the pipeline for both JSON and SSE paths.
     monkeypatch.setattr(
         "api.application.pipelines.conv_workflow.RagQueryPipelineConv", FakePipeline
+    )
+    # The handler also resolves the project scope lazily; a fake keeps the tests
+    # DB-free while exercising the post-resolution handler flow.
+    async def _fake_resolve(project_key, *, active_projects=None):
+        return project_key or "camellia"
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.resolve_project_key", _fake_resolve
     )
     return TestClient(create_app())
 

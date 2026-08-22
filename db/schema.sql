@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS images (
   doc_id             TEXT REFERENCES documents(doc_id) ON DELETE CASCADE,
   chunk_id           TEXT REFERENCES document_chunks(chunk_id) ON DELETE CASCADE,
   linked_subject_key TEXT,
+  project_key        TEXT,                  -- project scoping for image enrichment (story 10.4)
   metadata           JSONB NOT NULL DEFAULT '{}',
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -83,6 +84,8 @@ CREATE INDEX IF NOT EXISTS idx_images_kind ON images (kind);
 CREATE INDEX IF NOT EXISTS idx_images_doc ON images (doc_id);
 CREATE INDEX IF NOT EXISTS idx_images_link ON images (linked_subject_key);
 CREATE INDEX IF NOT EXISTS idx_images_status ON images (status) WHERE status = 'published';
+CREATE INDEX IF NOT EXISTS idx_images_project_status
+  ON images (project_key, status) WHERE status = 'published';
 
 -- 12. image_embeddings — per-image vector store (cosine); dims 1024 = text-embedding-v4 LOCK
 CREATE TABLE IF NOT EXISTS image_embeddings (

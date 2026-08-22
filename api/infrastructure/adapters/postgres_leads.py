@@ -10,7 +10,7 @@ import asyncpg
 from api.application.services.sql_leg import build_dsn
 from api.infrastructure.ports.leads import AssignmentLogRow, LeadRow, SalesRow, SalesStats
 
-_LEAD_COLUMNS = "id, session_id, name, phone, consent, note, budget_vnd, created_at, status, assigned_sales_id, lock_expires_at, escal_count, last_action_at, closed_at"
+_LEAD_COLUMNS = "id, session_id, project_key, device_id, name, phone, consent, note, budget_vnd, created_at, status, assigned_sales_id, lock_expires_at, escal_count, last_action_at, closed_at"
 _lead_pool: asyncpg.Pool | None = None
 
 
@@ -59,12 +59,12 @@ class PostgresLeadRepository:
             )
         return [SalesRow(**dict(row)) for row in rows]
 
-    async def create_lead(self, *, session_id: str | None, name: str | None, phone: str, consent: bool, note: str | None, budget_vnd: int | None) -> LeadRow:
+    async def create_lead(self, *, session_id: str | None, project_key: str | None, device_id: str | None, name: str | None, phone: str, consent: bool, note: str | None, budget_vnd: int | None) -> LeadRow:
         pool = await get_lead_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "INSERT INTO leads (session_id, name, phone, consent, note, budget_vnd) VALUES ($1, $2, $3, $4, $5, $6) RETURNING " + _LEAD_COLUMNS,
-                session_id, name, phone, consent, note, budget_vnd,
+                "INSERT INTO leads (session_id, project_key, device_id, name, phone, consent, note, budget_vnd) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING " + _LEAD_COLUMNS,
+                session_id, project_key, device_id, name, phone, consent, note, budget_vnd,
             )
         return LeadRow(**dict(row))
 
