@@ -85,6 +85,12 @@ export async function streamQuery(
     project_key?: string;
     as_of?: string;
     history?: { role: "user" | "assistant"; content: string }[];
+    /**
+     * Story 11.3: /train sends "training" so the backend answers from the
+     * _training namespace with the coaching prompt (no sales persona, no CTA).
+     * Additive field — backends predating story 11.3 ignore it harmlessly.
+     */
+    answer_mode?: "customer" | "training";
     /** Aborts the fetch + SSE read loop; no error is reported when set. */
     signal?: AbortSignal;
   },
