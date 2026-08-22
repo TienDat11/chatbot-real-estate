@@ -172,17 +172,27 @@ class RagQueryPipelineConv:
         self,
         query: str,
         session_id: "str | None" = None,
-        as_of: "str | None" = None,
+        as_of: str | None = None,
         history: "list[dict] | None" = None,
         project_key: "str | None" = None,
         device_id: "str | None" = None,
         on_event: "EventCallback | None" = None,
     ) -> dict:
-        wf = RagRgreConvWorkflow(on_event=on_event if on_event is not None else self._on_event)
-        return await wf.run(
-            query=query, session_id=session_id, as_of=as_of, history=history or [],
-            project_key=project_key, device_id=device_id,
+        # One async registry read per request (B2/M1): binding the record makes
+        # the conv layer (brand_token, conv_directive) and the inner workflow
+        # (identity render, geo, media) DB-free for the whole request.
+        from api.application.services.project_config import (  # noqa: PLC0415
+            bound_request_project,
+            load_project_registry_record,
         )
+
+        record = await load_project_registry_record(project_key)
+        with bound_request_project(record):
+            wf = RagRgreConvWorkflow(on_event=on_event if on_event is not None else self._on_event)
+            return await wf.run(
+                query=query, session_id=session_id, as_of=as_of, history=history or [],
+                project_key=project_key, device_id=device_id,
+            )
 
 
 __all__ = [

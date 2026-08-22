@@ -233,10 +233,13 @@ def project_geo_center(project_key: str) -> tuple[float, float]:
     """Return the (lat, lng) geo center for a project from project_config.
 
     Story 8.2: the geo center moved from a hardcoded Camellia constant to the
-    per-project registry. Callers that do not know the project yet keep the
-    Settings Camellia defaults via get_cfg; this helper is for the project-
-    scoped paths (ISSUE-03/05). Best-effort and synchronous: any failure falls
-    back to the configured defaults so the nearby-places leg never crashes.
+    per-project registry. The async answer path now reads the geo center from
+    the per-request registry record (api/application/ports/project_registry.py)
+    and never calls this helper; this synchronous psycopg2 seam is kept only
+    for unbound direct callers (eval CLI, workflow unit tests) that still
+    resolve the center outside a request. Best-effort and synchronous: any
+    failure falls back to the configured defaults so the nearby-places leg
+    never crashes.
     """
     settings = get_settings()
     try:

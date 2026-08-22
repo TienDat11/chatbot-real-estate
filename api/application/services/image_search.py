@@ -43,6 +43,22 @@ ORDER BY e.embedding <=> $1::vector
 LIMIT $2
 """
 
+# Project-scoped variant (M6): the caller-known project_key rides in the SQL so
+# the vector pass never ranks another project's corpus and no post-filter query
+# is needed. Unscoped callers keep IMAGE_QUERY byte-for-byte (contract tests
+# pin its fragments and the exact fetch args).
+IMAGE_QUERY_PROJECT_SCOPED = """
+SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
+       i.width, i.height, i.linked_subject_key, i.metadata,
+       1 - (e.embedding <=> $1::vector) AS score
+FROM image_embeddings e
+JOIN images i ON i.image_id = e.image_id
+WHERE i.status = 'published' AND i.kind NOT IN ('phaply', 'qna')
+  AND i.project_key = $3
+ORDER BY e.embedding <=> $1::vector
+LIMIT $2
+"""
+
 # Direct index lookup by stable unit key; used only to rescue the exact unit when
 # the vector pass failed to surface it. No embedding needed, so the score is
 # assigned a ceiling constant (exact intent) by the caller.
@@ -53,6 +69,19 @@ FROM images i
 WHERE i.status = 'published'
   AND i.kind NOT IN ('phaply', 'qna')
   AND (i.linked_subject_key = $1 OR i.metadata->>'unit' = $2)
+LIMIT 1
+"""
+
+# Scoped rescue (M6): unit codes (CH-03) are NOT unique across projects, so the
+# exact-match rescue must also honor the project predicate.
+QUERY_BY_UNIT_PROJECT_SCOPED = """
+SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
+       i.width, i.height, i.linked_subject_key, i.metadata
+FROM images i
+WHERE i.status = 'published'
+  AND i.kind NOT IN ('phaply', 'qna')
+  AND (i.linked_subject_key = $1 OR i.metadata->>'unit' = $2)
+  AND i.project_key = $3
 LIMIT 1
 """
 
@@ -68,6 +97,22 @@ WHERE i.status = 'published'
   AND i.kind = $1
   AND i.linked_subject_key IS NULL
   AND i.metadata->>'type' = ANY (string_to_array($2, ','))
+ORDER BY array_position(string_to_array($2, ','), i.metadata->>'type')
+LIMIT $3
+"""
+
+# Project-scoped variant (M6): same shape with the project predicate, so the
+# greeting gallery never fetches rows a post-filter would throw away.
+PROJECT_IMAGES_QUERY_PROJECT_SCOPED = """
+SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
+       i.width, i.height, i.linked_subject_key, i.metadata,
+       i.metadata->>'type' AS display_type
+FROM images i
+WHERE i.status = 'published'
+  AND i.kind = $1
+  AND i.linked_subject_key IS NULL
+  AND i.metadata->>'type' = ANY (string_to_array($2, ','))
+  AND i.project_key = $4
 ORDER BY array_position(string_to_array($2, ','), i.metadata->>'type')
 LIMIT $3
 """
@@ -171,11 +216,22 @@ def _row_to_image(
     }
 
 
-async def _query_by_unit(code: str) -> dict[str, Any] | None:
-    """Fetch the single image whose linked unit key equals code; None on miss."""
+async def _query_by_unit(
+    code: str, project_key: "str | None" = None
+) -> dict[str, Any] | None:
+    """Fetch the single image whose linked unit key equals code; None on miss.
+
+    ``project_key`` (M6) scopes the rescue so a scoped query naming CH-03 can
+    never be rescued into another project's CH-03 floor plan.
+    """
     try:
         async with with_rls_identity() as conn:
-            rec = await conn.fetchrow(QUERY_BY_UNIT, f"unit:{code}", code)
+            if project_key:
+                rec = await conn.fetchrow(
+                    QUERY_BY_UNIT_PROJECT_SCOPED, f"unit:{code}", code, project_key
+                )
+            else:
+                rec = await conn.fetchrow(QUERY_BY_UNIT, f"unit:{code}", code)
         return dict(rec) if rec is not None else None
     except Exception as exc:  # noqa: BLE001 — degrade silently; exact rescue is best-effort
         logger.warning("image_search: unit lookup failed for %s: %s", code, exc)
@@ -183,7 +239,10 @@ async def _query_by_unit(code: str) -> dict[str, Any] | None:
 
 
 async def _rerank_by_unit(
-    target_codes: set[str], scored: list[tuple[dict[str, Any], float]], top_k: int
+    target_codes: set[str],
+    scored: list[tuple[dict[str, Any], float]],
+    top_k: int,
+    project_key: "str | None" = None,
 ) -> list[dict[str, Any]]:
     """Re-order vector hits so exact unit matches lead, same-type units follow.
 
@@ -201,7 +260,13 @@ async def _rerank_by_unit(
 
     found = {_row_unit(row) for row, _ in exact}
     for code in sorted(target_codes - found):
-        rescued = await _query_by_unit(code)
+        # The second argument is passed only when scoping: the rescue seam is
+        # monkeypatched with single-argument fakes in the unit tests, and an
+        # unscoped rescue keeps the exact legacy call.
+        if project_key:
+            rescued = await _query_by_unit(code, project_key)
+        else:
+            rescued = await _query_by_unit(code)
         if rescued is not None:
             exact.append((rescued, 1.0))  # ceiling: exact-intent surrogate for a direct hit
 
@@ -229,7 +294,7 @@ async def _rerank_by_unit(
 
 
 async def search_project_images(
-    top_k: int = 6, kind: str = "matbang"
+    top_k: int = 6, kind: str = "matbang", project_key: "str | None" = None
 ) -> list[dict[str, Any]]:
     """Return representative project imagery for the first-open greeting.
 
@@ -237,17 +302,28 @@ async def search_project_images(
     pick published images of the given kind that have NO unit link (they are
     overviews: cover, render, amenity map/collage) and deterministically order
     them by the display type so the greeting always leads with the most visual
-    asset. Best-effort: any DB failure returns [] so the greeting never 500s.
+    asset. ``project_key`` (M6) scopes the SQL itself so no cross-project rows
+    are fetched and no post-filter is needed. Best-effort: any DB failure
+    returns [] so the greeting never 500s.
     """
     order = ["cover", "render", "amenity_map", "amenity_collage"]
     try:
         async with with_rls_identity() as conn:
-            recs = await conn.fetch(
-                PROJECT_IMAGES_QUERY,
-                kind,
-                ",".join(order),
-                top_k,
-            )
+            if project_key:
+                recs = await conn.fetch(
+                    PROJECT_IMAGES_QUERY_PROJECT_SCOPED,
+                    kind,
+                    ",".join(order),
+                    top_k,
+                    project_key,
+                )
+            else:
+                recs = await conn.fetch(
+                    PROJECT_IMAGES_QUERY,
+                    kind,
+                    ",".join(order),
+                    top_k,
+                )
     except Exception as exc:  # noqa: BLE001 — greeting imagery is a garnish, never fatal
         logger.warning("image_search: project images degraded: %s", exc)
         return []
@@ -269,6 +345,7 @@ async def search_images(
     margin: float | None = None,
     same_kind_margin: float = 0.15,
     cross_kind_margin: float = 0.05,
+    project_key: "str | None" = None,
 ) -> list[dict[str, Any]]:
     """Return up to top_k published illustrative images that pass a relevance gate.
 
@@ -295,8 +372,10 @@ async def search_images(
     choose from a fuller picture before the final top_k slice. When the query names
     concrete unit code(s), results are re-ranked so the exact unit(s) lead and
     same-type units follow (exact rescues deliberately bypass the floor); otherwise
-    raw score order is kept. Degrades to [] on any embedding or DB error: image
-    retrieval is a garnish to the answer, never a reason to fail the pipeline.
+    raw score order is kept. ``project_key`` (M6) scopes the vector pass in SQL so
+    another project's corpus is never ranked or fetched. Degrades to [] on any
+    embedding or DB error: image retrieval is a garnish to the answer, never a
+    reason to fail the pipeline.
     """
     if not query_text:
         return []
@@ -310,7 +389,12 @@ async def search_images(
         # raw neighbors still gets a chance to pass the gates.
         pool = max(top_k, 8)
         async with with_rls_identity() as conn:
-            recs = await conn.fetch(IMAGE_QUERY, vec_literal, pool)
+            if project_key:
+                recs = await conn.fetch(
+                    IMAGE_QUERY_PROJECT_SCOPED, vec_literal, pool, project_key
+                )
+            else:
+                recs = await conn.fetch(IMAGE_QUERY, vec_literal, pool)
         rows = [dict(r) for r in recs]
     except Exception as exc:  # noqa: BLE001 — image search failure never crashes the pipeline
         logger.warning("image_search: degraded (no images): %s", exc)
@@ -348,4 +432,4 @@ async def search_images(
             kept.append((r, s))
         return [_row_to_image(r, s, "semantic", None) for r, s in kept][:top_k]
 
-    return await _rerank_by_unit(set(codes), scored, top_k)
+    return await _rerank_by_unit(set(codes), scored, top_k, project_key)

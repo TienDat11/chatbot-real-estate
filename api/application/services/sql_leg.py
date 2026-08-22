@@ -451,11 +451,22 @@ ESTIMATE_COLUMNS = (
 )
 
 
-async def _fetch_estimates(pool: asyncpg.Pool | None = None) -> list[dict]:
-    """Current v_unit_estimates rows — the view pins CURRENT_DATE, so no as_of."""
+async def _fetch_estimates(
+    pool: asyncpg.Pool | None = None, project_key: str | None = None
+) -> list[dict]:
+    """Current v_unit_estimates rows — the view pins CURRENT_DATE, so no as_of.
+
+    ``project_key`` (M8) filters in SQL so unrelated projects' rows are never
+    shipped to the client; None keeps the unscoped read for legacy callers.
+    """
     cols = ", ".join(ESTIMATE_COLUMNS)
+    sql = f"SELECT {cols} FROM v_unit_estimates"
+    params: list[str] = []
+    if project_key:
+        sql += " WHERE project_key = $1"
+        params.append(project_key)
     async with with_rls_identity(pool=pool) as conn:
-        recs = await conn.fetch(f"SELECT {cols} FROM v_unit_estimates")
+        recs = await conn.fetch(sql, *params)
     return [dict(r) for r in recs]
 
 
@@ -481,12 +492,22 @@ async def run_affordability(
             },
             degraded=True,
         )
-    fetch_fn = fetch or _fetch_estimates
     try:
-        rows = await fetch_fn()
+        if fetch is not None:
+            # Injected fetch (tests) keeps the zero-argument contract; the
+            # project filter below still applies to whatever it returns.
+            rows = await fetch()
+        elif project_key:
+            rows = await _fetch_estimates(project_key=project_key)
+        else:
+            # Unscoped legacy call stays zero-argument: tests replace
+            # _fetch_estimates with a bare ``async def fake():`` seam.
+            rows = await _fetch_estimates()
         if project_key:
             # The estimates view spans every project; keep only the requested one
             # so a Soleil budget query never prices Camellia units (story 10.4).
+            # The default DB fetch already applied the same predicate in SQL
+            # (M8); this guard covers injected fetches and is a no-op otherwise.
             rows = [r for r in rows if r.get("project_key") == project_key]
         if not rows:
             # No estimates at all is a data problem, not an answer: degrade so
@@ -515,11 +536,16 @@ async def run_affordability(
     except Exception as exc:  # noqa: BLE001 — fetch/parse failure degrades, never crashes
         logger.warning("sql_leg: affordability data failed: %s", exc)
         return SqlLegResult([], {"mode": "affordability", "error": str(exc)}, degraded=True)
+    audited_sql = f"SELECT {', '.join(ESTIMATE_COLUMNS)} FROM v_unit_estimates"
+    if project_key:
+        # Mirror the WHERE the default fetch pushed into SQL (M8) so the audit
+        # records the query that actually ran.
+        audited_sql += " WHERE project_key = $1"
     meta = {
         "mode": "affordability",
         "source": "v_unit_estimates",
         "row_count": len(evidence),
-        "sql_query": f"SELECT {', '.join(ESTIMATE_COLUMNS)} FROM v_unit_estimates",
+        "sql_query": audited_sql,
         # The view pins CURRENT_DATE (camellia_estimate.sql) — the requested
         # as_of is intentionally not applied; surface that to the audit (BH-16).
         "as_of_applied": False,

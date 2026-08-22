@@ -14,13 +14,8 @@ dedicated namespaces.
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
-
-from api.infrastructure.config.config import settings
-
-logger = logging.getLogger("api.project_scope")
 
 # Story 8.5/G3: publish endpoint validates the same pattern — path-traversal
 # guard plus a bounded, URL-safe namespace shape.
@@ -62,27 +57,15 @@ def validate_project_key(project_key: str) -> None:
 async def fetch_active_projects() -> list[ActiveProject]:
     """Return all active project_config rows; empty on any failure (degraded).
 
-    Best-effort with a short timeout: a dead DB must not take down /query or
-    /api/lead — the caller applies the default-rule on whatever comes back.
+    Reads through the async ProjectRegistryPort (one adapter for every
+    registry read, M1; asyncpg kwargs connect, m8). Best-effort with a short
+    timeout: a dead DB must not take down /query or /api/lead — the caller
+    applies the default-rule on whatever comes back.
     """
-    import asyncpg
+    from api.infrastructure.dependencies import get_project_registry  # noqa: PLC0415
 
-    dsn = (
-        f"postgresql://{settings.postgres_user}:{settings.postgres_password}"
-        f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_database}"
-    )
-    try:
-        conn = await asyncpg.connect(dsn, timeout=2.0)
-        try:
-            rows = await conn.fetch(
-                "SELECT project_key, ten_thuong_mai FROM project_config WHERE status = 'active'"
-            )
-        finally:
-            await conn.close()
-        return [ActiveProject(r["project_key"], r["ten_thuong_mai"]) for r in rows]
-    except Exception as exc:  # noqa: BLE001 — scope resolution must degrade, never crash
-        logger.warning("project_scope: active projects read failed: %s", exc)
-        return []
+    records = await get_project_registry().fetch_active_projects()
+    return [ActiveProject(r.project_key, r.ten_thuong_mai or "") for r in records]
 
 
 async def resolve_project_key(
@@ -114,46 +97,6 @@ async def resolve_project_key(
     raise ProjectScopeError("Chưa có dự án nào đang mở bán")
 
 
-async def filter_images_by_project(
-    images: list[dict], project_key: str
-) -> list[dict]:
-    """Keep only image dicts whose image_id belongs to the project (story 10.4).
-
-    ``images`` comes from the media lane's search (api/application/services/
-    image_search.py), which has no project filter. images.project_key is the
-    per-image tag written by the ingest lane; images that have no tag yet must
-    not surface for any project (isolation first: a missing tag must never leak
-    across projects), so they are dropped here.
-    """
-    if not images:
-        return []
-    import asyncpg
-
-    dsn = (
-        f"postgresql://{settings.postgres_user}:{settings.postgres_password}"
-        f"@{settings.postgres_host}:{settings.postgres_port}/{settings.postgres_database}"
-    )
-    ids = [img.get("image_id") for img in images if img.get("image_id")]
-    if not ids:
-        return []
-    try:
-        conn = await asyncpg.connect(dsn, timeout=2.0)
-        try:
-            rows = await conn.fetch(
-                "SELECT image_id FROM images WHERE image_id = ANY($1::text[]) "
-                "AND project_key = $2 AND status = 'published'",
-                ids,
-                project_key,
-            )
-        finally:
-            await conn.close()
-    except Exception as exc:  # noqa: BLE001 — image enrichment must degrade, never crash
-        logger.warning("project_scope: image project filter failed: %s", exc)
-        return []
-    allowed = {r["image_id"] for r in rows}
-    return [img for img in images if img.get("image_id") in allowed]
-
-
 __all__ = [
     "PROJECT_KEY_PATTERN",
     "RESERVED_PROJECT_KEYS",
@@ -163,5 +106,4 @@ __all__ = [
     "validate_project_key",
     "fetch_active_projects",
     "resolve_project_key",
-    "filter_images_by_project",
 ]
