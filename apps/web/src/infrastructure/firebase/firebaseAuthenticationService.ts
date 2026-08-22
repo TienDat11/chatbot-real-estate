@@ -12,7 +12,11 @@ import {
   signInWithEmailAndPassword,
   signOut,
 } from "firebase/auth";
+import { parseRoleFromClaim, type Role } from "@/domain/auth/role";
 import { getFirebaseAuth } from "./firebaseClient";
+
+/** Firebase custom-claim key that carries the authorization role. */
+export const ROLE_CLAIM_KEY = "role";
 
 /**
  * Narrow, serializable view of the authenticated Firebase user. Keeps firebase
@@ -23,6 +27,8 @@ export interface AuthenticatedUser {
   email: string | null;
   displayName: string | null;
   photoURL: string | null;
+  /** Role decoded from the ID-token custom claims; null while signed out. */
+  role: Role | null;
 }
 
 /** Creates a new account with email/password. */
@@ -42,16 +48,20 @@ export function signOutUser() {
 
 /** Subscribes to auth-state changes; returns the unsubscribe function. */
 export function onAuthChange(callback: (user: AuthenticatedUser | null) => void) {
-  return onAuthStateChanged(getFirebaseAuth(), (firebaseUser) => {
-    callback(
-      firebaseUser
-        ? {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email,
-            displayName: firebaseUser.displayName,
-            photoURL: firebaseUser.photoURL,
-          }
-        : null
-    );
+  return onAuthStateChanged(getFirebaseAuth(), async (firebaseUser) => {
+    if (!firebaseUser) {
+      callback(null);
+      return;
+    }
+    // The role lives in the ID-token custom claims, which require an extra
+    // round-trip; unknown or missing claims degrade to viewer (least privilege).
+    const idTokenResult = await firebaseUser.getIdTokenResult();
+    callback({
+      uid: firebaseUser.uid,
+      email: firebaseUser.email,
+      displayName: firebaseUser.displayName,
+      photoURL: firebaseUser.photoURL,
+      role: parseRoleFromClaim(idTokenResult.claims[ROLE_CLAIM_KEY]),
+    });
   });
 }
