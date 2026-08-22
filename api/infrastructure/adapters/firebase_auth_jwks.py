@@ -132,7 +132,13 @@ class FirebaseAuthJwksVerifier:
             firebase_uid=str(payload.get("user_id") or payload.get("sub") or ""),
             email=payload.get("email"),
             email_verified=bool(payload.get("email_verified", False)),
-            role=None,  # resolved later from the sales document, never from the token
+            # Story 8.3: custom claims are minted server-side via the Admin
+            # SDK and travel inside this signature-verified token, so the
+            # role claim is safe for coarse role gating once the signature,
+            # issuer and audience checks above have passed. PG remains the
+            # source of truth for the per-user sales mapping (sales_id /
+            # is_active), which is resolved downstream of the verifier.
+            role=payload.get("role"),
             auth_provider=firebase_claims.get("sign_in_provider"),
             token_issued_at=payload.get("iat"),
             token_expires_at=payload.get("exp"),
