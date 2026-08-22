@@ -113,6 +113,11 @@ CREATE TABLE IF NOT EXISTS project_config (
   ten_phap_ly     TEXT NOT NULL,
   ten_thuong_mai  TEXT NOT NULL,
   vi_tri          TEXT NOT NULL,
+  -- Story 10.3: detailed Vietnamese address served to the FE project picker
+  -- (falls back to vi_tri for rows seeded before the location migration).
+  location        TEXT,
+  -- HOT-project flag: marks Camellia so the picker leads with it (is_hot DESC).
+  is_hot          BOOLEAN NOT NULL DEFAULT false,
   geo_center_lat  DOUBLE PRECISION,
   geo_center_lng  DOUBLE PRECISION,
   hotline         TEXT,
