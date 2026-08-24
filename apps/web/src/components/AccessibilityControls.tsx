@@ -53,7 +53,7 @@ function syncClass(level: number): void {
   root.classList.add(LEVELS[level].key);
 }
 
-export function AccessibilityControls() {
+export function AccessibilityControls({ dark = false }: { dark?: boolean }) {
   const level = useSyncExternalStore(subscribe, getSnapshot, () => 0);
 
   // Apply the scale class to <html> (DOM mutation only, no setState).
@@ -81,9 +81,13 @@ export function AccessibilityControls() {
             minWidth: 40,
             height: 40,
             borderRadius: RADIUS.small,
-            border: level === i ? "2px solid " + C.primary : "1px solid " + C.borderStrong,
-            background: level === i ? C.primarySoft : C.surface,
-            color: C.text,
+            border: level === i
+              ? "2px solid " + (dark ? C.gold : C.primary)
+              : "1px solid " + (dark ? "rgba(245,241,232,0.30)" : C.borderStrong),
+            background: level === i
+              ? dark ? "rgba(201,162,75,0.18)" : C.primarySoft
+              : dark ? "rgba(255,255,255,0.06)" : C.surface,
+            color: dark ? C.onDark : C.text,
             fontSize: l.size === 17 ? 14 : l.size === 19 ? 15 : 16,
             fontWeight: 600,
             cursor: "pointer",

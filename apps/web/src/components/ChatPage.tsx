@@ -6,10 +6,23 @@ import "@ant-design/v5-patch-for-react-19";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App as AntApp, Button, Typography } from "antd";
-import { EnvironmentOutlined, SafetyCertificateOutlined, SwapOutlined } from "@ant-design/icons";
-import { ThemeProvider, Disclaimer } from "@rag-ragre/ui";
+import {
+  CrownOutlined,
+  EnvironmentOutlined,
+  LockFilled,
+  SafetyCertificateOutlined,
+  SwapOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
+import { Disclaimer } from "@rag-ragre/ui";
 import type { NearbyPlace } from "@rag-ragre/contracts";
-import { fetchGreetingMedia, QueryRequestError, streamQuery } from "@/lib/api";
+import { ProThemeProvider } from "@/components/ProThemeProvider";
+import {
+  QueryRequestError,
+  QueryStreamError,
+  fetchGreetingMedia,
+  streamQuery,
+} from "@/lib/api";
 import { ASK_EVENT } from "@/lib/constants";
 import type { ChatMessage } from "@/components/MessageBubble";
 import { AccessibilityControls } from "@/components/AccessibilityControls";
@@ -20,7 +33,21 @@ import { MapPanel, DEFAULT_PROJECT } from "./MapPanel";
 import { LeadForm, LEAD_ID_STORAGE_KEY } from "./LeadForm";
 import { STATIC_PLACES } from "@/lib/places";
 import { C, RADIUS, SHADOW } from "@/lib/tokens";
-import { getDeviceId, getSessionId, getStoredProjectKey, storeProjectKey } from "@/features/chat/identity";
+import {
+  getDeviceId,
+  getAnonToken,
+  getSessionId,
+  getStoredProjectKey,
+  persistAnonToken,
+  storeProjectKey,
+} from "@/features/chat/identity";
+import {
+  QUOTA_EXCEEDED_CODE,
+  applyLeadBonus,
+  normalizeQuota,
+  parseQuotaErrorEnvelope,
+} from "@/features/chat/quota";
+import type { QuotaExceededInfo, QuotaState } from "@/features/chat/quota";
 import {
   loadActiveProjects,
   FALLBACK_ACTIVE_PROJECTS,
@@ -34,6 +61,15 @@ import { greetingForProject } from "@/features/chat/greeting";
 
 const HELLO_SHOWN_KEY = "ragre.hello_shown";
 const MAX_TURNS = 4;
+
+// Secure wave §5.6: mint endpoint for the signed anonymous identity. Called
+// lazily on the first chat interaction; /query also self-heals by returning
+// a fresh token, so a failure here never blocks chatting.
+const ANON_TOKEN_ENDPOINT = "/api/anon/token";
+const ANON_TOKEN_FETCH_TIMEOUT_MS = 3000;
+// Fallback wall copy when the 429/error frame arrives without a message.
+const QUOTA_WALL_FALLBACK_MESSAGE =
+  "Anh/chị đã dùng hết lượt tư vấn miễn phí. Để lại số điện thoại để nhận thêm lượt tư vấn miễn phí nhé!";
 
 // Read the map mode from the URL query string so a refresh (F5) restores the
 // list view without remounting the chat (state is local). The rail tab no
@@ -113,11 +149,11 @@ function startFakeGreetingStream(
 /** Main chat layout: single page with chat and evidence rail side by side. */
 export function ChatPage() {
   return (
-    <ThemeProvider>
+    <ProThemeProvider>
       <AntApp>
         <ChatCanvas />
       </AntApp>
-    </ThemeProvider>
+    </ProThemeProvider>
   );
 }
 
@@ -140,6 +176,15 @@ function ChatCanvas() {
   const [leadCtaHint, setLeadCtaHint] = useState<string | null>(null);
   const [leadFormOpen, setLeadFormOpen] = useState(false);
   const [leadDone, setLeadDone] = useState(false);
+  // Secure wave (US-1/US-4): server-authoritative quota snapshot for the
+  // header badge; quotaExhausted is the hard wall (composer disabled + forced
+  // LeadForm) raised by a 429 / SSE ANONYMOUS_QUOTA_EXCEEDED and lifted only
+  // by a lead submission that actually grants bonus turns.
+  const [quota, setQuota] = useState<QuotaState | null>(null);
+  const [quotaExhausted, setQuotaExhausted] = useState(false);
+  // Mirror of the persisted anon token so LeadForm can bind the lead (and its
+  // one-time bonus) to the same identity that chatted.
+  const [anonToken, setAnonToken] = useState<string | null>(null);
   // Story 10.1-FE: device_id is the anonymous cross-visit identity, minted once
   // and kept in localStorage so a returning caller is recognized by the backend.
   // Held in state (not a ref) because the LeadForm reads it during render.
@@ -213,6 +258,7 @@ function ChatCanvas() {
     try {
       setDeviceId(getDeviceId(window.localStorage));
       sessionIdRef.current = getSessionId(window.sessionStorage);
+      setAnonToken(getAnonToken(window.localStorage));
     } catch {
       // Storage unavailable (private mode): mint ephemeral ids so the chat
       // still works; persistence is a progressive enhancement here.
@@ -336,20 +382,68 @@ function ChatCanvas() {
     };
   }, []);
 
-  // Opens the ProjectPicker with the best available active-project list: the
-  // one carried by the 422 body when present, otherwise the endpoint/fallback.
-  const openProjectPicker = useCallback(async (errorBodyProjects?: unknown) => {
-    const projects = await loadActiveProjects(
-      errorBodyProjects !== undefined ? { projects: errorBodyProjects } : undefined
-    );
-    setActiveProjects(projects);
+  // Opens the ProjectPicker INSTANTLY (optimistic UI): the modal mounts on the
+  // already-resolved list (mount effect result or static fallback, never empty)
+  // while a background refresh keeps the rows current. The GET /api/projects
+  // round trip takes seconds on a cold backend, so awaiting it here used to
+  // delay the popup itself. The 422 body, when supplied, stays authoritative.
+  const openProjectPicker = useCallback((errorBodyProjects?: unknown) => {
     setProjectPickerOpen(true);
+    if (errorBodyProjects !== undefined) {
+      void loadActiveProjects({ projects: errorBodyProjects }).then(setActiveProjects);
+      return;
+    }
+    void loadActiveProjects()
+      .then(setActiveProjects)
+      .catch(() => undefined);
   }, []);
+
+  // Self-heal write path (spec §5.6): every server-returned anon token
+  // (JSON response, SSE ack/done, mint endpoint) replaces the stored one.
+  const rememberAnonToken = useCallback((token: unknown): void => {
+    try {
+      if (persistAnonToken(window.localStorage, token)) {
+        setAnonToken(token as string);
+        return;
+      }
+    } catch {
+      // Storage unavailable (private mode): fall through to memory-only.
+    }
+    if (typeof token === "string" && token.length > 0) setAnonToken(token);
+  }, []);
+
+  // Returns the durable anon identity for the next /query, lazily minting via
+  // GET /api/anon/token on the very first interaction (§5.6). Any failure is
+  // non-fatal: /query mints-and-returns a token anyway, so the next turn is
+  // already keyed correctly.
+  const ensureAnonToken = useCallback(async (): Promise<string | undefined> => {
+    let stored: string | null = null;
+    try {
+      stored = getAnonToken(window.localStorage);
+    } catch {
+      stored = null;
+    }
+    if (stored) return stored;
+    try {
+      const response = await fetch(ANON_TOKEN_ENDPOINT, {
+        signal: AbortSignal.timeout(ANON_TOKEN_FETCH_TIMEOUT_MS),
+      });
+      if (!response.ok) return undefined;
+      const body = (await response.json()) as { anon_token?: unknown };
+      if (typeof body.anon_token !== "string" || body.anon_token.length === 0) return undefined;
+      rememberAnonToken(body.anon_token);
+      return body.anon_token;
+    } catch {
+      return undefined;
+    }
+  }, [rememberAnonToken]);
 
   const handleSend = useCallback(
     (text: string) => {
       const query = text.trim();
-      if (!query || streaming) return;
+      // A walled identity (US-4) cannot send: every attempt would be rejected
+      // server-side anyway; the LeadForm is the only way forward.
+      if (!query || streaming || quotaExhausted) return;
 
       const userMsg: ChatMessage = { id: newId(), role: "user", content: query };
       const assistantId = newId();
@@ -390,18 +484,25 @@ function ChatCanvas() {
         }
         flushTimerRef.current = null;
       };
-      void streamQuery(
+      // The stream call is deferred behind the lazy anon-token mint (§5.6) so
+      // the very first query of a browser already carries the signed identity.
+      const runStream = (anonTokenForQuery: string | undefined) =>
+        streamQuery(
         {
           query,
           session_id: sessionIdRef.current,
           device_id: deviceId,
           project_key: projectKey,
           history,
+          anon_token: anonTokenForQuery,
           signal: streamAbort.signal,
         },
         {
-          onAck: () => {
+          onAck: (ackMeta) => {
             patchMessage(assistantId, { acknowledged: true });
+            const snapshot = normalizeQuota(ackMeta?.quota);
+            if (snapshot) setQuota(snapshot);
+            rememberAnonToken(ackMeta?.anon_token);
           },
           onRouting: (payload) => {
             patchMessage(assistantId, { progressStep: 0 });
@@ -437,19 +538,48 @@ function ChatCanvas() {
               window.clearTimeout(flushTimerRef.current);
               flushTokens();
             }
+            // §5.3/§8: done.answer is the authoritative sanitized answer —
+            // it replaces the streamed body so no partial marker survives.
             patchMessage(assistantId, {
               streaming: false,
+              ...(typeof meta.answer === "string" && meta.answer.length > 0
+                ? { content: meta.answer }
+                : {}),
               confidence: meta.confidence,
               requires_review: meta.requires_review,
               traceId: meta.trace_id,
               latencyMs: meta.latency_ms,
             });
+            const snapshot = normalizeQuota(meta.quota);
+            if (snapshot) setQuota(snapshot);
+            rememberAnonToken(meta.anon_token);
             if (isLatestStream()) setStreaming(false);
           },
           onError: (err) => {
             if (flushTimerRef.current !== null) {
               window.clearTimeout(flushTimerRef.current);
               flushTokens();
+            }
+            // Quota wall (US-4): a 429 JSON body or an SSE error frame with
+            // code ANONYMOUS_QUOTA_EXCEEDED ends the free allowance. Surface
+            // the server's friendly copy, raise the hard gate and force-open
+            // the LeadForm — no retry toast, no input restore.
+            const envelope: QuotaExceededInfo | null =
+              err instanceof QueryRequestError
+                ? parseQuotaErrorEnvelope(err.body)
+                : err instanceof QueryStreamError
+                  ? parseQuotaErrorEnvelope(err.data)
+                  : null;
+            if (envelope !== null && envelope.code === QUOTA_EXCEEDED_CODE) {
+              patchMessage(assistantId, {
+                streaming: false,
+                content: envelope.message || QUOTA_WALL_FALLBACK_MESSAGE,
+              });
+              if (envelope.quota) setQuota(envelope.quota);
+              setQuotaExhausted(true);
+              setLeadFormOpen(true);
+              if (isLatestStream()) setStreaming(false);
+              return;
             }
             if (err instanceof QueryRequestError && err.code === "PROJECT_SCOPE") {
               // More than one active project and none chosen: open the picker
@@ -473,8 +603,31 @@ function ChatCanvas() {
           },
         }
       );
+
+      // A superseded stream slot (project switched while minting) must not
+      // start consuming (review M5 discipline applied to the mint await).
+      void (async () => {
+        const anonTokenForQuery = await ensureAnonToken();
+        if (streamAbortRef.current !== streamAbort) return;
+        void runStream(anonTokenForQuery);
+      })();
     },
-    [messages, streaming, message, patchMessage, setMapModeRouted, projectKey, openProjectPicker, deviceId]
+    [messages, streaming, message, patchMessage, setMapModeRouted, projectKey, openProjectPicker, deviceId, quotaExhausted, ensureAnonToken]
+  );
+
+  // Lead success payoff (US-1/US-4): lift the wall and credit the bonus
+  // optimistically — §5.5 only carries quota_bonus_granted, so cap/remaining
+  // are bumped locally until the next server ack/done overwrites them.
+  const handleLeadSuccess = useCallback(
+    (_leadId: number, quotaBonusGranted: number) => {
+      setLeadDone(true);
+      if (quotaBonusGranted > 0) {
+        setQuota((prev) => applyLeadBonus(prev, quotaBonusGranted));
+        setQuotaExhausted(false);
+        message.success(`+${quotaBonusGranted} lượt tư vấn miễn phí`);
+      }
+    },
+    [message]
   );
 
   // Applies a picked project: persist it, reset the conversation context so the
@@ -541,6 +694,19 @@ function ChatCanvas() {
     ? `Chuyên viên tư vấn dự án ${projectDisplayName(currentProject)}`
     : "Chuyên viên tư vấn bất động sản";
 
+  // Quota badge copy (§5.1 transparency): anonymous visitors see their live
+  // remaining allowance; authenticated sales/admin see the unlimited marker.
+  const quotaBadgeLabel =
+    quota === null
+      ? ""
+      : quota.isAuthenticated
+        ? "Không giới hạn"
+        : quota.remainingTurns === null
+          ? "Tư vấn miễn phí"
+          : quota.remainingTurns > 0
+            ? `Còn ${quota.remainingTurns} lượt`
+            : "Hết lượt miễn phí";
+
   // The map camera follows the active project: two active projects sit
   // kilometres apart, so the map must fly to the chosen project's coordinates
   // instead of always rendering the default project.
@@ -569,52 +735,74 @@ function ChatCanvas() {
       }}
     >
       <header
+        className="app-header"
         style={{
-          background: C.surface,
-          borderBottom: "1px solid " + C.border,
-          padding: "10px 24px",
+          padding: "12px 24px",
           display: "flex",
+          flexWrap: "wrap",
           alignItems: "center",
-          gap: 12,
+          gap: "8px 12px",
           flexShrink: 0,
-          boxShadow: SHADOW.card,
+          boxShadow: SHADOW.pop,
           zIndex: 1,
         }}
       >
         <div
+          className="hero-badge"
           style={{
-            width: 36,
-            height: 36,
+            width: 42,
+            height: 42,
             borderRadius: RADIUS.small,
-            background: C.primary,
-            color: "#fff",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontSize: 18,
+            fontSize: 20,
+            flexShrink: 0,
           }}
         >
           <SafetyCertificateOutlined />
         </div>
-        <div style={{ minWidth: 0 }}>
-          <Typography.Title level={4} style={{ margin: 0, color: C.text, fontSize: 17, lineHeight: "24px" }}>
+        <div style={{ minWidth: 0, overflow: "hidden", flex: "1 1 160px" }}>
+          <Typography.Title
+            level={4}
+            style={{
+              margin: 0,
+              color: C.onDark,
+              fontSize: 17,
+              lineHeight: "24px",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
             {headerTitle}
           </Typography.Title>
           <Typography.Text
             style={{
               fontSize: 12,
-              color: C.textMuted,
+              color: C.onDarkMuted,
               display: "flex",
               alignItems: "center",
               gap: 6,
-              whiteSpace: "nowrap",
+              minWidth: 0,
+              overflow: "hidden",
             }}
           >
-            {headerSubtitle}
             <span
               style={{
-                background: C.successSoft,
-                color: C.success,
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {headerSubtitle}
+            </span>
+            <span
+              style={{
+                flexShrink: 0,
+                background: "rgba(201, 162, 75, 0.18)",
+                color: C.gold,
                 borderRadius: RADIUS.pill,
                 padding: "1px 8px",
                 fontSize: 11,
@@ -625,20 +813,63 @@ function ChatCanvas() {
             </span>
           </Typography.Text>
         </div>
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
+        <div
+          style={{
+            marginLeft: "auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+            justifyContent: "flex-end",
+            minWidth: 0,
+            maxWidth: "100%",
+          }}
+        >
+          {quota !== null && (
+            <div
+              role="status"
+              aria-label={`Lượt tư vấn: ${quotaBadgeLabel}`}
+              className="header-chip"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                borderRadius: RADIUS.pill,
+                padding: "6px 12px",
+                flexShrink: 0,
+              }}
+            >
+              {quota.isAuthenticated ? (
+                <CrownOutlined style={{ color: C.gold, fontSize: 14, flexShrink: 0 }} aria-hidden="true" />
+              ) : (
+                <ThunderboltOutlined style={{ color: C.gold, fontSize: 14, flexShrink: 0 }} aria-hidden="true" />
+              )}
+              <span
+                style={{
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: C.onDark,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {quotaBadgeLabel}
+              </span>
+            </div>
+          )}
           <div
+            className="header-chip"
             style={{
               display: "flex",
               alignItems: "center",
               gap: 6,
               fontSize: 13,
-              color: C.text,
-              background: C.surfaceAlt,
+              color: C.onDark,
               borderRadius: RADIUS.pill,
               padding: "6px 14px",
+              flexShrink: 0,
             }}
           >
-            <span style={{ color: C.primary, fontSize: 14 }}>📞</span>
+            <span style={{ color: C.gold, fontSize: 14 }}>📞</span>
             <span style={{ fontWeight: 600, letterSpacing: 0.5 }}>09x xxx xxxx</span>
           </div>
           <div
@@ -648,24 +879,23 @@ function ChatCanvas() {
                 ? `Dự án đang tư vấn: ${projectDisplayName(currentProject)}`
                 : "Chưa chọn dự án"
             }
+            className="header-chip header-chip--accent"
             style={{
               display: "flex",
               alignItems: "center",
               gap: 8,
               maxWidth: 320,
               minWidth: 0,
-              background: C.primarySoft,
-              border: `1px solid ${C.primaryBorder}`,
               borderRadius: RADIUS.pill,
               padding: "6px 14px",
             }}
           >
-            <EnvironmentOutlined style={{ color: C.primary, fontSize: 14, flexShrink: 0 }} />
+            <EnvironmentOutlined style={{ color: C.gold, fontSize: 14, flexShrink: 0 }} />
             <span
               style={{
                 fontSize: 14,
                 fontWeight: 700,
-                color: C.text,
+                color: C.onDark,
                 whiteSpace: "nowrap",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
@@ -675,9 +905,8 @@ function ChatCanvas() {
             </span>
             {currentProject?.is_hot ? (
               <span
+                className="chip-gold"
                 style={{
-                  background: C.warning,
-                  color: "#fff",
                   borderRadius: RADIUS.pill,
                   padding: "1px 8px",
                   fontSize: 11,
@@ -698,12 +927,14 @@ function ChatCanvas() {
               fontSize: 15,
               fontWeight: 600,
               borderRadius: RADIUS.btn,
-              color: C.primary,
+              borderColor: "rgba(201, 162, 75, 0.55)",
+              color: C.gold,
+              background: "rgba(255,255,255,0.06)",
             }}
           >
             Đổi dự án
           </Button>
-          <AccessibilityControls />
+          <AccessibilityControls dark />
         </div>
       </header>
 
@@ -738,15 +969,44 @@ function ChatCanvas() {
               value={input}
               onChange={setInput}
               onSend={() => handleSend(input)}
-              disabled={false}
+              disabled={quotaExhausted}
               streaming={streaming}
             />
+            {/* US-4 hard wall: friendly copy under the frozen composer so the
+                gate reads as an offer (free turns for a phone number), not a
+                dead end. */}
+            {quotaExhausted && (
+              <div
+                role="alert"
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 10,
+                  maxWidth: 860,
+                  margin: "10px auto 0",
+                  padding: "10px 14px",
+                  background: C.goldSoft,
+                  border: `1px solid ${C.goldBorder}`,
+                  borderRadius: RADIUS.small,
+                }}
+              >
+                <LockFilled
+                  style={{ color: C.goldHover, fontSize: 16, marginTop: 3, flexShrink: 0 }}
+                  aria-hidden="true"
+                />
+                <span style={{ fontSize: 14, lineHeight: "22px", color: C.text }}>
+                  Anh/chị đã dùng hết lượt tư vấn miễn phí. Để lại số điện thoại trong form trên để nhận
+                  thêm lượt miễn phí — chuyên viên sẽ gọi lại trong khoảng 5 phút.
+                </span>
+              </div>
+            )}
             {/* §5.1 entry point (a). Entry point (b), a CTA inside the
                 AffordabilityCard, is out of scope until that card exists. */}
             {leadCtaHint !== null && !leadDone && (
               <button
                 type="button"
                 onClick={() => setLeadFormOpen(true)}
+                className="btn-terracotta"
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -757,14 +1017,13 @@ function ChatCanvas() {
                   height: 48,
                   margin: "10px auto 0",
                   padding: "0 16px",
-                  border: `1px solid ${C.primaryBorder}`,
+                  border: "none",
                   borderRadius: RADIUS.pill,
-                  background: C.primarySoft,
-                  color: C.primary,
                   fontSize: 16,
                   fontWeight: 600,
                   fontFamily: "inherit",
                   cursor: "pointer",
+                  transition: "box-shadow 0.18s ease, transform 0.18s ease",
                 }}
               >
                 <span aria-hidden="true">📥</span>
@@ -784,8 +1043,13 @@ function ChatCanvas() {
         projectKey={projectKey}
         projectName={currentProject ? projectDisplayName(currentProject) : undefined}
         notePrefill={buildLeadNote(messages)}
-        onClose={() => setLeadFormOpen(false)}
-        onSuccess={() => setLeadDone(true)}
+        anonToken={anonToken ?? undefined}
+        onClose={() => {
+          // US-4: the form holds until a lead is actually submitted — ESC,
+          // overlay and close button are no-ops while the identity is walled.
+          if (!quotaExhausted) setLeadFormOpen(false);
+        }}
+        onSuccess={handleLeadSuccess}
       />
       <ProjectPicker
         open={projectPickerOpen}

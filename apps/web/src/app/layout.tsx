@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Be_Vietnam_Pro } from "next/font/google";
 import { AntdRegistry } from "@ant-design/nextjs-registry";
+import { ProThemeProvider } from "@/components/ProThemeProvider";
 import "./globals.css";
 
 const beVietnam = Be_Vietnam_Pro({
@@ -17,14 +18,16 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#1F46A8",
+  themeColor: "#0E2A47",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="vi" className={`${beVietnam.variable} h-full antialiased`}>
-      <body className="min-h-full" style={{ background: "#F7F8FA" }}>
-        <AntdRegistry>{children}</AntdRegistry>
+      <body className="min-h-full" style={{ background: "#FAF7F2" }}>
+        <AntdRegistry>
+          <ProThemeProvider>{children}</ProThemeProvider>
+        </AntdRegistry>
       </body>
     </html>
   );

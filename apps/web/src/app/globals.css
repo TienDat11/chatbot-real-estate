@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f7f8fa;
+  --background: #faf7f2;
   --foreground: #1a2233;
 }
 
@@ -23,10 +23,66 @@ body {
   font-family: var(--font-sans);
 }
 
+/* ======================================================================
+ * Premium proptech design tokens (deep navy + charcoal, terracotta/gold)
+ * ==================================================================== */
+:root {
+  --c-primary: #0e2a47;
+  --c-primary-hover: #0a2139;
+  --c-primary-soft: #e8eef7;
+  --c-primary-border: #c9d8ec;
+  --c-gold: #c9a24b;
+  --c-gold-hover: #b78f3d;
+  --c-gold-soft: #f7f0df;
+  --c-gold-border: #e4d3a8;
+  --c-terracotta: #a8502e;
+  --c-terracotta-hover: #8f4527;
+  --c-terracotta-soft: #f9ece4;
+  --c-terracotta-border: #eacdbe;
+  --c-charcoal: #1b2737;
+  --c-charcoal-deep: #141d2b;
+  --c-charcoal-soft: #263447;
+  --c-bg: #faf7f2;
+  --c-surface: #ffffff;
+  --c-surface-alt: #f3efe7;
+  --c-border: #e9e2d6;
+  --c-border-strong: #d8cfbf;
+  --c-text: #1a2233;
+  --c-text-muted: #5b6478;
+  --c-text-faint: #8a93a6;
+  --c-text-ghost: #abb3c3;
+  --c-on-dark: #f5f1e8;
+  --c-on-dark-muted: #c2ccdb;
+  --c-success: #1e7f4f;
+  --c-warning: #c96f4a;
+  --c-danger: #c0392b;
+  --c-danger-soft: #fbeae7;
+  --c-info-bg: #e8eef7;
+  --shadow-1: 0 1px 4px rgba(20, 29, 43, 0.06);
+  --shadow-2: 0 12px 32px rgba(20, 29, 43, 0.16);
+  --shadow-gold: 0 2px 12px rgba(201, 162, 75, 0.35);
+  --fs-body: 17px;
+  --fs-body-line: 28px;
+  --radius-bubble: 18px;
+  --radius-card: 18px;
+  --radius-btn: 12px;
+}
+
+/* Global font scale — applied via AccessibilityControls toggling a root class */
+html.font-scale-1 { --fs-body: 17px; --fs-body-line: 28px; }
+html.font-scale-2 { --fs-body: 19px; --fs-body-line: 30px; }
+html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
+
+/* Focus ring (accessibility): visible everywhere, never outline:none */
+:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
 /* Suggestion buttons (empty state) — hover via CSS, not inline JS */
 .suggestion-grid button:hover {
-  border-color: #1f46a8 !important;
-  box-shadow: 0 2px 8px rgba(31, 70, 168, 0.14);
+  border-color: var(--c-gold) !important;
+  box-shadow: 0 2px 12px rgba(201, 162, 75, 0.35);
   transform: translateY(-1px);
 }
 .suggestion-grid button:active {
@@ -38,7 +94,7 @@ body {
   width: 6px;
 }
 .chat-scroll::-webkit-scrollbar-thumb {
-  background: #d5dbe6;
+  background: #d8cfbf;
   border-radius: 999px;
 }
 .chat-scroll::-webkit-scrollbar-track {
@@ -48,7 +104,7 @@ body {
 /* Typing caret shown while the assistant streams */
 .typing-caret::after {
   content: "▍";
-  color: #1f46a8;
+  color: var(--c-gold);
   animation: caret-blink 1s steps(1) infinite;
   margin-left: 1px;
 }
@@ -87,40 +143,6 @@ body {
     max-width: 50%;
   }
 }
-/* ======================================================================
- * Camellia Senior-First design tokens (Story 5.5)
- * ==================================================================== */
-:root {
-  --c-primary: #1F46A8;
-  --c-primary-hover: #17407F;
-  --c-bg: #F7F8FA;
-  --c-surface: #FFFFFF;
-  --c-border: #E9ECF2;
-  --c-text: #1A2233;
-  --c-text-muted: #5B6478;
-  --c-success: #16A34A;
-  --c-warning: #D97706;
-  --c-danger: #DC2626;
-  --c-info-bg: #EAF2FF;
-  --shadow-1: 0 1px 4px rgba(26,34,51,0.06);
-  --shadow-2: 0 4px 16px rgba(26,34,51,0.10);
-  --fs-body: 17px;
-  --fs-body-line: 28px;
-  --radius-bubble: 16px;
-  --radius-card: 16px;
-  --radius-btn: 12px;
-}
-
-/* Global font scale — applied via AccessibilityControls toggling a root class */
-html.font-scale-1 { --fs-body: 17px; --fs-body-line: 28px; }
-html.font-scale-2 { --fs-body: 19px; --fs-body-line: 30px; }
-html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
-
-/* Focus ring (accessibility): visible everywhere, never outline:none */
-:focus-visible {
-  outline: 2px solid var(--c-primary);
-  outline-offset: 2px;
-}
 
 /* AckChip pulsing dots — reduced-motion collapses to static */
 .ack-dots span {
@@ -138,8 +160,8 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
   display: inline-block;
   width: 12px;
   height: 12px;
-  border: 2px solid #D7E4FF;
-  border-top-color: #1F46A8;
+  border: 2px solid #d7e4ff;
+  border-top-color: var(--c-primary);
   border-radius: 50%;
   animation: step-spin 0.8s linear infinite;
 }
@@ -177,4 +199,144 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
 /* Streaming placeholder keep layout stable (no CLS) */
 .streaming-placeholder {
   min-height: 88px;
+}
+
+/* ======================================================================
+ * Premium proptech component layer
+ * ==================================================================== */
+
+/* App header — deep navy→charcoal gradient with a gold hairline. */
+.app-header {
+  background: linear-gradient(120deg, var(--c-primary) 0%, var(--c-charcoal-deep) 100%);
+  border-bottom: 2px solid var(--c-gold);
+}
+.app-header .ant-typography {
+  color: var(--c-on-dark);
+}
+
+/* Glass chips on the dark header (phone, project status) */
+.header-chip {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(245, 241, 232, 0.22);
+  backdrop-filter: blur(6px);
+}
+.header-chip--accent {
+  background: rgba(201, 162, 75, 0.14);
+  border: 1px solid rgba(201, 162, 75, 0.45);
+}
+
+/* Narrow screens: let the project chip take a full row with the phone chip so
+   the header stays compact. The chip's flex-basis keeps the "Đổi dự án" button
+   on its own line instead of squeezing the project name. Desktop keeps the
+   content-sized chip (inline max-width below). */
+@media (max-width: 640px) {
+  .header-chip--accent {
+    flex: 1 1 160px;
+    min-width: 0;
+    max-width: none;
+  }
+}
+
+/* Premium empty-state hero on the chat home. */
+.hero-panel {
+  background:
+    radial-gradient(1000px 420px at 20% -10%, rgba(201, 162, 75, 0.16), transparent 60%),
+    radial-gradient(900px 380px at 90% 10%, rgba(168, 80, 46, 0.12), transparent 55%),
+    linear-gradient(160deg, var(--c-surface) 0%, var(--c-surface-alt) 100%);
+  border: 1px solid var(--c-border);
+  box-shadow: var(--shadow-1);
+}
+.hero-badge {
+  background: linear-gradient(135deg, var(--c-primary) 0%, var(--c-charcoal) 100%);
+  color: var(--c-gold);
+  box-shadow: var(--shadow-gold);
+}
+
+/* Eyebrow label (letter-spaced caps) */
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+/* Premium project card (picker + admin catalogue). */
+.project-card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-1);
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 0.18s ease;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .project-card:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-2);
+    border-color: var(--c-gold-border);
+  }
+}
+.project-card:focus-within {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
+/* Project card media area — graceful gradient fallback while the real CDN
+   image loads or when it fails; the <img> sits on top and covers it. */
+.media-gradient {
+  background:
+    radial-gradient(120% 90% at 15% 0%, rgba(201, 162, 75, 0.35), transparent 55%),
+    linear-gradient(135deg, var(--c-primary) 0%, var(--c-charcoal-soft) 100%);
+}
+.media-gradient--warm {
+  background:
+    radial-gradient(120% 90% at 85% 0%, rgba(168, 80, 46, 0.30), transparent 55%),
+    linear-gradient(135deg, var(--c-charcoal-deep) 0%, var(--c-primary) 100%);
+}
+
+/* Restrained entrance for cards (only when motion is allowed) */
+@media (prefers-reduced-motion: no-preference) {
+  .card-in {
+    animation: card-in 260ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes card-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+/* Terracotta CTA (lead capture, hot badges) */
+.btn-terracotta {
+  background: linear-gradient(135deg, var(--c-terracotta) 0%, var(--c-terracotta-hover) 100%);
+  color: #fff;
+}
+.btn-terracotta:hover {
+  background: linear-gradient(135deg, var(--c-terracotta-hover) 0%, #7c3a1f 100%);
+  box-shadow: 0 4px 14px rgba(168, 80, 46, 0.4);
+}
+
+/* Gold premium chip — navy text on gold keeps WCAG AA (~6:1) while
+   preserving the premium gold identity. */
+.chip-gold {
+  background: linear-gradient(135deg, var(--c-gold) 0%, var(--c-gold-hover) 100%);
+  color: #0e2a47;
+}
+
+/* Chat composer container */
+.composer-shell {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-1);
+}
+.composer-shell:focus-within {
+  border-color: var(--c-gold-border);
+  box-shadow: 0 0 0 3px rgba(201, 162, 75, 0.18);
+}
+
+/* Dark admin shell */
+.admin-shell {
+  background: linear-gradient(120deg, var(--c-primary) 0%, var(--c-charcoal-deep) 100%);
+  border-bottom: 2px solid var(--c-gold);
 }

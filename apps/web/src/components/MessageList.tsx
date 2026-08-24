@@ -62,29 +62,34 @@ export function MessageList({ messages, streaming }: MessageListProps) {
         className="chat-scroll"
         style={{ flex: 1, overflowY: "auto", padding: "24px 16px" }}
       >
-        <div style={{ maxWidth: 600, margin: "56px auto 0", textAlign: "center" }}>
+        <div className="hero-panel" style={{ maxWidth: 640, margin: "32px auto 0", padding: "40px 32px 32px", textAlign: "center", borderRadius: RADIUS.card }}>
           <div
+            className="hero-badge"
             aria-hidden="true"
             style={{
-              width: 64,
-              height: 64,
-              margin: "0 auto 16px",
+              width: 72,
+              height: 72,
+              margin: "0 auto 18px",
               borderRadius: RADIUS.card,
-              background: C.primarySoft,
-              color: C.primary,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              fontSize: 30,
+              fontSize: 34,
             }}
           >
             <SafetyCertificateOutlined />
           </div>
-          <Typography.Title level={3} style={{ margin: 0, color: C.text, fontSize: 22, lineHeight: "30px" }}>
-            Tư vấn dự án The Camellia
+          <Typography.Text
+            className="eyebrow"
+            style={{ display: "block", color: C.terracotta, marginBottom: 8 }}
+          >
+            Tư vấn bất động sản
+          </Typography.Text>
+          <Typography.Title level={2} style={{ margin: 0, color: C.text, fontSize: 28, lineHeight: "38px", fontWeight: 700 }}>
+            Tra cứu dự án & pháp lý
           </Typography.Title>
-          <Typography.Paragraph style={{ color: C.textMuted, fontSize: 15, margin: "8px auto 24px", maxWidth: 420, lineHeight: "24px" }}>
-            Hỗ trợ tư vấn căn hộ view biển, view núi Sơn Trà, tiện ích nội khu và
+          <Typography.Paragraph style={{ color: C.textMuted, fontSize: 15, margin: "10px auto 28px", maxWidth: 460, lineHeight: "24px" }}>
+            Tư vấn căn hộ view biển, view núi Sơn Trà, tiện ích nội khu và
             tra cứu pháp lý, quy hoạch dự án kèm độ tin cậy.
           </Typography.Paragraph>
           <div className="suggestion-grid" style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, textAlign: "left" }}>
@@ -97,7 +102,7 @@ export function MessageList({ messages, streaming }: MessageListProps) {
                   background: C.surface,
                   border: "1px solid " + C.border,
                   borderRadius: RADIUS.input,
-                  padding: "11px 16px",
+                  padding: "12px 16px",
                   textAlign: "left",
                   fontSize: 14,
                   lineHeight: "22px",

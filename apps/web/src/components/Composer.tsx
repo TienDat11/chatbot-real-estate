@@ -6,7 +6,7 @@ import {
   COMPOSER_PLACEHOLDER_IDLE,
   COMPOSER_PLACEHOLDER_STREAMING,
 } from "@/lib/constants";
-import { C, RADIUS } from "@/lib/tokens";
+import { C } from "@/lib/tokens";
 
 interface ComposerProps {
   value: string;
@@ -32,12 +32,15 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
 
   return (
     <div
+      className="composer-shell"
       style={{
         maxWidth: 860,
         margin: "0 auto",
         display: "flex",
         gap: 10,
         alignItems: "flex-end",
+        padding: 6,
+        transition: "border-color 0.18s ease, box-shadow 0.18s ease",
       }}
     >
       <Input.TextArea
@@ -47,14 +50,14 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
         placeholder={streaming ? COMPOSER_PLACEHOLDER_STREAMING : COMPOSER_PLACEHOLDER_IDLE}
         autoSize={{ minRows: 1, maxRows: 5 }}
         disabled={disabled}
+        variant="borderless"
         style={{
-          borderRadius: RADIUS.input,
-          padding: "10px 14px",
+          padding: "10px 12px",
           fontSize: 15,
           lineHeight: "24px",
           resize: "none",
-          borderColor: C.borderStrong,
-          background: C.surface,
+          background: "transparent",
+          color: C.text,
         }}
         aria-label="Câu hỏi"
       />
@@ -64,7 +67,14 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
         onClick={onSend}
         disabled={!canSend}
         loading={streaming}
-        style={{ borderRadius: RADIUS.input, height: 42, minWidth: 92 }}
+        className="btn-terracotta"
+        style={{
+          borderRadius: 12,
+          height: 42,
+          minWidth: 92,
+          border: "none",
+          fontWeight: 600,
+        }}
       >
         Gửi
       </Button>
