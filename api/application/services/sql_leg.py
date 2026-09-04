@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import unicodedata
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any, AsyncIterator
+from typing import Any
 
 import asyncpg
 
-from api.infrastructure.config.config import settings
 from api import get_cfg
 from api.domain.entities.price_calc import (
     affordability_rows,
@@ -35,14 +36,31 @@ ALLOWED_SOURCES = ("facts", "v_unit_offers")
 
 ALLOWED_FIELDS: dict[str, tuple[str, ...]] = {
     "v_unit_offers": (
-        "subject_id", "policy_key", "price_vnd", "deposit_pct", "term_months",
-        "interest_rate_pct", "required_down_payment_vnd", "loan_amount_vnd",
-        "monthly_principal_vnd", "monthly_interest_estimate_vnd",
+        "subject_id",
+        "policy_key",
+        "price_vnd",
+        "deposit_pct",
+        "term_months",
+        "interest_rate_pct",
+        "required_down_payment_vnd",
+        "loan_amount_vnd",
+        "monthly_principal_vnd",
+        "monthly_interest_estimate_vnd",
     ),
     "facts": (
-        "price_vnd", "area_m2", "deposit_pct", "term_months", "interest_rate_pct",
-        "subject_key", "subject_type", "value_num", "value_text", "unit", "quality",
-        "policy_key", "campaign_key",
+        "price_vnd",
+        "area_m2",
+        "deposit_pct",
+        "term_months",
+        "interest_rate_pct",
+        "subject_key",
+        "subject_type",
+        "value_num",
+        "value_text",
+        "unit",
+        "quality",
+        "policy_key",
+        "campaign_key",
     ),
 }
 
@@ -51,12 +69,38 @@ SEMANTIC_FACT_FIELDS = {"price_vnd", "area_m2", "deposit_pct", "term_months", "i
 
 ALLOWED_OPS = ("=", "!=", "<", "<=", ">", ">=", "between", "in")
 ALLOWED_DIR = {"asc": "ASC", "desc": "DESC"}
-MIN_LIMIT, MAX_LIMIT, DEFAULT_LIMIT = 1, 20, 10
+# Structured catalogue/payment questions must not inherit the router's usual
+# top-k cap. 200 is bounded, parameter-free, and covers both seeded projects.
+MIN_LIMIT, MAX_LIMIT, DEFAULT_LIMIT = 1, 200, 10
+_EXHAUSTIVE_QUERY_TERMS = (
+    "tung loai",
+    "moi loai",
+    "cac loai",
+    "tat ca",
+    "toan bo",
+    "danh muc",
+    "phuong thuc thanh toan",
+    "phuong an thanh toan",
+    "payment method",
+    "unit catalog",
+)
+
+# Roles allowed for the transaction-local role GUC — checked fail-closed before
+# anything reaches the connection (Mimosa finding: latent injection surface).
+# All current callers rely on the default, so the set stays minimal by design.
+ALLOWED_RLS_ROLES = frozenset({"ro_query"})
 
 OFFER_COLUMNS = (
-    "subject_id", "policy_key", "price_vnd", "deposit_pct", "term_months",
-    "interest_rate_pct", "required_down_payment_vnd", "loan_amount_vnd",
-    "monthly_principal_vnd", "monthly_interest_estimate_vnd",
+    "subject_id",
+    "policy_key",
+    "price_vnd",
+    "deposit_pct",
+    "term_months",
+    "interest_rate_pct",
+    "required_down_payment_vnd",
+    "loan_amount_vnd",
+    "monthly_principal_vnd",
+    "monthly_interest_estimate_vnd",
 )
 
 
@@ -71,7 +115,7 @@ class SqlLegError(Exception):
 @dataclass
 class SqlLegResult:
     rows: list[dict] = field(default_factory=list)  # FACT_EVIDENCE blocks (fe-...)
-    meta: dict = field(default_factory=dict)        # {mode, source, sql, sql_query, row_count, error}
+    meta: dict = field(default_factory=dict)  # {mode, source, sql, sql_query, row_count, error}
     degraded: bool = False
 
 
@@ -94,7 +138,9 @@ async def get_ro_pool() -> asyncpg.Pool:
     global _ro_pool
     if _ro_pool is None or _ro_pool.is_closing():
         _ro_pool = await asyncpg.create_pool(
-            build_dsn(), min_size=1, max_size=int(get_cfg("postgres_max_connections", 5) or 5),
+            build_dsn(),
+            min_size=1,
+            max_size=int(get_cfg("postgres_max_connections", 5) or 5),
         )
     return _ro_pool
 
@@ -116,13 +162,23 @@ async def with_rls_identity(
 
     SET LOCAL ROLE, yield, COMMIT. Shares the SQL leg, hydrate, and post-filter paths.
     """
+    # Fail-closed before any pool/connection work: nothing outside the
+    # allowlist may reach the role GUC.
+    if role not in ALLOWED_RLS_ROLES:
+        raise SpecError(f"role không hợp lệ: {role!r} (cho phép {sorted(ALLOWED_RLS_ROLES)})")
     pool = pool or await get_ro_pool()
     conn: asyncpg.Connection = await pool.acquire()
     tr = conn.transaction()
     await tr.start()
     try:
-        await conn.execute(f"SET LOCAL statement_timeout = '{int(timeout_s * 1000)}ms'")
-        await conn.execute(f"SET LOCAL ROLE {role}")
+        # SET LOCAL has no bind-parameter form, so both settings go through
+        # set_config with is_local=true (transaction-scoped) and fully bound
+        # values; the role is additionally gated by the allowlist above.
+        await conn.execute(
+            "SELECT set_config('statement_timeout', $1, true)",
+            f"{int(timeout_s * 1000)}ms",
+        )
+        await conn.execute("SELECT set_config('role', $1, true)", role)
         yield conn
         await tr.commit()
     except BaseException:
@@ -271,16 +327,18 @@ def build_sql(
         # doc (defense-in-depth; RLS FORCE still guards if ever forgotten).
         sql = (
             "SELECT f.id AS fact_id, fs.subject_key, fs.subject_type, fs.display_name, "
-            "f.fact_key, f.policy_key, f.campaign_key, f.value_num, f.value_text, f.unit, f.quality, "
+            "f.fact_key, f.policy_key, f.campaign_key, f.value_num, f.value_text, f.unit, f.quality, "  # noqa: E501
             "f.range_min, f.range_max, f.effective_from, f.effective_to, "
             "f.source_doc_id, f.source_chunk_id, f.trust_level "
             "FROM facts f JOIN fact_subjects fs ON fs.id = f.subject_id"
         )
-        where = [f"f.effective_from <= ${_next(params, as_of)}",
-                 f"(f.effective_to IS NULL OR f.effective_to > ${_next(params, as_of)})",
-                 f"EXISTS (SELECT 1 FROM documents d WHERE d.doc_id = f.source_doc_id "
-                 f"AND d.status = 'published' AND d.effective_from <= ${_next(params, as_of)} "
-                 f"AND (d.effective_to IS NULL OR d.effective_to > ${_next(params, as_of)}))"]
+        where = [
+            f"f.effective_from <= ${_next(params, as_of)}",
+            f"(f.effective_to IS NULL OR f.effective_to > ${_next(params, as_of)})",
+            f"EXISTS (SELECT 1 FROM documents d WHERE d.doc_id = f.source_doc_id "
+            f"AND d.status = 'published' AND d.effective_from <= ${_next(params, as_of)} "
+            f"AND (d.effective_to IS NULL OR d.effective_to > ${_next(params, as_of)}))",
+        ]
         if project_key:
             # fact_subjects.project_key is the per-subject project tag; NULL-tagged
             # subjects are excluded so legacy data never leaks into a project answer.
@@ -306,6 +364,24 @@ def build_sql(
 def _next(params: list[Any], v: Any) -> int:
     params.append(v)
     return len(params)
+
+
+def _fold_query(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", (text or "").lower())
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def _is_exhaustive_query(query: str) -> bool:
+    folded = _fold_query(query)
+    return any(term in folded for term in _EXHAUSTIVE_QUERY_TERMS)
+
+
+def _effective_limit(spec: dict, query: str) -> int:
+    """Raise only exhaustive catalogue requests to the bounded full-catalog cap."""
+    requested = int(spec.get("limit") or DEFAULT_LIMIT)
+    if _is_exhaustive_query(query):
+        return MAX_LIMIT
+    return min(requested, MAX_LIMIT)
 
 
 # match_semantics — range/approx semantics (plan §4.4 A8); pure, unit-testable.
@@ -395,15 +471,19 @@ def _facts_note(row: dict) -> str:
 
 
 def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> list[dict]:
-    """Convert raw rows into FACT_EVIDENCE blocks (fe-001..) — the sole numeric source for generation."""
+    """Convert raw rows into FACT_EVIDENCE blocks (fe-001..) — the sole numeric source for generation."""  # noqa: E501
     fe: list[dict] = []
     for i, row in enumerate(rows, start=1):
         if source == "v_unit_offers":
-            fields = {k: _jsonable(row.get(k)) for k in OFFER_COLUMNS if k not in ("subject_id",) and row.get(k) is not None}
+            fields = {
+                k: _jsonable(row.get(k))
+                for k in OFFER_COLUMNS
+                if k not in ("subject_id",) and row.get(k) is not None
+            }
             note = (
                 "derived: required_down_payment_vnd = CEIL(giá × deposit_pct/100); "
-                "loan_amount_vnd = giá × (100 − deposit_pct)/100; monthly_principal_vnd = loan/term; "
-                "monthly_interest_estimate_vnd = ước tính dư nợ gốc ban đầu (không phải lịch trả nợ)"
+                "loan_amount_vnd = giá × (100 − deposit_pct)/100; monthly_principal_vnd = loan/term; "  # noqa: E501
+                "monthly_interest_estimate_vnd = ước tính dư nợ gốc ban đầu (không phải lịch trả nợ)"  # noqa: E501
             )
             entry = {
                 "fe_id": f"fe-{i:03d}",
@@ -431,8 +511,12 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
                 "note": _facts_note(row),
                 "quality": row.get("quality") or "exact",
                 "trust_level": row.get("trust_level") or "confirmed",
-                "range": {"min": _jsonable(row.get("range_min")), "max": _jsonable(row.get("range_max"))}
-                if row.get("quality") in ("range", "approx") else None,
+                "range": {
+                    "min": _jsonable(row.get("range_min")),
+                    "max": _jsonable(row.get("range_max")),
+                }
+                if row.get("quality") in ("range", "approx")
+                else None,
                 "effective_from": _jsonable(row.get("effective_from")),
                 "effective_to": _jsonable(row.get("effective_to")),
                 "source_doc_id": row.get("source_doc_id"),
@@ -445,9 +529,17 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
 
 # Affordability leg (story 3.2) — deterministic numbers from v_unit_estimates only.
 ESTIMATE_COLUMNS = (
-    "subject_key", "display_name", "project_key", "attrs", "policy_key",
-    "price_min_vnd", "price_max_vnd", "price_quality", "deposit_pct",
-    "term_months", "interest_rate_pct",
+    "subject_key",
+    "display_name",
+    "project_key",
+    "attrs",
+    "policy_key",
+    "price_min_vnd",
+    "price_max_vnd",
+    "price_quality",
+    "deposit_pct",
+    "term_months",
+    "interest_rate_pct",
 )
 
 
@@ -573,6 +665,13 @@ async def run_sql_leg(
     if spec is None:
         return SqlLegResult([], {"mode": "none", "error": "no spec"}, degraded=False)
 
+    # The router's default limit is intentionally small for ordinary answers,
+    # but exhaustive catalogue/payment questions need every valid row. Keep the
+    # override bounded and only activate it for explicit all-types wording.
+    effective_spec = dict(spec)
+    effective_spec["limit"] = _effective_limit(effective_spec, query)
+    spec = effective_spec
+
     if spec.get("structured_path") == "nl2sql":
         try:
             from api.domain.services.nl2sql_guard import run_nl2sql  # noqa: PLC0415
@@ -594,7 +693,11 @@ async def run_sql_leg(
     try:
         validate_spec(spec)
     except SpecError as exc:
-        return SqlLegResult([], {"mode": "spec", "error": f"spec invalid: {exc}", "degraded_reason": "spec_invalid"}, degraded=True)
+        return SqlLegResult(
+            [],
+            {"mode": "spec", "error": f"spec invalid: {exc}", "degraded_reason": "spec_invalid"},
+            degraded=True,
+        )
 
     try:
         sql, params = build_sql(spec, as_of, project_key)
@@ -612,7 +715,8 @@ async def run_sql_leg(
             ids = [r["subject_id"] for r in rows]
             async with with_rls_identity(timeout_s=1.5) as conn:
                 recs = await conn.fetch(
-                    "SELECT id, subject_key, display_name FROM fact_subjects WHERE id = ANY($1)", ids
+                    "SELECT id, subject_key, display_name FROM fact_subjects WHERE id = ANY($1)",
+                    ids,
                 )
             keymap = {r["id"]: (r["subject_key"], r["display_name"]) for r in recs}
             for r in rows:

@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  ANON_TOKEN_KEY,
   DEVICE_ID_KEY,
   PROJECT_KEY_STORAGE,
   SESSION_KEY,
+  SESSION_KEY_TRAINING,
+  getAnonToken,
   getDeviceId,
   getSessionId,
+  getSessionIdForScope,
   getStoredProjectKey,
+  persistAnonToken,
+  sessionKeyForScope,
   storeProjectKey,
   type StorageLike,
 } from "@/features/chat/identity";
@@ -70,6 +76,45 @@ describe("getSessionId", () => {
   });
 });
 
+// Session-id namespacing (409 root cause): a training turn must never reuse a
+// customer conversation's session id in the same tab, and vice versa.
+describe("getSessionIdForScope", () => {
+  it("customer scope resolves the legacy key, byte-identical to getSessionId", () => {
+    const storage = memoryStorage();
+    const viaScope = getSessionIdForScope(storage, "customer");
+    expect(viaScope).toMatch(UUID_V4);
+    expect(storage.data[SESSION_KEY]).toBe(viaScope);
+    // getSessionId and the customer scope share the SAME stored id (no migration).
+    expect(getSessionId(storage)).toBe(viaScope);
+  });
+
+  it("training scope uses a distinct key and never collides with customer", () => {
+    const storage = memoryStorage();
+    const customer = getSessionIdForScope(storage, "customer");
+    const training = getSessionIdForScope(storage, "training");
+    expect(training).toMatch(UUID_V4);
+    expect(training).not.toBe(customer);
+    expect(storage.data[SESSION_KEY]).toBe(customer);
+    expect(storage.data[SESSION_KEY_TRAINING]).toBe(training);
+  });
+
+  it("reuses the stored id per scope unless forced, and forceNew stays within scope", () => {
+    const storage = memoryStorage();
+    const first = getSessionIdForScope(storage, "training");
+    expect(getSessionIdForScope(storage, "training")).toBe(first);
+    const forced = getSessionIdForScope(storage, "training", true);
+    expect(forced).not.toBe(first);
+    expect(storage.data[SESSION_KEY_TRAINING]).toBe(forced);
+    // Forcing a new TRAINING id leaves the customer id untouched.
+    expect(storage.data[SESSION_KEY]).toBeUndefined();
+  });
+
+  it("sessionKeyForScope maps each scope to its storage key", () => {
+    expect(sessionKeyForScope("customer")).toBe(SESSION_KEY);
+    expect(sessionKeyForScope("training")).toBe(SESSION_KEY_TRAINING);
+  });
+});
+
 describe("project key persistence (story 10.3)", () => {
   it("stores and reads back the chosen project key", () => {
     const storage = memoryStorage();
@@ -81,5 +126,56 @@ describe("project key persistence (story 10.3)", () => {
 
   it("returns null when no project was ever chosen", () => {
     expect(getStoredProjectKey(memoryStorage())).toBeNull();
+  });
+});
+
+// Secure wave §6: the server-minted anon token is the durable quota identity.
+describe("anon token persistence (secure wave)", () => {
+  it("reads null before any token was stored", () => {
+    expect(getAnonToken(memoryStorage())).toBeNull();
+  });
+
+  it("propagates storage failures so the component can use its memory fallback", () => {
+    const storage: StorageLike = {
+      getItem: () => {
+        throw new Error("storage unavailable");
+      },
+      setItem: () => {
+        throw new Error("storage unavailable");
+      },
+    };
+    expect(() => getAnonToken(storage)).toThrow("storage unavailable");
+  });
+
+  it("persists a server-returned token and reads it back across reloads", () => {
+    const storage = memoryStorage();
+    expect(persistAnonToken(storage, "eyJhbnon.payload.sig")).toBe(true);
+    expect(getAnonToken(storage)).toBe("eyJhbnon.payload.sig");
+    expect(storage.data[ANON_TOKEN_KEY]).toBe("eyJhbnon.payload.sig");
+  });
+
+  it("self-heals by overwriting the stored token with a fresher one", () => {
+    const storage = memoryStorage({ [ANON_TOKEN_KEY]: "old.token" });
+    persistAnonToken(storage, "fresh.token");
+    expect(getAnonToken(storage)).toBe("fresh.token");
+  });
+
+  it("ignores malformed payloads so they never clobber a good token", () => {
+    const storage = memoryStorage({ [ANON_TOKEN_KEY]: "good.token" });
+    expect(persistAnonToken(storage, "")).toBe(false);
+    expect(persistAnonToken(storage, 42)).toBe(false);
+    expect(persistAnonToken(storage, null)).toBe(false);
+    expect(persistAnonToken(storage, undefined)).toBe(false);
+    expect(getAnonToken(storage)).toBe("good.token");
+  });
+
+  it("leaves the legacy device/session ids untouched", () => {
+    const storage = memoryStorage();
+    const deviceId = getDeviceId(storage);
+    const sessionId = getSessionId(storage);
+    persistAnonToken(storage, "tok");
+    // Legacy ids keep context-keying duty only; the token lives beside them.
+    expect(storage.data[DEVICE_ID_KEY]).toBe(deviceId);
+    expect(storage.data[SESSION_KEY]).toBe(sessionId);
   });
 });

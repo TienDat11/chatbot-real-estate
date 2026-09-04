@@ -2,18 +2,42 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+// TrainWorkspace renders the shared ChatPage shell, which is a client
+// component using the Next router; jsdom tests mock it out.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}));
+
 // streamQuery is mocked so each test can drive the SSE handler callbacks; the
 // real fetch/SSE plumbing is out of scope for a workspace-level unit test.
+// TrainWorkspace now renders the shared ChatPage shell in training mode, so
+// the mock must cover every api export ChatPage imports (greeting/session
+// fetchers are never called in training mode; they only need to exist).
 vi.mock("@/lib/api", () => ({
   QueryRequestError: class QueryRequestError extends Error {},
+  QueryStreamError: class QueryStreamError extends Error {},
   streamQuery: vi.fn(),
+  fetchGreeting: vi.fn().mockResolvedValue({ greeting: "", suggestions: [] }),
+  fetchChatSessionMessages: vi.fn().mockResolvedValue([]),
+  // The workspace installs the bearer-token provider on mount; mocked here so
+  // the effect stays inert (its integration coverage lives in
+  // TrainWorkspace.authBearer.test.tsx against the real api module).
+  setQueryAuthTokenProvider: vi.fn(),
 }));
 
 import { streamQuery } from "@/lib/api";
-import type { QueryStreamHandlers } from "@/lib/api";
 import type { SseRoutingPayload } from "@rag-ragre/contracts";
 import { App as AntdApp } from "antd";
 import { TrainWorkspace } from "./TrainWorkspace";
+
+// The training gate mints a Firebase bearer per send (training 401 hardening);
+// the real module would hit Firebase in jsdom, so the suite supplies a valid
+// token the same way ChatPage.trainingMode.test.tsx does. The gate must stay
+// enabled — these tests never weaken it.
+const firebaseQueryAuthTokenMock = vi.hoisted(() => vi.fn());
+vi.mock("@/features/auth/queryAuthToken", () => ({
+  firebaseQueryAuthToken: firebaseQueryAuthTokenMock,
+}));
 
 // Mirrors the real page shell: AntdApp supplies the message context the
 // workspace reads via AntApp.useApp() for error toasts.
@@ -28,8 +52,17 @@ function renderTrainWorkspace() {
 type CapturedRequest = {
   query: string;
   history?: { role: "user" | "assistant"; content: string }[];
-  answer_mode?: "customer" | "training";
+  answer_mode?: "normal" | "training";
   project_key?: string;
+  context?: { project_key: string };
+  signal?: AbortSignal;
+};
+type QueryStreamHandlers = {
+  onSources?: (sources: { doc_id: string; title: string; section?: string; kind?: string }[]) => void;
+  onToken?: (token: string) => void;
+  onRouting?: (routing: SseRoutingPayload) => void;
+  onDone?: (result: { trace_id: string; latency_ms: number; confidence?: string; requires_review?: boolean }) => void;
+  onError?: (error: Error) => void;
 };
 let capturedHandlers: QueryStreamHandlers | null = null;
 let capturedRequest: CapturedRequest | null = null;
@@ -43,6 +76,8 @@ describe("TrainWorkspace", () => {
   beforeEach(() => {
     capturedHandlers = null;
     capturedRequest = null;
+    firebaseQueryAuthTokenMock.mockReset();
+    firebaseQueryAuthTokenMock.mockResolvedValue("idp_train_tok_valid");
     vi.mocked(streamQuery).mockImplementation(((req: CapturedRequest, handlers: QueryStreamHandlers) => {
       capturedRequest = req;
       capturedHandlers = handlers;
@@ -55,21 +90,40 @@ describe("TrainWorkspace", () => {
     vi.clearAllMocks();
   });
 
-  it("sends the question with answer_mode=training and no project_key", async () => {
+  it("sends the question with answer_mode=training and project context", async () => {
     renderTrainWorkspace();
 
     sendQuestion("Chính sách chiết khấu căn hạng B là gì?");
 
     await waitFor(() => expect(capturedRequest).toBeTruthy());
-    // Training scope is decided server-side (story 11.3): the client must not
-    // pick a namespace, only flag the mode.
     expect(capturedRequest!.answer_mode).toBe("training");
-    expect(capturedRequest!.query).toBe("Chính sách chiết khấu căn hạng B là gì?");
+    expect(capturedRequest!.context).toEqual({ project_key: "camellia" });
     expect(capturedRequest!.project_key).toBeUndefined();
+    expect(capturedRequest!.query).toBe("Chính sách chiết khấu căn hạng B là gì?");
     expect(screen.getByText("Chính sách chiết khấu căn hạng B là gì?")).toBeTruthy();
   });
 
-  it("renders the streamed answer with its citations and confidence badge", async () => {
+  it("aborts an in-flight stream on unmount so no callback can dangle", async () => {
+    const { unmount } = renderTrainWorkspace();
+
+    sendQuestion("Luồng giữ chỗ vẫn đang chạy khi tôi rời trang?");
+    await waitFor(() => expect(capturedRequest).toBeTruthy());
+
+    // The workspace must hand streamQuery a live AbortSignal (ISSUE-5 FR-5):
+    // unmounting aborts it, so neither SSE callbacks nor the token-flush
+    // timer can fire after the component is gone.
+    expect(capturedRequest!.signal).toBeInstanceOf(AbortSignal);
+    expect(capturedRequest!.signal!.aborted).toBe(false);
+
+    unmount();
+
+    expect(capturedRequest!.signal!.aborted).toBe(true);
+    // The streamed answer placeholder must not have flipped into a dangling
+    // timer: flush cleanup already ran with no pending timeouts asserted by
+    // the aborted signal above.
+  });
+
+  it("renders the streamed answer with citations but no warning banner even when requires_review", async () => {
     renderTrainWorkspace();
 
     sendQuestion("Quy trình giữ chỗ thế nào?");
@@ -84,13 +138,18 @@ describe("TrainWorkspace", () => {
       capturedHandlers!.onDone?.({
         trace_id: "t-1",
         latency_ms: 120,
-        confidence: "HIGH",
+        confidence: "LOW",
+        requires_review: true,
       });
     });
 
     expect(await screen.findByText(/chọn căn và đặt giữ chỗ\./)).toBeTruthy();
     expect(screen.getByText("sales_kit.pdf")).toBeTruthy();
-    expect(screen.getByTestId("confidence-badge").textContent).toContain("Độ tin cậy cao");
+    // The reliability warning banner and confidence badge must never render,
+    // even at LOW confidence with requires_review (high-stakes) set.
+    expect(screen.queryByTestId("confidence-badge")).toBeNull();
+    expect(screen.queryByText(/Câu trả lời cần tư vấn viên xác nhận/)).toBeNull();
+    expect(screen.queryByText(/độ tin cậy thấp/)).toBeNull();
   });
 
   it("never renders a lead CTA even when routing carries lead_cta_hint", async () => {
