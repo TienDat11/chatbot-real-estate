@@ -95,9 +95,12 @@ def _make_query_param(hl: list[str], ll: list[str]) -> Any:
     from lightrag.lightrag import QueryParam  # noqa: PLC0415
 
     ent, rel, tot = _get_rag_budget()
+    # Query mode is settings-driven (RAG_QUERY_MODE; validator clamps the set),
+    # so retrieval behavior is tunable per environment without a code change.
+    query_mode = str(get_cfg("rag_query_mode", "hybrid"))
     try:
         return QueryParam(
-            mode="hybrid",
+            mode=query_mode,  # type: ignore[arg-type]  # validated in Settings
             only_need_context=True,
             hl_keywords=hl or None,
             ll_keywords=ll or None,
@@ -114,7 +117,7 @@ def _make_query_param(hl: list[str], ll: list[str]) -> Any:
     except TypeError as exc:  # older version missing kwargs -> minimal set
         logger.warning("QueryParam full kwargs fail (%s) — fallback minimal", exc)
         return QueryParam(
-            mode="hybrid",
+            mode=query_mode,  # type: ignore[arg-type]  # validated in Settings
             only_need_context=True,
             hl_keywords=hl or None,
             ll_keywords=ll or None,

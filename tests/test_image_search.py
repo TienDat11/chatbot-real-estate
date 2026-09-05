@@ -291,15 +291,17 @@ def test_search_images_keeps_candidates_within_margin_of_top(monkeypatch):
 
 def test_search_images_drops_unrelated_tail_for_payment_query(monkeypatch):
     """Payment query must not trail into a floor-plan image that only shares project
-    vocabulary — the exact regression reported: top payment hit 0.62, unrelated
-    floor plan 0.51 (gap 0.11 > cross_kind_margin 0.05) must be dropped, not attached.
+    vocabulary — the exact regression reported. Scores follow the measured
+    gemini-embedding-001 scale (scripts/measure_image_scores.py): top payment hit
+    0.7430, unrelated floor-plan tail 0.58 sits below the 0.695 floor AND beyond
+    the cross-kind window, so it must be dropped, not attached.
     """
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     rows = [
-        _row(image_id="payment-1", kind="thanh-toan", score=0.62),
-        _row(image_id="payment-2", kind="thanh-toan", score=0.6),
-        _row(image_id="payment-3", kind="thanh-toan", score=0.58),
-        _row(image_id="matbang-tail", kind="matbang", score=0.51),
+        _row(image_id="payment-1", kind="thanh-toan", score=0.7430),
+        _row(image_id="payment-2", kind="thanh-toan", score=0.7424),
+        _row(image_id="payment-3", kind="thanh-toan", score=0.7239),
+        _row(image_id="matbang-tail", kind="matbang", score=0.58),
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
@@ -316,17 +318,17 @@ def test_search_images_drops_unrelated_tail_for_payment_query(monkeypatch):
 def test_search_images_payment_query_keeps_all_four_same_kind_images(monkeypatch):
     """THE regression this fix addresses: all four payment-method images come back.
 
-    Measured scores for the payment question (same-kind cluster): 0.5615 / 0.5520
-    / 0.5231 / 0.4586. The old scalar margin (0.07) dropped the 4th (htls, gap
-    0.1029 > 0.07); same_kind_margin (0.15) holds the whole cluster and every
-    member still clears the 0.45 floor (0.4586 > 0.45).
+    Measured scores for the payment question on gemini-embedding-001
+    (same-kind cluster): 0.7430 / 0.7424 / 0.7239 / 0.7032. The 0.695 floor
+    keeps every member (4th-hit buffer 0.008) and same_kind_margin (0.15)
+    holds the whole cluster (widest gap 0.0398).
     """
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     rows = [
-        _row(image_id="thanh-thoi", kind="thanh-toan", score=0.5615),
-        _row(image_id="chuan", kind="thanh-toan", score=0.5520),
-        _row(image_id="som-95", kind="thanh-toan", score=0.5231),
-        _row(image_id="htls", kind="thanh-toan", score=0.4586),
+        _row(image_id="thanh-thoi", kind="thanh-toan", score=0.7430),
+        _row(image_id="chuan", kind="thanh-toan", score=0.7424),
+        _row(image_id="som-95", kind="thanh-toan", score=0.7239),
+        _row(image_id="htls", kind="thanh-toan", score=0.7032),
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
@@ -344,14 +346,15 @@ def test_search_images_payment_query_keeps_all_four_same_kind_images(monkeypatch
 def test_search_images_cross_kind_tail_dropped_beyond_cross_margin(monkeypatch):
     """A different-kind image close in score is still rejected by the tight window.
 
-    top thanh-toan 0.62 with a matbang 0.51 behind it (gap 0.11) exceeds
-    cross_kind_margin (0.05), so only the payment image survives — the exact
-    "hỏi thanh toán ra ảnh mặt bằng" bug.
+    Mirrors the measured floor-plan case (matbang top 0.8168 vs toroi 0.7991,
+    gap 0.0177): top thanh-toan 0.7430 with a matbang 0.72 behind it (gap 0.023)
+    exceeds cross_kind_margin (0.015), so only the payment image survives — the
+    exact "hỏi thanh toán ra ảnh mặt bằng" bug.
     """
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     rows = [
-        _row(image_id="payment-1", kind="thanh-toan", score=0.62),
-        _row(image_id="matbang-tail", kind="matbang", score=0.51),
+        _row(image_id="payment-1", kind="thanh-toan", score=0.7430),
+        _row(image_id="matbang-tail", kind="matbang", score=0.72),
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 

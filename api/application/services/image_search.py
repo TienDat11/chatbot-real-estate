@@ -490,10 +490,10 @@ async def search_project_images(
 async def search_images(
     query_text: str,
     top_k: int = 4,
-    threshold: float = 0.45,
+    threshold: float = 0.695,
     margin: float | None = None,
     same_kind_margin: float = 0.15,
-    cross_kind_margin: float = 0.05,
+    cross_kind_margin: float = 0.015,
     project_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return up to top_k published illustrative images that pass a relevance gate.
@@ -502,20 +502,24 @@ async def search_images(
     has no matching image returns nothing instead of a best-effort floor plan:
 
     - ``threshold`` is an absolute floor on the caption-embedding cosine score.
-      Cross-topic pairs that only share project context ("The Camellia Sơn Trà",
-      "căn hộ") measure 0.40-0.46 with text-embedding-v4, so the old 0.4 floor let
-      unrelated tail images attach to any query. 0.45 rejects those while keeping
-      every genuinely topical cluster (payment 0.56+, floor plan 0.50+, price 0.62+).
+      Measured 2026-09-05 on gemini-embedding-001 (keep-all dump:
+      scripts/measure_image_scores.py): on-topic clusters are payment
+      0.7032-0.7430, floor-plan 0.8137-0.8168, unit plans 0.6978-0.7387, while
+      off-topic wording tops at 0.7126 ("tổng quan thị trường...") and
+      0.6378 ("sân bay..."). gemini-001 inflates all cosines ~+0.2 vs the old
+      text-embedding-v4 scale, so the old 0.45 floor let off-topic queries
+      attach 2-4 images. 0.695 keeps every measured on-topic cluster (payment
+      4th hit 0.7032 keeps a 0.008 buffer) and caps off-topic queries at their
+      single top borderline hit.
     - ``same_kind_margin`` / ``cross_kind_margin`` are relative gates against the
-      top hit, split by whether a candidate shares the top hit's ``kind``. One
-      scalar margin cannot both keep a full topical cluster and reject an
-      off-topic tail, because the two score ranges overlap: the four payment-method
-      images span 0.4586-0.5615 (widest same-kind gap 0.1029), while a floor-plan
-      at 0.509 sits only 0.104 below a 0.613 payment hit. ``same_kind_margin``
-      (0.15) is wide enough to hold the whole payment cluster; ``cross_kind_margin``
-      (0.05) is tight enough to drop the floor-plan. The legacy ``margin`` argument
-      is kept for back-compat: when passed, the single scalar drives both windows
-      (exactly the old behavior).
+      top hit, split by whether a candidate shares the top hit's ``kind``.
+      ``same_kind_margin`` (0.15) holds each measured topical cluster: the widest
+      same-kind gap is payment 0.0398 and floor-plan 0.0031. ``cross_kind_margin``
+      (0.015) drops the measured near-top cross-kind tail — the toroi pair on a
+      floor-plan query sits 0.0177 below the matbang top (0.8168 vs 0.7991) —
+      while a wider 0.05 (tuned on v4) let them attach. The legacy ``margin``
+      argument is kept for back-compat: when passed, the single scalar drives
+      both windows (exactly the old behavior).
 
     The vector pass fetches a candidate pool larger than ``top_k`` so both gates
     choose from a fuller picture before the final top_k slice. When the query names
@@ -553,10 +557,14 @@ async def search_images(
         return []
 
     # Soleil's first-party corpus has filename-derived captions rather than the
-    # richer Camellia editorial captions. Keep the tenant predicate strict, but
-    # use a lower relevance floor for this corpus so valid project images are not
-    # silently omitted while its captions are incrementally enriched.
-    effective_threshold = min(threshold, 0.40) if project_key == "soleil" else threshold
+    # richer Camellia editorial captions, and measured gemini-embedding-001
+    # scores run lower for it (scripts/measure_image_scores.py 2026-09-05:
+    # on-topic 0.6767-0.7227 vs Camellia 0.6978-0.8168). 0.65 keeps every
+    # measured on-topic hit (unit floor 0.6902 would miss the default 0.695)
+    # while dropping the 0.606-0.614 tail that attaches floor-plan images to
+    # amenity-style questions. The old 0.40 predates the vector-space migration
+    # and admitted broad cross-intent matches on the new scale.
+    effective_threshold = min(threshold, 0.65) if project_key == "soleil" else threshold
     scored: list[tuple[dict[str, Any], float]] = []
     for r in rows:
         score = r.get("score")

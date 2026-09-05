@@ -113,7 +113,8 @@ async def _run_search(query: str, **kwargs):
 
 
 def run_search(query: str, **kwargs):
-    """Drive one search on a fresh event loop (no pytest-asyncio)."""
+    """Drive one search on a fresh event loop, scoped to Camellia by default."""
+    kwargs.setdefault("project_key", "camellia")
     return asyncio.run(_run_search(query, **kwargs))
 
 
@@ -133,11 +134,12 @@ def _describe(items: list[dict]) -> str:
 def test_payment_query_returns_all_four_payment_images():
     """Regression lock: a payment question must surface ALL FOUR payment images.
 
-    This is the reported bug — "hỏi thanh toán ra ảnh mặt bằng". Measured with
-    the live model the four payment hits are all kind='thanh-toan' at 0.5615 /
-    0.5520 / 0.5231 / 0.4586. The old scalar margin (0.07) dropped the 4th (htls,
-    gap 0.1029 > 0.07); the kind-aware gate keeps it via same_kind_margin (0.15)
-    while still rejecting off-topic kinds via cross_kind_margin (0.05).
+    This is the reported bug — "hỏi thanh toán ra ảnh mặt bằng". Measured
+    2026-09-05 on gemini-embedding-001 the four payment hits are all
+    kind='thanh-toan' at 0.7430 / 0.7424 / 0.7239 / 0.7032 (old v4 scale:
+    0.5615 / 0.5520 / 0.5231 / 0.4586). The kind-aware gate keeps the whole
+    cluster via same_kind_margin (0.15 >= 0.0398 span) and the 0.695 floor
+    keeps the 4th hit with a 0.008 buffer.
     """
     out = run_search(PAYMENT_QUERY)
     assert out, f"payment query returned no images: {_describe(out)}"
@@ -148,35 +150,44 @@ def test_payment_query_returns_all_four_payment_images():
 def test_market_overview_query_does_not_leak_payment_images():
     """Off-topic market query must never attach payment/floor-plan clutter.
 
-    Measured top raw score for this wording is 0.4524 (matbang-trang-02) — a
-    single borderline render that slips just over the 0.45 floor (the earlier
-    0.40-0.43 measurement did not reproduce). Suspected false-positive
-    residual; reported with evidence, not asserted as [].
+    Measured 2026-09-05 on gemini-embedding-001: top raw score for this wording
+    is 0.7126 (matbang-trang-02) with a banggia tail at 0.6390 that the 0.695
+    floor and the 0.015 cross-kind margin both drop, so exactly one borderline
+    render survives. (On the old v4 scale the top was 0.4524 against a 0.46
+    bound.) The single-borderline residual is reported with evidence, not
+    asserted as [].
     """
     out = run_search(MARKET_QUERY)
     assert "thanh-toan" not in [i["kind"] for i in out], _describe(out)
     assert len(out) <= 1, f"off-topic query returned {len(out)} images: {_describe(out)}"
     if out:
         msg = f"off-topic top score crossed the borderline: {_describe(out)}"
-        assert out[0]["score"] < 0.46, msg
+        assert out[0]["score"] < 0.72, msg
 
 
 def test_floorplan_query_returns_matbang_images_only():
-    """Positive semantic path: a floor-plan query surfaces matbang images, never payment."""
+    """Positive semantic path: a floor-plan query surfaces matbang images, never payment.
+
+    Measured 2026-09-05 on gemini-embedding-001: matbang-trang-06/03 at
+    0.8168/0.8137 with a toroi tail at 0.7991/0.7974 — the 0.015 cross-kind
+    margin (0.0177 gap) drops the toroi pair that the old 0.05 margin let in.
+    """
     out = run_search(FLOORPLAN_FULL_QUERY)
     assert out, f"floor-plan query returned no images: {_describe(out)}"
     assert all(i["kind"] == "matbang" for i in out), _describe(out)
-    assert all(i["score"] >= 0.45 for i in out), _describe(out)
+    assert all(i["score"] >= 0.69 for i in out), _describe(out)
 
 
 def test_floorplan_short_phrasing_current_behavior():
     """Document the short floor-plan phrasing: currently no images (recall miss).
 
-    Measured top raw score for "mặt bằng tổng thể dự án" is 0.4072, below the
-    0.45 floor, so search returns []. The brief expected non-empty matbang
-    results — suspected false-negative residual, reported with evidence. This
-    test only guards the regression direction (never payment, and matbang-only
-    when anything comes back); it deliberately does not enshrine [] as correct.
+    Measured 2026-09-05 on gemini-embedding-001 the top raw score for "mặt bằng
+    tổng thể dự án" is 0.6865, below the 0.695 floor, so search returns [].
+    (Old v4 scale: 0.4072 vs the 0.45 floor — same residual.) The brief
+    expected non-empty matbang results — suspected false-negative residual,
+    reported with evidence. This test only guards the regression direction
+    (never payment, and matbang-only when anything comes back); it deliberately
+    does not enshrine [] as correct.
     """
     out = run_search(FLOORPLAN_SHORT_QUERY)
     kinds = [i["kind"] for i in out]
@@ -232,10 +243,12 @@ def test_latency_soft_p50_is_reported():
 def test_airport_raw_query_is_a_documented_residual():
     """Raw airport-distance wording surfaces one borderline image — do not assert [].
 
-    Known residual: "sân bay Đà Nẵng cách dự án bao xa" tops out at one
-    toroi image (~0.4605, just over the floor); only the pipeline rewrite
-    blocks it. Guard the regression direction only (no payment leak, at most
-    one image) and record the residual in the report.
+    Measured 2026-09-05 on gemini-embedding-001 the raw wording tops at a
+    matbang cluster 0.6378/0.6191/0.6190/0.6151 — all below the 0.695 floor, so
+    search returns [] (on the old v4 scale one toroi at ~0.4605 slipped over
+    the 0.45 floor). Only the pipeline rewrite blocks it at the answer layer;
+    this test guards the regression direction (no payment leak, at most one
+    image) and records the residual in the report.
     """
     out = run_search(AIRPORT_RAW_QUERY)
     kinds = [i["kind"] for i in out]

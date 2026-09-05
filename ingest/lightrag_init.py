@@ -53,34 +53,86 @@ def _make_embedding_func() -> Any:
     except ImportError as exc:  # pragma: no cover — environment-dependent
         raise LightRAGUnavailableError(f"Thiếu lightrag-hku==1.5.6: {exc}") from exc
 
-    if settings.embedding_binding in ("dashscope", "aibox") and settings.embedding_api_key:
+    binding = settings.embedding_binding
+    if binding == "openrouter":
+        # Revision-3 opt-in route: OpenAI-compatible /embeddings on the
+        # OpenRouter gateway. Credentials come from env/config only — the
+        # shared OpenRouter key first, then the plain embedding key; fail
+        # closed when neither is configured (never hardcode a key).
+        openrouter_key = settings.openrouter_api_key or settings.embedding_api_key
+        if not openrouter_key:
+            raise LightRAGUnavailableError(
+                f"EMBEDDING_BINDING={binding!r} cần OPENROUTER_API_KEY hoặc "
+                "EMBEDDING_API_KEY — fail closed (không có key trong env/config)"
+            )
+        base = settings.openrouter_base_url.strip()
+        model = settings.embedding_openrouter_model
+    elif binding in ("dashscope", "aibox", "gemini") and settings.embedding_api_key:
+        openrouter_key = settings.embedding_api_key
         # openai SDK 2.x turns a bare host into a plain-text response (no .data),
         # so the base URL must carry the /v1 path like llm_base_url_v1 does.
+        # Gemini's [OI]-compat host already serves /openai/embeddings under /v1.
         base = settings.embedding_base_url.strip()
-        embedding_http_base = base if base.rstrip("/").endswith("/v1") else base.rstrip("/") + "/v1"
-        client = openai.AsyncOpenAI(
-            api_key=settings.embedding_api_key,
-            base_url=embedding_http_base,
-        )
+        base = base if base.rstrip("/").endswith("/v1") else base.rstrip("/") + "/v1"
         model = settings.embedding_model
+    else:
+        openrouter_key = ""  # unreachable: fail-closed branch below raises
+        base = ""
+        model = ""
+
+    if openrouter_key:
+        client = openai.AsyncOpenAI(api_key=openrouter_key, base_url=base)
 
         async def embed(texts: list[str]) -> np.ndarray:
-            resp = await client.embeddings.create(model=model, input=texts)
-            # Sort by index for stability (the batch API may reorder responses).
-            ordered = sorted(resp.data, key=lambda d: d.index)
+            # LightRAG's batch pre-compute passes mixed items (a query string
+            # plus raw keyword GROUPS as nested lists); the [OI]-compat
+            # endpoint rejects nested input with 400, so flatten each group
+            # into one text while preserving one-output-per-item order.
+            flat: list[str] = [
+                t if isinstance(t, str) else " ".join(str(p) for p in t)
+                for t in texts
+            ]
+            # encoding_format=float explicitly: some gateways (Nvidia) reject
+            # the SDK default and some others default to base64. Gemini
+            # [OI]-compat embeddings honor an explicit dimensions request; the
+            # 1024 lock is passed for parity and is ignored to scale.
+            resp = await client.embeddings.create(
+                model=model, input=flat, encoding_format="float",
+                dimensions=settings.embedding_dim,
+            )
+            data = list(resp.data)
+            # Response-shape validation: some [OI]-compat gateways omit `index`
+            # (None) — sorting on None keys crashes, so fall back to response
+            # order ONLY after proving the shape is intact (one vector per
+            # input text, each at the locked dims). A silent short/misshaped
+            # response would associate vectors with the wrong rows.
+            if len(data) != len(flat):
+                raise ValueError(
+                    f"embedding endpoint returned {len(data)} vectors "
+                    f"for {len(flat)} inputs"
+                )
+            expected = settings.embedding_dim
+            for d in data:
+                if len(d.embedding) != expected:
+                    raise ValueError(
+                        f"embedding endpoint returned dim {len(d.embedding)}, "
+                        f"expected {expected} (dims LOCK)"
+                    )
+            if all(isinstance(d.index, int) for d in data):
+                data.sort(key=lambda d: d.index)
             # float32 ndarray: EmbeddingFunc.__call__ validates via .size and the
             # PG vector storage encodes float32 — a plain list would crash the
             # flush ('list' object has no attribute 'size').
-            return np.asarray([d.embedding for d in ordered], dtype=np.float32)
+            return np.asarray([d.embedding for d in data], dtype=np.float32)
 
         return EmbeddingFunc(embedding_dim=settings.embedding_dim, func=embed, model_name=model)
 
     # A real binding with no API key must fail closed — the stub writes garbage
     # vectors that silently corrupt the store. The stub is reachable ONLY through
     # an explicit EMBEDDING_BINDING=local.
-    if settings.embedding_binding != "local":
+    if binding != "local":
         raise LightRAGUnavailableError(
-            f"EMBEDDING_BINDING={settings.embedding_binding!r} cần embedding_api_key — "
+            f"EMBEDDING_BINDING={binding!r} cần embedding_api_key — "
             "fail closed (stub local chỉ dùng khi binding=local)"
         )
     logger.warning(

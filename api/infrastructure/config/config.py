@@ -6,17 +6,45 @@ so behavior is independent of the process CWD; api, ingest, and eval import Sett
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import secrets
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from pydantic import Field, model_validator
+from pydantic import AfterValidator, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("api.config")
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]  # parents[3] = repo root (HF-0: stale parents[1] pointed at api/infrastructure, breaking .env load)
+# Emitted once per process even if Settings is instantiated repeatedly (tests);
+# the fallback itself is per-instance by design.
+_warned_ephemeral_anon_secret = False
+
+# Effort levels the [OI]-compatible endpoint accepts for reasoning_effort
+# (live-verified: "xhigh" is rejected on the Gemini route; the four below are
+# the portable set). The adapter clamps "none" -> "low" for Gemini 3.x models,
+# which cannot fully disable thinking.
+_REASONING_EFFORTS = ("none", "low", "medium", "high")
+
+
+def _validate_reasoning_effort(value: str) -> str:
+    """Boundary check: reject env values the chat endpoint would 400 on."""
+    normalized = value.strip().lower()
+    if normalized not in _REASONING_EFFORTS:
+        raise ValueError(
+            f"LLM_REASONING_EFFORT must be one of {', '.join(_REASONING_EFFORTS)}"
+        )
+    return normalized
+
+
+LlmReasoningEffort = Annotated[str, AfterValidator(_validate_reasoning_effort)]
+
+_REPO_ROOT = (
+    Path(__file__).resolve().parents[3]
+)  # parents[3] = repo root (HF-0: stale parents[1] pointed at api/infrastructure, breaking .env load)  # noqa: E501
 _APP_ENV = os.getenv("APP_ENV", "dev")
 
 
@@ -32,6 +60,40 @@ class Settings(BaseSettings):
     # Known development-only value; production startup fails fast when it survives.
     _KNOWN_DEFAULT_SECRETS = ("ragre_dev_password", "")
 
+    # Placeholder / guessable ANON_IDENTITY_SECRET values that production must
+    # refuse; the 32-char floor below catches short placeholders like "secret".
+    _KNOWN_WEAK_ANON_SECRETS = (
+        "__GENERATE_ME__",
+        "generate-me",
+        "generate_me",
+        "changeme",
+        "change-me",
+        "change_me",
+        "secret",
+        "password",
+        "anonymous",
+        "anon_secret",
+    )
+    _KNOWN_WEAK_LEAD_MIRROR_SECRETS = _KNOWN_WEAK_ANON_SECRETS + (
+        "rag-real-estate-lead-mirror-default-secret",
+    )
+
+    @model_validator(mode="after")
+    def _enforce_approved_llm_provider(self) -> Settings:
+        """Enforce the audited worker route only when explicitly enabled."""
+        if not self.enforce_approved_llm_provider:
+            return self
+        forbidden = ("sol", "openrouter", "ox-alpha")
+        if any(token in (self.llm_base_url or "").lower() for token in forbidden):
+            raise ValueError("LLM_BASE_URL must point to provider-anh-vu")
+        model_fields = (
+            "llm_model_rewrite", "llm_model_extract", "llm_model_answer",
+            "llm_model_answer_pro", "llm_model_guard", "llm_model_nl2sql",
+        )
+        if any(getattr(self, field) != "gpt-5.6-luna" for field in model_fields):
+            raise ValueError("All LLM model roles must use gpt-5.6-luna")
+        return self
+
     @model_validator(mode="after")
     def _fail_fast_on_default_secrets(self) -> Settings:
         if self.app_env in ("prod", "production"):
@@ -41,11 +103,92 @@ class Settings(BaseSettings):
                 )
             if not self.llm_api_key:
                 raise ValueError("LLM_API_KEY is required in production")
+            lead_secret = self.lead_mirror_hmac_secret.strip()
+            if (
+                not lead_secret
+                or lead_secret.lower() in self._KNOWN_WEAK_LEAD_MIRROR_SECRETS
+                or len(lead_secret) < 32
+            ):
+                raise ValueError(
+                    "LEAD_MIRROR_HMAC_SECRET must be a strong, non-guessable secret "
+                    "(min 32 chars) in production"
+                )
+            anon_secret = self.anon_identity_secret
+            if (
+                not anon_secret
+                or anon_secret in self._KNOWN_WEAK_ANON_SECRETS
+                or len(anon_secret) < 32
+            ):
+                raise ValueError(
+                    "ANON_IDENTITY_SECRET must be a strong, non-guessable secret "
+                    "(min 32 chars) in production"
+                )
+            if self.sales_legacy_key_auth_enabled:
+                raise ValueError("SALES_LEGACY_KEY_AUTH_ENABLED must be disabled in production")
+        if self.sales_legacy_key_auth_enabled and self.app_env.strip().lower() not in {
+            "dev",
+            "development",
+            "test",
+        }:
+            raise ValueError(
+                "SALES_LEGACY_KEY_AUTH_ENABLED requires APP_ENV=dev, development, or test"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _fallback_to_ephemeral_anon_secret_outside_prod(self) -> Settings:
+        # Live regression (secure wave G2): dev boots with an empty secret and
+        # mint-time construction raised ValueError -> GET /api/anon/token 500ed,
+        # which the FE surfaces as a dead chat. Dev/test instead generate an
+        # ephemeral per-process secret so no endpoint can fail on missing config;
+        # production keeps the fail-fast validator above.
+        if self.app_env in ("prod", "production") or self.anon_identity_secret:
+            return self
+        object.__setattr__(self, "anon_identity_secret", secrets.token_urlsafe(48))
+        global _warned_ephemeral_anon_secret
+        if not _warned_ephemeral_anon_secret:
+            _warned_ephemeral_anon_secret = True
+            logger.warning(
+                "ANON_IDENTITY_SECRET not set; generated an ephemeral signing "
+                "secret for this process only (dev/test fallback). Anonymous "
+                "identities reset on restart — append ANON_IDENTITY_SECRET to "
+                ".env for persistence."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_cors_origins_safety(self) -> Settings:
+        """CORS allowlist must be explicit and never a wildcard.
+
+        Fail closed: production refuses to start when CORS_ORIGINS is missing
+        or empty (the localhost default is a dev/test convenience that would
+        silently lock a production widget out of its real origin), and every
+        environment rejects the ``"*"`` wildcard because the API carries
+        credentialed/auth endpoints. Dev/test without an explicit value fall
+        back to an explicitly controlled safe localhost origin.
+        """
+        origins = self.cors_origins
+        is_production = self.app_env.strip().lower() in ("prod", "production")
+        if not origins:
+            if is_production:
+                raise ValueError(
+                    "CORS_ORIGINS is required in production (wildcard not allowed)"
+                )
+            origins = ["http://localhost:3000"]
+            object.__setattr__(self, "cors_origins", origins)
+        if any(isinstance(origin, str) and origin.strip() == "*" for origin in origins):
+            raise ValueError(
+                "CORS_ORIGINS must not contain the '*' wildcard; the API has "
+                "credentialed/auth endpoints"
+            )
         return self
 
     # App
     app_env: str = "dev"
-    cors_origins: list[str] = ["http://localhost:3000"]
+    # None (unset) -> dev/test resolve to the safe localhost default; production
+    # fails fast via _enforce_cors_origins_safety. The "*" wildcard is rejected
+    # in every environment (credentialed/auth endpoints exist).
+    cors_origins: list[str] | None = None
 
     # Postgres (LightRAG reads POSTGRES_* directly)
     postgres_host: str = "localhost"
@@ -58,22 +201,45 @@ class Settings(BaseSettings):
     # LightRAG storage
     lightrag_workspace: str = "ragre_mvp"
 
+    # RAG pipeline warm-up: run the lazy LightRAG init (get_lightrag +
+    # initialize_storages, ~30-40s cold) in a startup background task so the
+    # first query does not pay the cold-start cost. Idempotent by construction;
+    # failure degrades to the lazy first-query path without crashing startup.
+    rag_prewarm_enabled: bool = True
+
     # Prompt assets — canonical api/prompts/ dir (HF-0). Exported as PROMPT_DIR so
     # LightRAG 1.5.6 resolves entity_type/<file> under it (bare filename contract).
     prompt_dir: str = str(_REPO_ROOT / "api" / "prompts")
 
-    # Embedding (LOCK: text-embedding-v4, dims 1024 — a change means a full re-embed)
-    embedding_binding: str = "dashscope"  # dashscope | aibox | local
+    # Embedding (LOCK: gemini-embedding-001, dims 1024 — a change means a full re-embed)
+    embedding_binding: str = "gemini"  # dashscope | aibox | local | openrouter | gemini
     embedding_api_key: str = ""
-    embedding_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    embedding_model: str = "text-embedding-v4"
+    embedding_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 1024
+    # Revision-3 opt-in: OpenRouter-compatible embedding route. The binding above
+    # stays "dashscope" by default; turning it to "openrouter" (with
+    # OPENROUTER_API_KEY set from the secret store) activates the selected model
+    # below at the locked 1024 dims with encoding_format=float.
+    # Shared OpenRouter credential for the revision-3 outbound adapters.
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    embedding_openrouter_model: str = "openai/text-embedding-3-small"
+    # Hostname allowlist for outbound embedding/rerank HTTP calls (SSRF guard).
+    # gemini host added for the Google [OI]-compat embedding route.
+    outbound_allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["openrouter.ai", "generativelanguage.googleapis.com"]
+    )
+    # Development-only opt-in: allow loopback/private outbound endpoints (tests / local dev)
+    outbound_allow_private: bool = False
 
     # Rerank (app-side; single score source for confidence)
-    rerank_binding: str = "dashscope"  # dashscope | aibox | null
+    rerank_binding: str = "dashscope"  # dashscope | aibox | openrouter | null
     rerank_api_key: str = ""
     rerank_base_url: str = ""
     rerank_model: str = "qwen3-rerank"
+    # Revision-3 rerank: voyageai/rerank-2.5 via the OpenRouter /api/v1/rerank route.
+    rerank_openrouter_model: str = "voyageai/rerank-2.5"
     enable_rerank: bool = True
 
     # Geo (nearby places). The Camellia lat/lng here are the LEGACY fallback used
@@ -95,6 +261,8 @@ class Settings(BaseSettings):
     r2_secret_access_key: str = ""
     # Optional public custom domain; empty falls back to the R2 public r2.dev host.
     r2_public_url: str = ""
+    # JSON map of project_key to public CDN base URL. Empty uses the R2 base.
+    image_cdn_project_map: str = "{}"
 
     @property
     def r2_public_base(self) -> str:
@@ -108,15 +276,94 @@ class Settings(BaseSettings):
             return explicit.rstrip("/")
         return f"https://pub-{self.r2_account_id}.r2.dev"
 
+    def image_cdn_base(self, project_key: str) -> str:
+        """Return one project's normalized public origin.
+
+        ``IMAGE_CDN_PROJECT_MAP`` supports a legacy string value and the canonical
+        object form (``{"origins": [...], "path_prefixes": [...]}``). Never
+        stringify the object form into a Python-dict URL and never borrow another
+        project's origin.
+        """
+        try:
+            mapping = json.loads(self.image_cdn_project_map or "{}")
+        except (TypeError, json.JSONDecodeError):
+            mapping = {}
+        has_mapping = isinstance(mapping, dict) and bool(mapping)
+        value = mapping.get(project_key) if has_mapping else None
+        if isinstance(value, dict):
+            origins = value.get("origins", value.get("origin", []))
+            origins = origins if isinstance(origins, list) else [origins]
+            value = next((item for item in origins if isinstance(item, str) and item.strip()), None)
+        if isinstance(value, str) and value.strip():
+            return value.strip().rstrip("/")
+        # An explicit map is an allowlist. Missing/invalid project entries must
+        # not silently inherit the account-wide base or another project's host.
+        return "" if has_mapping else self.r2_public_base
+
+    def image_cdn_path_prefixes(self, project_key: str) -> tuple[str, ...]:
+        """Return explicit canonical object-key prefixes for one project."""
+        try:
+            mapping = json.loads(self.image_cdn_project_map or "{}")
+        except (TypeError, json.JSONDecodeError):
+            mapping = {}
+        value = mapping.get(project_key) if isinstance(mapping, dict) else None
+        prefixes = value.get("path_prefixes", []) if isinstance(value, dict) else []
+        return tuple(
+            prefix.strip().lstrip("/")
+            for prefix in prefixes
+            if isinstance(prefix, str) and prefix.strip()
+        )
+
     # LLM gateway (OpenAI-compatible)
     llm_api_key: str = ""
     llm_base_url: str = ""
-    llm_model_rewrite: str = "deepseek-v4-flash"
-    llm_model_extract: str = "qwen3.7-flash"
-    llm_model_answer: str = "deepseek-v4-flash"
-    llm_model_answer_pro: str = "deepseek-v4-pro-0813"
-    llm_model_guard: str = "deepseek-v4-flash-0731"
-    llm_model_nl2sql: str = "qwen3.7-flash"
+    # MVP audit contract: every LLM call uses the approved provider/model only.
+    llm_model_rewrite: str = "gpt-5.6-luna"
+    llm_model_extract: str = "gpt-5.6-luna"
+    llm_model_answer: str = "gpt-5.6-luna"
+    llm_model_answer_pro: str = "gpt-5.6-luna"
+    llm_model_guard: str = "gpt-5.6-luna"
+    llm_model_nl2sql: str = "gpt-5.6-luna"
+    # Enable the audited provider/model contract explicitly for production workers.
+    enforce_approved_llm_provider: bool = False
+    # Thinking-token control for the [OI]-compatible (Gemini) route: the endpoint
+    # rejects native thinkingConfig but honors reasoning_effort. luna keeps its
+    # pinned "xhigh" regardless; Gemini 3.x clamps "none" -> "low" in the adapter.
+    llm_reasoning_effort: LlmReasoningEffort = "low"
+    # Total budget (seconds) for one answer-generation LLM stream. Generous so a
+    # long, table-heavy sales answer (up to 6000 tokens) is never cut mid-stream
+    # while the token budget is still the primary bound (per-read timeout is 20s).
+    llm_timeout_s: float = 120.0
+    # Hard total deadline (seconds) for one whole SSE /query stream (wall clock
+    # anchored at stream start; heartbeats never reset it). Bounds a pipeline
+    # that hangs end-to-end (provider stall, unbounded post-pipeline await) and
+    # ships a terminal error+done frame so the FE never spins indefinitely.
+    sse_total_timeout_s: float = 150.0
+    # Per-call budget (seconds) for the slot-fill LLM completion. The LLM legs
+    # now run on a Google Gemini key via the OpenAI-compatible endpoint, whose
+    # cold calls routinely exceed the old 6s hard-coded budget; raise the floor
+    # and keep it env-tunable. conv_slots still fails open on a real timeout,
+    # so a generous value only avoids spurious empty-slot degrade.
+    llm_slot_fill_timeout_s: float = 30.0
+    # Deadline (seconds) for ONE rag_leg aquery_data call. LightRAG hybrid
+    # retrieval fans out to embedding + PG graph queries and a cold path can run
+    # well past the old 15s default; the retry-once behavior is unchanged, only
+    # the per-attempt budget is enlarged and made env-configurable.
+    rag_aquery_timeout_s: float = 180.0
+
+    # LightRAG query mode for the RAG leg. Validated against the modes LightRAG
+    # 1.5.6's QueryParam accepts so a typo'd env value fails at settings load,
+    # not on the first query.
+    rag_query_mode: str = "hybrid"
+
+    @field_validator("rag_query_mode")
+    @classmethod
+    def _validate_rag_query_mode(cls, value: str) -> str:
+        allowed = ("naive", "local", "global", "hybrid", "mix")
+        normalized = value.strip().lower()
+        if normalized not in allowed:
+            raise ValueError(f"RAG_QUERY_MODE must be one of {', '.join(allowed)}")
+        return normalized
 
     @property
     def llm_base_url_v1(self) -> str:
@@ -156,17 +403,58 @@ class Settings(BaseSettings):
     firebase_service_account_private_key: str = ""
     # Ops-only web key (session-cookie exchange later); never used for token verify.
     firebase_web_api_key: str = ""
+    firebase_vapid_key: str = ""
+    # Legacy X-Sales-Key compatibility is opt-in and forbidden in production.
+    sales_legacy_key_auth_enabled: bool = False
+    # Optional preferred sales identity for lead routing (test/verification
+    # harness). When set to the Firebase uid of an ACTIVE, mapped sales row,
+    # every assignment selects that exact identity first so the account always
+    # receives test leads for realtime manual verification. Blank preserves the
+    # LRU-first / priority-tiebreak algorithm — production fairness is
+    # unchanged unless this key is explicitly configured. Env-only; never
+    # hardcode a uid in source or fixtures.
+    sales_preferred_firebase_uid: str = ""
 
-    # Lead mirror (story 9.2, hybrid D1). The HMAC secret keys the deterministic
-    # customer_id digest (HMAC-SHA256 of the lead phone); it must stay stable
-    # per deployment once chosen, otherwise mirror documents orphan behind a
-    # new digest. The reconciliation sweep retries pending/failed mirror writes
-    # so the write-only Firestore mirror eventually converges with PG.
-    lead_mirror_hmac_secret: str = "rag-real-estate-lead-mirror-default-secret"
+    # Lead mirror (story 9.2, hybrid D1). Production must provide this stable
+    # HMAC key through the environment or a secret service; there is no usable
+    # source default. Tests may inject an explicit fixture value.
+    lead_mirror_hmac_secret: str = ""
     lead_mirror_reconciliation_enabled: bool = True
     lead_mirror_stale_after_minutes: int = 300
     lead_mirror_stale_batch_limit: int = 50
     lead_mirror_sweep_interval_seconds: int = 300
+    # Explicit bounded deadlines and retry budget for the optional Firestore mirror.
+    firestore_connect_timeout_seconds: float = 2.0
+    firestore_read_timeout_seconds: float = 5.0
+    firestore_write_timeout_seconds: float = 5.0
+    firestore_retry_attempts: int = 2
+
+    # Signed anonymous identity (secure wave G2/G4). Empty default is fine in
+    # dev/test: the validator above substitutes an ephemeral per-process secret
+    # so minting never 500s; production fails fast instead.
+    anon_identity_secret: str = ""
+    # Post-lead bonus policy (spec §7): one-time extra turns per identity.
+    anonymous_bonus_turns_after_lead: int = 5
+    # Per-IP secondary brakes (spec §9). Generous defaults absorb shared NAT
+    # egress; tighten via env once real traffic patterns are known.
+    ip_rate_limit_window_seconds: int = 3600
+    ip_rate_limit_mint_max_requests: int = 30
+    ip_rate_limit_query_max_requests: int = 120
+    ip_rate_limit_lead_max_requests: int = 10
+    # Reverse proxies allowed to append X-Forwarded-For (spec §9). XFF is only
+    # honored when the immediate TCP peer is one of these IPs; any other client
+    # is keyed by its direct peer address so the header can't spoof a different
+    # per-IP allowance. Accepts a comma-separated env string or JSON list.
+    trusted_proxy_ips: list[str] = Field(default_factory=list)
+    chat_history_retention_days: int = 30
+    lead_cta_after_turns: int = 3
+
+    @field_validator("trusted_proxy_ips", mode="before")
+    @classmethod
+    def _split_comma_separated_proxy_list(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
     @property
     def firebase_firestore_rest_base_url(self) -> str:
