@@ -18,7 +18,7 @@ from sqlglot import exp
 
 from ..value_objects.constants import LLM_CALL_TIMEOUT_S
 from api.infrastructure.dependencies import get_llm, model_for_role
-from api.application.services.sql_leg import SqlLegResult, build_dsn, with_rls_identity
+from api.application.services.sql_leg import SqlLegResult, build_dsn, with_rls_identity, _pooler_safe_kwargs
 
 logger = logging.getLogger("api.nl2sql_guard")
 
@@ -175,6 +175,7 @@ async def get_nl2sql_pool() -> asyncpg.Pool:
                 "default_transaction_read_only": "on",
                 "statement_timeout": "8000",
             },
+            **_pooler_safe_kwargs(),
         )
     return _nl2sql_pool
 

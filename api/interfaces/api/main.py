@@ -53,11 +53,12 @@ class HistoryTurn(BaseModel):
 
 
 class TrainingQueryContext(BaseModel):
-    """Training context envelope (G3-r6 spec §10.2).
+    """Training context envelope (G3-r6 spec §10.2, FR-25 revised).
 
     Training questions legitimately name a real project; the context carries
-    exactly that project key so retrieval stays inside the kind='training'
-    corpus for the named project. Unknown keys are rejected: a client can
+    exactly that project key because training rides the SHARED project corpus
+    (retrieval is scoped to this key, never to a training pseudo-namespace).
+    Unknown keys are rejected: a client can
     never smuggle extra pipeline knobs inside the context.
     """
 
@@ -356,10 +357,6 @@ async def _sse_stream(
     reservation and emits `error` then `done` — no token frames leak.
     """
     from api.application.pipelines.workflow import QueryRejected  # noqa: PLC0415
-    from api.application.services.project_scope import (  # noqa: PLC0415
-        TRAINING_CORPUS_EMPTY_CODE,
-        TrainingCorpusEmptyError,
-    )
     from api.application.services.query_quota_gate import (  # noqa: PLC0415
         AnonymousTurnContext as GateAnonymousTurnContext,
     )
@@ -523,13 +520,6 @@ async def _sse_stream(
         except QueryRejected as exc:
             await _refund_reserved_turn()
             await q.put(("__rejected__", {"message": exc.reason}))
-        except TrainingCorpusEmptyError as exc:
-            # FR-25 fail-loud: training mode never falls back to a customer
-            # answer — refund the reserved turn and ship the explicit
-            # empty-corpus error frame (structured, stable code).
-            logger.info("sse training corpus empty project=%s", project_key)
-            await _refund_reserved_turn()
-            await q.put(("__training_empty__", {"message": str(exc)}))
         except Exception:  # noqa: BLE001 — always emit error + done
             logger.exception("sse pipeline crashed")
             await _refund_reserved_turn()
@@ -596,15 +586,9 @@ async def _sse_stream(
                 except asyncio.QueueEmpty:
                     event = "__timeout__"
                     data = {}
-                if event in ("__done__", "__rejected__", "__crashed__", "__training_empty__"):
+                if event in ("__done__", "__rejected__", "__crashed__"):
                     if event == "__rejected__":
                         yield _frame("error", {"code": "REJECTED", "message": data["message"]})
-                        yield _frame("done", {})
-                    elif event == "__training_empty__":
-                        yield _frame(
-                            "error",
-                            {"code": TRAINING_CORPUS_EMPTY_CODE, "message": data["message"]},
-                        )
                         yield _frame("done", {})
                     elif event == "__crashed__":
                         yield _frame("error", {"code": "INTERNAL", "message": "internal error"})
@@ -657,18 +641,9 @@ async def _sse_stream(
                     int((asyncio.get_event_loop().time() - started_at) * 1000),
                     bool(data.get("answer_truncated")),
                 )
-            if event in ("__done__", "__rejected__", "__crashed__", "__training_empty__"):
+            if event in ("__done__", "__rejected__", "__crashed__"):
                 if event == "__rejected__":
                     yield _frame("error", {"code": "REJECTED", "message": data["message"]})
-                    yield _frame("done", {})
-                elif event == "__training_empty__":
-                    # FR-25 explicit empty-scope error frame: distinct stable code
-                    # so the training FE can tell "no corpus" from a crash and
-                    # NEVER render it as a customer answer.
-                    yield _frame(
-                        "error",
-                        {"code": TRAINING_CORPUS_EMPTY_CODE, "message": data["message"]},
-                    )
                     yield _frame("done", {})
                 elif event == "__crashed__":
                     # Stable, non-leaky error code (mirrors the JSON 500 path).
@@ -1050,6 +1025,8 @@ def create_app() -> FastAPI:
         # ProjectPicker; exactly one active project is the safe default.
         try:
             project_key = (
+                # Mode marker only: the pipeline routes retrieval to the real
+                # context project (shared corpus); '_training' never scopes data.
                 "_training" if req.answer_mode == "training"
                 else await resolve_project_key(req.project_key)
             )
@@ -1132,11 +1109,6 @@ def create_app() -> FastAPI:
                 headers=_SSE_RESPONSE_HEADERS,
             )
         # JSON mode
-        from api.application.services.project_scope import (  # noqa: PLC0415
-            TRAINING_CORPUS_EMPTY_CODE,
-            TrainingCorpusEmptyError,
-        )
-
         pipe = RagQueryPipelineConv()
         try:
             payload = await pipe.run(
@@ -1257,20 +1229,6 @@ def create_app() -> FastAPI:
             return JSONResponse(
                 status_code=400,
                 content={"ok": False, "error": {"code": "REJECTED", "message": exc.reason}},
-            )
-        except TrainingCorpusEmptyError as exc:
-            # FR-25 fail-loud in JSON clothing: stable structured error (HTTP
-            # 200 mirrors the SSE error frame — an empty training corpus is an
-            # explicit outcome, not a server fault), reserved turn refunded.
-            logger.info("json training corpus empty project=%s", project_key)
-            if hasattr(turn_context, "identity_key") and hasattr(turn_context, "project_key"):
-                await quota_gate.refund_turn(turn_context)
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "ok": False,
-                    "error": {"code": TRAINING_CORPUS_EMPTY_CODE, "message": str(exc)},
-                },
             )
         except Exception:  # noqa: BLE001 — never leak internal details
             logger.exception("query handler error")

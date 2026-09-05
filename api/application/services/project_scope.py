@@ -6,10 +6,9 @@ client does not pick a project the backend must NOT guess — with more than one
 active project a 422 tells the frontend to show the ProjectPicker, and with
 exactly one active project that project is the safe default.
 
-Reserved keys (D5, ISSUE-01): ``_legacy`` (untagged corpus awaiting review) and
-``_training`` (training namespace, filter-2-layers with kind='training') are
-never offered as a client-scoped project; they are only readable through
-dedicated namespaces.
+Reserved keys (D5, ISSUE-01): ``_legacy`` (untagged corpus awaiting review) is
+never offered as a client-scoped project; it is only readable through a
+dedicated namespace.
 """
 
 from __future__ import annotations
@@ -21,8 +20,24 @@ from dataclasses import dataclass
 # guard plus a bounded, URL-safe namespace shape.
 PROJECT_KEY_PATTERN = re.compile(r"^[a-z0-9_]{2,40}$")
 
-# D5 reserved namespaces — real projects must never use a leading underscore.
-RESERVED_PROJECT_KEYS = frozenset({"_legacy", "_training"})
+# --- FR-25 (revised): training rides the SHARED project corpus -----------------
+# ``answer_mode="training"`` resolves (in main.py) to this reserved marker.
+# It is NEVER a data scope: retrieval/facts always ride the real context
+# project (``training_context_project_key`` — e.g. 'camellia'), so project
+# isolation stays absolute. The marker only selects the detailed project
+# prompt profile and suppresses the customer sales funnel (persona/CTA).
+# Every downstream component detects training mode ONLY through
+# ``is_training_scope`` — no module may re-spell the literal or invent a
+# parallel flag, so the routing and the prompt profile can never disagree
+# about what "training" means.
+TRAINING_PROJECT_KEY = "_training"
+
+# Reserved keys (D5, ISSUE-01): ``_legacy`` (untagged corpus awaiting review)
+# is never offered as a client-scoped project. ``_training`` is additionally
+# rejected client-side because it is a server-internal mode marker: a real
+# training turn always carries its context project explicitly, so nothing
+# downstream may ever treat the marker itself as a corpus scope.
+RESERVED_PROJECT_KEYS = frozenset({"_legacy", TRAINING_PROJECT_KEY})
 
 # HTTP-level signal for the default-rule failure; mapped to 422 by handlers.
 PROJECT_CHOICE_REQUIRED = "Vui lòng chọn dự án (có nhiều dự án đang mở bán)"
@@ -30,6 +45,11 @@ PROJECT_CHOICE_REQUIRED = "Vui lòng chọn dự án (có nhiều dự án đang
 
 class ProjectScopeError(ValueError):
     """Raised when a project_key is invalid or the active-project rule fails."""
+
+
+def is_training_scope(project_key: str | None) -> bool:
+    """True when a resolved scope is the training mode marker namespace."""
+    return project_key == TRAINING_PROJECT_KEY
 
 
 @dataclass(frozen=True)
@@ -44,7 +64,8 @@ def validate_project_key(project_key: str) -> None:
     """Validate the project_key shape; raise ProjectScopeError when invalid.
 
     Reserved keys are rejected here too: the query/lead API is customer-facing
-    and must never let a caller read the _legacy/_training corpora.
+    and must never let a caller read the _legacy corpus or spoof the internal
+    training mode marker as a client-named scope.
     """
     if not project_key:
         raise ProjectScopeError("project_key là bắt buộc")
@@ -101,7 +122,9 @@ __all__ = [
     "PROJECT_KEY_PATTERN",
     "RESERVED_PROJECT_KEYS",
     "PROJECT_CHOICE_REQUIRED",
+    "TRAINING_PROJECT_KEY",
     "ProjectScopeError",
+    "is_training_scope",
     "ActiveProject",
     "validate_project_key",
     "fetch_active_projects",

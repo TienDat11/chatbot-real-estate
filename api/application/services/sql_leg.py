@@ -133,6 +133,21 @@ def build_dsn() -> str:
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 
+def _pooler_safe_kwargs() -> dict[str, int]:
+    """Extra asyncpg connect kwargs that disable server-side prepared statements.
+
+    Supavisor (:6543 / pooler.supabase.com) does not support prepared statements
+    and will raise DuplicatePreparedStatementError if caching is enabled.
+    Passing these to direct-postgres connections (:5432) is harmless — the
+    client simply skips the prepare round-trips and inlines the SQL.
+    """
+    return {
+        "statement_cache_size": 0,
+        "max_cached_statement_lifetime": 0,
+        "max_cacheable_statement_size": 0,
+    }
+
+
 async def get_ro_pool() -> asyncpg.Pool:
     """Lazy singleton RO pool; role switching happens inside each transaction."""
     global _ro_pool
@@ -141,6 +156,7 @@ async def get_ro_pool() -> asyncpg.Pool:
             build_dsn(),
             min_size=1,
             max_size=int(get_cfg("postgres_max_connections", 5) or 5),
+            **_pooler_safe_kwargs(),
         )
     return _ro_pool
 

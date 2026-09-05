@@ -14,7 +14,7 @@ import asyncpg
 
 from api.infrastructure.config.config import get_settings as get_cfg, settings
 from api.domain.services.utils import sha256_hex
-from .sql_leg import build_dsn
+from .sql_leg import build_dsn, _pooler_safe_kwargs
 
 logger = logging.getLogger("api.audit")
 
@@ -27,7 +27,7 @@ _LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\b\d+(?:\.\d+)?\b")
 async def get_audit_pool() -> asyncpg.Pool:
     global _audit_pool
     if _audit_pool is None or _audit_pool.is_closing():
-        _audit_pool = await asyncpg.create_pool(build_dsn(), min_size=1, max_size=2)
+        _audit_pool = await asyncpg.create_pool(build_dsn(), min_size=1, max_size=2, **_pooler_safe_kwargs())
     return _audit_pool
 
 
