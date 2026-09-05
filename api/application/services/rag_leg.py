@@ -34,7 +34,7 @@ logger = logging.getLogger("api.rag_leg")
 LIGHTRAG_READY = False
 
 # PG storages initialized once per process (ingest side uses the same helper).
-_api_storages_ready = False
+_api_storages_ready_workspaces: set[str] = set()
 
 
 @dataclass
@@ -71,21 +71,30 @@ def _get_rag_budget() -> tuple[int, int, int]:
     )
 
 
-async def _get_rag():
-    """Lazy LightRAG instance — accepts both sync and async factories (defensive).
+def _project_workspace(project_key: str | None) -> str | None:
+    """Delegate to the ingest-side mapping (single source of truth)."""
+    from ingest.lightrag_init import project_workspace  # noqa: PLC0415
+
+    return project_workspace(project_key)
+
+
+async def _get_rag(project_key: str | None = None):
+    """Lazy LightRAG instance for the project's workspace — sync/async factory safe.
 
     1.5.6: aquery_data raises PipelineNotInitializedError until initialize_storages
-    has run in this process, so the query side mirrors the ingest side's flag once.
+    has run in this process, so the query side mirrors the ingest side's flag once
+    per workspace instance.
     """
-    global LIGHTRAG_READY, _api_storages_ready
+    global LIGHTRAG_READY, _api_storages_ready_workspaces
     from ingest.lightrag_init import get_lightrag  # noqa: PLC0415
 
-    rag = get_lightrag()
+    workspace = _project_workspace(project_key)
+    rag = get_lightrag(workspace)
     if inspect.isawaitable(rag):
         rag = await rag
-    if not _api_storages_ready:
+    if workspace not in _api_storages_ready_workspaces:
         await rag.initialize_storages()
-        _api_storages_ready = True
+        _api_storages_ready_workspaces.add(workspace or "")
     LIGHTRAG_READY = True
     return rag
 
@@ -215,7 +224,7 @@ async def run_rag_leg(
     #    every degrade message now carries the exception class name (Bug B
     #    observability: "rag init" was invisible in flags/audit).
     try:
-        rag_candidate = _get_rag()
+        rag_candidate = _get_rag(project_key)
         rag = (
             await asyncio.wait_for(rag_candidate, timeout=20.0)
             if inspect.isawaitable(rag_candidate)

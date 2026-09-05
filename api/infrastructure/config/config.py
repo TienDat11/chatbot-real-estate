@@ -200,6 +200,31 @@ class Settings(BaseSettings):
 
     # LightRAG storage
     lightrag_workspace: str = "ragre_mvp"
+    # Workspace that holds Soleil's LightRAG rows (db/migrations/
+    # 2026-08-28-soleil-lightrag-scope-repair.sql moved them there deliberately
+    # for project isolation). The query path routes soleil reads here; every
+    # other project keeps the historical default-workspace instance.
+    lightrag_workspace_soleil: str = "ragre_mvp"
+
+    @field_validator("lightrag_workspace_soleil")
+    @classmethod
+    def _validate_lightrag_workspace_soleil(cls, value: str) -> str:
+        # Soleil must never resolve onto the shared default namespace --
+        # absolute project isolation; fail closed at config load.
+        # LightRAG ctor defaults workspace to "" (lightrag/lightrag.py:413);
+        # PG storage maps empty/falsy to "default" (postgres_impl.py:2700-2702).
+        # Both representations mean "shared default namespace" and would
+        # collapse Soleil rows into the same namespace as untagged projects.
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("LIGHTRAG_WORKSPACE_SOLEIL must not be empty or whitespace-only")
+        if normalized.lower() == "default":
+            raise ValueError(
+                "LIGHTRAG_WORKSPACE_SOLEIL must not be 'default': "
+                "that is the shared PG namespace (postgres_impl.py fallback) "
+                "and would collapse Soleil into untagged projects"
+            )
+        return normalized
 
     # RAG pipeline warm-up: run the lazy LightRAG init (get_lightrag +
     # initialize_storages, ~30-40s cold) in a startup background task so the

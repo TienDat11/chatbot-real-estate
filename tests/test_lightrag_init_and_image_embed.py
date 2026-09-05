@@ -195,3 +195,39 @@ def test_image_search_embed_query_dim_mismatch_fails(monkeypatch):
     monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kw: _Client())
     with pytest.raises(ValueError, match="dim drift"):
         asyncio.run(img._embed_query("q"))
+
+
+# --- Soleil KG retry: re-ingest cleanup must delete the stale extraction cache ---
+
+
+class _FakeRagForDelete:
+    """Records adelete calls; skips initialize_storages via the ready flag."""
+
+    _re_storages_ready = True
+
+    def __init__(self):
+        self.calls: list[tuple[str, bool]] = []
+
+    async def adelete_by_doc_id(self, doc_id, delete_llm_cache=False):
+        self.calls.append((doc_id, delete_llm_cache))
+        return {"status": "success"}
+
+
+def test_adelete_by_doc_id_deletes_llm_cache_by_default():
+    """Default delete_llm_cache=True: the LLM response cache is keyed by prompt
+    content hash, so identical re-ingested text replays a cached (possibly
+    empty) extraction forever if the flag stays at LightRAG's False default —
+    the mechanism behind Soleil qd6608's 0-entity reprocessing."""
+    from ingest.lightrag_init import adelete_by_doc_id
+
+    rag = _FakeRagForDelete()
+    asyncio.run(adelete_by_doc_id(rag, "legal-soleil-qd6608-2016:4:2"))
+    assert rag.calls == [("legal-soleil-qd6608-2016:4:2", True)]
+
+
+def test_adelete_by_doc_id_cache_delete_is_opt_out():
+    from ingest.lightrag_init import adelete_by_doc_id
+
+    rag = _FakeRagForDelete()
+    asyncio.run(adelete_by_doc_id(rag, "doc:1:0", delete_llm_cache=False))
+    assert rag.calls == [("doc:1:0", False)]
