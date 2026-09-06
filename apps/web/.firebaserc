@@ -1,0 +1,6 @@
+{
+  "//": "TODO(owner): replace <FIREBASE_PROJECT_ID> with your real Firebase project id (run: firebase use --add). The Firebase Hosting SITE serving the web app is sale-chat-bot-11e49; see deploy/DEPLOY_RUNBOOK.md step 0.",
+  "projects": {
+    "default": "<FIREBASE_PROJECT_ID>"
+  }
+}

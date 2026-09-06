@@ -744,6 +744,8 @@ async def _wire_postgres_rate_limit_port() -> None:
     installed when PG is down (or comes up later), matching the rule that a
     degraded secondary brake must not take the product offline. The pool is
     the shared lead RW pool, closed by _close_persistence_pools on shutdown.
+    Also pre-warms the lazy read-only pool so the first /ready or /query
+    request never pays asyncpg pool-creation latency (cold-start fix).
     """
     from api.application.services.anon_identity import set_rate_limit_port  # noqa: PLC0415
     from api.infrastructure.adapters.postgres_leads import get_lead_pool  # noqa: PLC0415
@@ -758,6 +760,12 @@ async def _wire_postgres_rate_limit_port() -> None:
             "postgres unavailable at startup; anonymous IP brake stays in-process memory",
             exc_info=True,
         )
+    try:
+        from api.application.services.sql_leg import get_ro_pool  # noqa: PLC0415
+
+        await get_ro_pool()
+    except Exception:  # noqa: BLE001 — first request retries lazily; never fatal
+        logger.warning("read pool prewarm failed; first request pays pool creation", exc_info=True)
 
 
 def _maybe_start_lead_mirror_reconciliation() -> asyncio.Task | None:
@@ -779,10 +787,16 @@ def _maybe_start_lead_mirror_reconciliation() -> asyncio.Task | None:
     return asyncio.create_task(run_lead_mirror_reconciliation_loop())
 
 
-# Budget for one prewarm attempt: cold LightRAG init measures ~30-40s, so a 90s
-# bound absorbs slow PG/first-embedding variance while still failing a hung init
-# (a stuck attempt would otherwise never retry or give up).
-RAG_PREWARM_TIMEOUT_S = 90.0
+# Fallback budget for one prewarm attempt; the authoritative budget is
+# settings.rag_prewarm_timeout_s (env RAG_PREWARM_TIMEOUT_S, default 120s) so
+# operators retune without a code change. Cold LightRAG init measures ~30-40s —
+# the bound must absorb slow PG/first-embedding variance while still failing a
+# hung init (a stuck attempt would otherwise never retry or give up).
+RAG_PREWARM_TIMEOUT_S = 120.0
+
+# Set True once the startup prewarm task exits (success, failure, or cancel);
+# /ready reports it so "still warming" is distinguishable from "gave up".
+RAG_PREWARM_FINISHED = False
 
 
 async def _prewarm_rag_pipeline() -> None:
@@ -795,20 +809,28 @@ async def _prewarm_rag_pipeline() -> None:
     storage DDL runs once per process. Startup NEVER crashes on this — a
     failure is logged, retried ONCE, then given up with the lazy path intact.
     """
+    global RAG_PREWARM_FINISHED
     from api.application.services.rag_leg import _get_rag  # noqa: PLC0415
 
-    for attempt in (1, 2):
-        try:
-            await asyncio.wait_for(_get_rag(), timeout=RAG_PREWARM_TIMEOUT_S)
-            logger.info("rag pipeline prewarm completed (attempt %d)", attempt)
-            return
-        except Exception:  # noqa: BLE001 — prewarm is best-effort, never fatal
-            logger.warning(
-                "rag pipeline prewarm failed (attempt %d/2); falling back to lazy first-query init",
-                attempt,
-                exc_info=True,
-            )
-    logger.error("rag pipeline prewarm gave up after 2 attempts; first query cold-starts")
+    try:
+        timeout_s = float(get_cfg("rag_prewarm_timeout_s", RAG_PREWARM_TIMEOUT_S))
+        for attempt in (1, 2):
+            try:
+                await asyncio.wait_for(_get_rag(), timeout=timeout_s)
+                logger.info("rag pipeline prewarm completed (attempt %d)", attempt)
+                return
+            except Exception:  # noqa: BLE001 — prewarm is best-effort, never fatal
+                logger.warning(
+                    "rag pipeline prewarm failed (attempt %d/2); "
+                    "falling back to lazy first-query init",
+                    attempt,
+                    exc_info=True,
+                )
+        logger.error("rag pipeline prewarm gave up after 2 attempts; first query cold-starts")
+    finally:
+        # Runs on every exit path — including cancellation at shutdown — so
+        # /ready never reports a finished prewarm as still in flight.
+        RAG_PREWARM_FINISHED = True
 
 
 def _maybe_start_rag_prewarm() -> asyncio.Task | None:
@@ -819,7 +841,11 @@ def _maybe_start_rag_prewarm() -> asyncio.Task | None:
     guaranteed inside _prewarm_rag_pipeline / rag_leg, so a re-startup in the
     same process is a no-op.
     """
+    global RAG_PREWARM_FINISHED
     if not bool(get_cfg("rag_prewarm_enabled", True)):
+        # Disabled means done: no task will ever set the flag, so /ready must
+        # not report perpetual warming.
+        RAG_PREWARM_FINISHED = True
         return None
     return asyncio.create_task(_prewarm_rag_pipeline())
 
@@ -857,8 +883,10 @@ async def _close_persistence_pools() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup: conditionally launch the RAG prewarm and the lead-mirror
-    reconciliation sweep (both background tasks, never blocking startup).
+    """Startup: await the Postgres rate-limit wiring first (pools are awaited
+    inside the wiring task; startup is non-fatal if it errors), then
+    conditionally launch the RAG prewarm and the lead-mirror reconciliation
+    sweep (both background tasks).
 
     Shutdown: cancel both tasks (the prewarm only ever awaits the idempotent
     LightRAG init; the sweep only sleeps between batches, so cancel is safe
@@ -942,11 +970,21 @@ def create_app() -> FastAPI:
 
     @app.get("/ready")
     async def ready() -> dict:
-        """PG reachable + LightRAG init flag (set by rag_leg on successful get_lightrag)."""
+        """PG reachable + LightRAG init flag (set by rag_leg on successful get_lightrag).
+
+        `rag_prewarm_finished` is informational only (True once the startup
+        prewarm task exited, success or failure): ok never depends on it, so a
+        failed prewarm degrades to lazy first-query init instead of failing
+        readiness.
+        """
         from api.application.services.rag_leg import LIGHTRAG_READY  # noqa: PLC0415
         from api.application.services.sql_leg import get_ro_pool  # noqa: PLC0415
 
-        checks: dict = {"pg": False, "lightrag": LIGHTRAG_READY}
+        checks: dict = {
+            "pg": False,
+            "lightrag": LIGHTRAG_READY,
+            "rag_prewarm_finished": RAG_PREWARM_FINISHED,
+        }
         try:
             pool = await get_ro_pool()
             async with pool.acquire() as conn:

@@ -1,0 +1,8 @@
+# Takes effect when apps/web itself is the build context. The production
+# build uses the MONOREPO ROOT as context (see Dockerfile header and
+# deploy/DEPLOY_RUNBOOK.md step 3); there the Dockerfile copies src/, public/
+# and config files explicitly, so .env* and local logs never enter the image.
+node_modules
+.next
+.env*
+.git

@@ -1,0 +1,16 @@
+# gcloud upload guard — never ship secrets or data.
+
+.git
+.venv
+node_modules
+data/
+docs/
+db/backups/
+.env*
+.github
+tests
+__pycache__
+*.dump
+.dsh
+apps/web/node_modules
+apps/web/.next

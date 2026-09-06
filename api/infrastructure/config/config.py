@@ -231,6 +231,10 @@ class Settings(BaseSettings):
     # first query does not pay the cold-start cost. Idempotent by construction;
     # failure degrades to the lazy first-query path without crashing startup.
     rag_prewarm_enabled: bool = True
+    # Per-attempt budget (seconds) for the startup prewarm task. Cold LightRAG
+    # init measures ~30-40s, so 120s absorbs slow PG/first-embedding variance
+    # while still failing a hung init instead of never retrying or giving up.
+    rag_prewarm_timeout_s: float = 120.0
 
     # Prompt assets — canonical api/prompts/ dir (HF-0). Exported as PROMPT_DIR so
     # LightRAG 1.5.6 resolves entity_type/<file> under it (bare filename contract).
