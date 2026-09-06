@@ -499,9 +499,17 @@ class Settings(BaseSettings):
     # DSNs
     @property
     def pg_dsn(self) -> str:
-        """asyncpg DSN for most queries (asyncpg driver)."""
+        """asyncpg DSN for most queries (asyncpg driver).
+
+        The password is percent-encoded so that special characters like '@'
+        do not corrupt the netloc (asyncpg splits at the first '@').
+        The raw password remains available via ``self.postgres_password``.
+        """
+        from urllib.parse import quote
+
+        encoded_pw = quote(self.postgres_password, safe="")
         return (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql://{self.postgres_user}:{encoded_pw}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_database}"
         )
 

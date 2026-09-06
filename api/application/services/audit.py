@@ -6,8 +6,10 @@ Inserts one row per query with redacted literals and hashed prompt/answer
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import threading
 from typing import Any
 
 import asyncpg
@@ -19,23 +21,76 @@ from .sql_leg import build_dsn, _pooler_safe_kwargs
 logger = logging.getLogger("api.audit")
 
 _audit_pool: asyncpg.Pool | None = None
+# Event loop the cached pool was created on: asyncpg connections are bound to
+# their creating loop, so a pool reused across loops fails every acquire.
+_audit_pool_loop: asyncio.AbstractEventLoop | None = None
+# Per-loop asyncio lock — asyncpg pools are loop-bound so a lock created on
+# one loop must not guard builds on another.  Matches the registry pattern.
+_pools_guard = threading.Lock()
+_pool_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_pool_lock(loop_id: int) -> asyncio.Lock:
+    """Return (or create) the per-loop lock inside the thread-safe guard."""
+    with _pools_guard:
+        lock = _pool_locks.get(loop_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _pool_locks[loop_id] = lock
+        return lock
+
 
 # Standalone string/number literals -> '?' placeholders (audit-safe redaction).
 _LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'|\b\d+(?:\.\d+)?\b")
 
 
 async def get_audit_pool() -> asyncpg.Pool:
-    global _audit_pool
-    if _audit_pool is None or _audit_pool.is_closing():
+    global _audit_pool, _audit_pool_loop
+    running = asyncio.get_running_loop()
+    # Fast path: cached pool is still valid — no lock contention.
+    if (
+        _audit_pool is not None
+        and not _audit_pool.is_closing()
+        and _audit_pool_loop is not None
+        and not _audit_pool_loop.is_closed()
+        and _audit_pool_loop is running
+    ):
+        return _audit_pool
+    # One async lock per loop so concurrent tasks on the same loop do not
+    # create two pools; the lock is created on this loop and only ever
+    # awaited from it. Matches the postgres_leads pattern.
+    lock = _get_pool_lock(id(running))
+    async with lock:
+        # Re-check inside the lock (double-checked locking).
+        if (
+            _audit_pool is not None
+            and not _audit_pool.is_closing()
+            and _audit_pool_loop is not None
+            and not _audit_pool_loop.is_closed()
+            and _audit_pool_loop is running
+        ):
+            return _audit_pool
+        # Cached pool is stale (dead or foreign loop — e.g. TestClient spins a
+        # new loop per test): drop it best-effort and rebuild on THIS loop.
+        stale = _audit_pool
+        _audit_pool = None
+        _audit_pool_loop = None
+        if stale is not None:
+            try:
+                stale.terminate()
+            except Exception:  # noqa: BLE001 — old pool may already be unusable
+                logger.warning("stale audit pool terminate failed (ignored)", exc_info=True)
         _audit_pool = await asyncpg.create_pool(build_dsn(), min_size=1, max_size=2, **_pooler_safe_kwargs())
-    return _audit_pool
+        _audit_pool_loop = running
+        return _audit_pool
 
 
 async def close_audit_pool() -> None:
-    global _audit_pool
+    global _audit_pool, _audit_pool_loop
     if _audit_pool is not None and not _audit_pool.is_closing():
         await _audit_pool.close()
     _audit_pool = None
+    _audit_pool_loop = None
 
 
 def redact_sql_spec(spec: Any) -> Any:

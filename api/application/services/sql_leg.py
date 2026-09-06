@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import unicodedata
+import urllib.parse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -128,7 +129,7 @@ def build_dsn() -> str:
     host = get_cfg("postgres_host", "localhost")
     port = get_cfg("postgres_port", 5432)
     user = get_cfg("postgres_user", "ragre")
-    password = get_cfg("postgres_password", "")
+    password = urllib.parse.quote(str(get_cfg("postgres_password", "")), safe="")
     db = get_cfg("postgres_database", "ragre")
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 

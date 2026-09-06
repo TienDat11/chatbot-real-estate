@@ -7,8 +7,10 @@ Any validation failure raises Sqlnl2sqlError; the caller degrades to rag-only.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import threading
 from datetime import date
 from typing import Any
 
@@ -162,11 +164,61 @@ def extract_sql(raw: str) -> str:
 
 # Read-only engine ro_nl2sql (read-only + 8s timeout)
 _nl2sql_pool: asyncpg.Pool | None = None
+# Event loop the cached pool was created on: asyncpg connections are bound to
+# their creating loop, so a pool reused across loops fails every acquire.
+_nl2sql_pool_loop: asyncio.AbstractEventLoop | None = None
+# Per-loop asyncio lock — asyncpg pools are loop-bound so a lock created on
+# one loop must not guard builds on another.  Matches the registry pattern.
+_pools_guard = threading.Lock()
+_pool_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_pool_lock(loop_id: int) -> asyncio.Lock:
+    """Return (or create) the per-loop lock inside the thread-safe guard."""
+    with _pools_guard:
+        lock = _pool_locks.get(loop_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _pool_locks[loop_id] = lock
+        return lock
 
 
 async def get_nl2sql_pool() -> asyncpg.Pool:
-    global _nl2sql_pool
-    if _nl2sql_pool is None or _nl2sql_pool.is_closing():
+    global _nl2sql_pool, _nl2sql_pool_loop
+    running = asyncio.get_running_loop()
+    # Fast path: cached pool is still valid — no lock contention.
+    if (
+        _nl2sql_pool is not None
+        and not _nl2sql_pool.is_closing()
+        and _nl2sql_pool_loop is not None
+        and not _nl2sql_pool_loop.is_closed()
+        and _nl2sql_pool_loop is running
+    ):
+        return _nl2sql_pool
+    # One async lock per loop so concurrent tasks on the same loop do not
+    # create two pools; the lock is created on this loop and only ever
+    # awaited from it. Matches the postgres_leads pattern.
+    lock = _get_pool_lock(id(running))
+    async with lock:
+        # Re-check inside the lock (double-checked locking).
+        if (
+            _nl2sql_pool is not None
+            and not _nl2sql_pool.is_closing()
+            and _nl2sql_pool_loop is not None
+            and not _nl2sql_pool_loop.is_closed()
+            and _nl2sql_pool_loop is running
+        ):
+            return _nl2sql_pool
+        # Cached pool is stale (dead or foreign loop — e.g. TestClient spins a
+        # new loop per test): drop it best-effort and rebuild on THIS loop.
+        stale = _nl2sql_pool
+        _nl2sql_pool = None
+        _nl2sql_pool_loop = None
+        if stale is not None:
+            try:
+                stale.terminate()
+            except Exception:  # noqa: BLE001 — old pool may already be unusable
+                logger.warning("stale nl2sql pool terminate failed (ignored)", exc_info=True)
         _nl2sql_pool = await asyncpg.create_pool(
             build_dsn(),
             min_size=1,
@@ -177,14 +229,16 @@ async def get_nl2sql_pool() -> asyncpg.Pool:
             },
             **_pooler_safe_kwargs(),
         )
-    return _nl2sql_pool
+        _nl2sql_pool_loop = running
+        return _nl2sql_pool
 
 
 async def close_nl2sql_pool() -> None:
-    global _nl2sql_pool
+    global _nl2sql_pool, _nl2sql_pool_loop
     if _nl2sql_pool is not None and not _nl2sql_pool.is_closing():
         await _nl2sql_pool.close()
     _nl2sql_pool = None
+    _nl2sql_pool_loop = None
 
 
 def _build_messages(query: str, as_of: date | None) -> list[dict]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from datetime import date, datetime
 from typing import Any
 
@@ -28,11 +29,26 @@ _lead_pool: asyncpg.Pool | None = None
 # Event loop the cached pool was created on: asyncpg connections are bound to
 # their creating loop, so a pool reused across loops fails every acquire.
 _lead_pool_loop: asyncio.AbstractEventLoop | None = None
+# Per-loop asyncio lock to prevent concurrent pool creation; threading.Lock
+# guards the lock-dict (sync dict ops only — no blocking on IO).
+_pools_guard = threading.Lock()
+_pool_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_pool_lock(loop_id: int) -> asyncio.Lock:
+    """Return (or create) the per-loop lock inside the thread-safe guard."""
+    with _pools_guard:
+        lock = _pool_locks.get(loop_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _pool_locks[loop_id] = lock
+        return lock
 
 
 async def get_lead_pool() -> asyncpg.Pool:
     global _lead_pool, _lead_pool_loop
     running = asyncio.get_running_loop()
+    # Fast path: cached pool is still valid — no lock contention.
     if (
         _lead_pool is not None
         and not _lead_pool.is_closing()
@@ -41,21 +57,33 @@ async def get_lead_pool() -> asyncpg.Pool:
         and _lead_pool_loop is running
     ):
         return _lead_pool
-    # Cached pool is stale (dead or foreign loop — e.g. TestClient spins a new
-    # loop per test): drop it best-effort and rebuild on THIS loop. terminate()
-    # is sync so it cannot await on a dead loop; quota gating stays fail-closed
-    # because callers still get errors when no live pool can be established.
-    stale = _lead_pool
-    _lead_pool = None
-    _lead_pool_loop = None
-    if stale is not None:
-        try:
-            stale.terminate()
-        except Exception:  # noqa: BLE001 — old pool may already be unusable
-            logger.warning("stale lead pool terminate failed (ignored)", exc_info=True)
-    _lead_pool = await asyncpg.create_pool(build_dsn(), min_size=1, max_size=5, **_pooler_safe_kwargs())
-    _lead_pool_loop = running
-    return _lead_pool
+    # One async lock per loop so concurrent tasks on the same loop do not
+    # create two pools; the lock is created on this loop and only ever
+    # awaited from it. Matches the postgres_project_registry pattern.
+    lock = _get_pool_lock(id(running))
+    async with lock:
+        # Re-check inside the lock (double-checked locking).
+        if (
+            _lead_pool is not None
+            and not _lead_pool.is_closing()
+            and _lead_pool_loop is not None
+            and not _lead_pool_loop.is_closed()
+            and _lead_pool_loop is running
+        ):
+            return _lead_pool
+        # Cached pool is stale (dead or foreign loop — e.g. TestClient spins a
+        # new loop per test): drop it best-effort and rebuild on THIS loop.
+        stale = _lead_pool
+        _lead_pool = None
+        _lead_pool_loop = None
+        if stale is not None:
+            try:
+                stale.terminate()
+            except Exception:  # noqa: BLE001 — old pool may already be unusable
+                logger.warning("stale lead pool terminate failed (ignored)", exc_info=True)
+        _lead_pool = await asyncpg.create_pool(build_dsn(), min_size=1, max_size=5, **_pooler_safe_kwargs())
+        _lead_pool_loop = running
+        return _lead_pool
 
 
 async def close_lead_pool() -> None:
