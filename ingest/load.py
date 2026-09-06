@@ -212,6 +212,10 @@ async def load_document(
                 ON CONFLICT (doc_id) DO UPDATE
                   SET status='published',
                       version = documents.version + 1,
+                      kind = EXCLUDED.kind,
+                      title = EXCLUDED.title,
+                      effective_from = EXCLUDED.effective_from,
+                      effective_to = EXCLUDED.effective_to,
                       content_hash = EXCLUDED.content_hash,
                       project_key = COALESCE(EXCLUDED.project_key, documents.project_key),
                       metadata = EXCLUDED.metadata,

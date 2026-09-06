@@ -9,7 +9,6 @@ loader preserves them (ingest/run_soleil_ingest.py, preserve_seed_facts=True).
 from __future__ import annotations
 
 import datetime as _dt
-import functools
 import hashlib
 import json
 import pathlib
@@ -150,6 +149,7 @@ def _read_ocr(filename: str) -> str:
 
 # project docs - overview + QnA
 
+
 def _project_overview() -> DocumentDef:
     data = _load_json("project_info.json")
     source = _DATA_DIR / "project_info.json"
@@ -158,37 +158,50 @@ def _project_overview() -> DocumentDef:
     toa_a1 = qm.get("toa_A1", {})
 
     overview = [
-        "- Tên pháp lý:", data.get("ten_phap_ly"),
-        "- Tên thương mại:", data.get("ten_thuong_mai"),
-        "- Vị trí:", data.get("vi_tri"),
-        "- Chủ đầu tư:", data.get("chu_dau_tu"),
-        "- Quản lý vận hành:", data.get("quan_ly_van_hanh"),
-        "- Thiết kế:", data.get("thiet_ke"),
-        "- Thi công:", data.get("thi_cong"),
+        "- Tên pháp lý:",
+        data.get("ten_phap_ly"),
+        "- Tên thương mại:",
+        data.get("ten_thuong_mai"),
+        "- Vị trí:",
+        data.get("vi_tri"),
+        "- Chủ đầu tư:",
+        data.get("chu_dau_tu"),
+        "- Quản lý vận hành:",
+        data.get("quan_ly_van_hanh"),
+        "- Thiết kế:",
+        data.get("thiet_ke"),
+        "- Thi công:",
+        data.get("thi_cong"),
     ]
     quy_mo = [
         f"- Tổng diện tích khu đất: {qm.get('tong_dien_tich_dat_m2')} m2",
         f"- Hệ số SDĐ: {qm.get('he_so_sdd')}",
         f"- Mật độ xây dựng: {qm.get('mat_do_xay_dung_pct')}%",
-        f"- Đất công trình: {qm.get('dat_cong_trinh_m2')} m2; cây xanh {qm.get('dien_tich_cay_xanh_m2')} m2",
-        f"- Số tầng hầm: {qm.get('so_tang_ham')}; tổng diện tích sàn hầm {qm.get('tong_dien_tich_san_ham_m2')} m2",
+        f"- Đất công trình: {qm.get('dat_cong_trinh_m2')} m2; cây xanh {qm.get('dien_tich_cay_xanh_m2')} m2",  # noqa: E501
+        f"- Số tầng hầm: {qm.get('so_tang_ham')}; tổng diện tích sàn hầm {qm.get('tong_dien_tich_san_ham_m2')} m2",  # noqa: E501
         f"- Cấp công trình: {qm.get('cap_cong_trinh')}",
         "- Tòa D (The Maris Soleil - Wyndham): "
         f"{toa_d.get('so_tang_noi')} tầng / {toa_d.get('chieu_cao_m')} m / "
-        f"{toa_d.get('tong_san_pham')} sản phẩm (còn {toa_d.get('san_pham_con_lai_catalog')} theo catalog). "
+        f"{toa_d.get('tong_san_pham')} sản phẩm (còn {toa_d.get('san_pham_con_lai_catalog')} theo catalog). "  # noqa: E501
         f"Tình trạng: {toa_d.get('tinh_trang')}",
         "- Tòa A1 (The Grand Soleil - Trademark Collection): "
         f"{toa_a1.get('so_tang_noi')} tầng / {toa_a1.get('chieu_cao_m')} m / "
-        f"{toa_a1.get('tong_san_pham')} sản phẩm (còn {toa_a1.get('san_pham_con_lai_catalog')} theo catalog). "
+        f"{toa_a1.get('tong_san_pham')} sản phẩm (còn {toa_a1.get('san_pham_con_lai_catalog')} theo catalog). "  # noqa: E501
         f"Tình trạng: {toa_a1.get('tinh_trang')}",
         f"- Tổng sản phẩm còn lại theo catalog: {qm.get('tong_san_pham_con_lai_catalog')}",
-        f"- Lưu ý: {qm.get('note_san_pham')}",
+        f"- Số tòa của tổ hợp: {qm.get('so_toa')} tòa ({', '.join(qm.get('danh_sach_toa', []))})",
+        f"- Khoảng cách giữa các tòa: {qm.get('khoang_cach_toa')}",
+        f"- Lưu ý tòa: {qm.get('note_toa')}",
+        f"- Lưu ý sản phẩm: {qm.get('note_san_pham')}",
     ]
 
     def _co_cau(tower_key: str) -> str:
         tower = data.get("co_cau_can_ho", {}).get(tower_key, {})
-        lines = [f"- {loai}: {info.get('so_can')} căn, diện tích {info.get('dien_tich_m2')} m2"
-                 for loai, info in tower.items() if loai != "tong_can"]
+        lines = [
+            f"- {loai}: {info.get('so_can')} căn, diện tích {info.get('dien_tich_m2')} m2"
+            for loai, info in tower.items()
+            if loai != "tong_can"
+        ]
         return "\n".join(lines) if lines else "- (không có dữ liệu)"
 
     co_cau = [
@@ -261,7 +274,7 @@ def _qna_doc() -> DocumentDef:
         metadata={
             "project_name": "The Soleil Đà Nẵng",
             "origin": "qna_ocr",
-            "source": "data/_processed/soleil/_extract/ocr/2025-10-30-bo-cau-hoi-ban-hang-da-the-soleil-da-nang.md",
+            "source": "data/_processed/soleil/_extract/ocr/2025-10-30-bo-cau-hoi-ban-hang-da-the-soleil-da-nang.md",  # noqa: E501
             "trust": "estimate",
         },
         sections=[(None, _read_ocr("2025-10-30-bo-cau-hoi-ban-hang-da-the-soleil-da-nang.md"))],
@@ -269,6 +282,7 @@ def _qna_doc() -> DocumentDef:
 
 
 # price docs - matrix + payment schedule + discount policy
+
 
 def _price_matrix_doc() -> DocumentDef:
     """Event-basket price sheet: 9 unit types (block x type) with min-max VND."""
@@ -296,10 +310,12 @@ def _price_matrix_doc() -> DocumentDef:
         sections.append((f"Giá loại căn {t['loai']} - {t.get('ten_toa')}", "\n".join(body)))
 
     metadata = dict(_PRICE_META)
-    metadata.update({
-        "price_structure": "event-basket",
-        "source": source.relative_to(_ROOT).as_posix(),
-    })
+    metadata.update(
+        {
+            "price_structure": "event-basket",
+            "source": source.relative_to(_ROOT).as_posix(),
+        }
+    )
     return DocumentDef(
         doc_id="price-soleil-2026q3",
         kind="price",
@@ -337,7 +353,8 @@ def _payment_doc() -> DocumentDef:
         (
             "Chuyển khoản",
             "\n".join(
-                f"- {k}: {v}" for k, v in {
+                f"- {k}: {v}"
+                for k, v in {
                     "Chủ tài khoản": ck.get("chu_tai_khoan"),
                     "Số tài khoản": ck.get("so_tai_khoan"),
                     "Ngân hàng": ck.get("ngan_hang"),
@@ -363,10 +380,12 @@ def _payment_doc() -> DocumentDef:
         sections.append((f"Phương thức: {m.get('name')}", "\n".join(body)))
 
     metadata = dict(_PRICE_META)
-    metadata.update({
-        "price_structure": "payment-schedule",
-        "source": source.relative_to(_ROOT).as_posix(),
-    })
+    metadata.update(
+        {
+            "price_structure": "payment-schedule",
+            "source": source.relative_to(_ROOT).as_posix(),
+        }
+    )
     return DocumentDef(
         doc_id="price-soleil-2026q3-payment",
         kind="price",
@@ -398,10 +417,17 @@ def _policy_doc() -> DocumentDef:
             sections.append((f"Ma trận chiết khấu Tòa {tower}", "\n".join(entries)))
 
     eb = rules.get("early_booking", {})
-    sections.append(("Khuyến mại chung / early booking", f"- {eb.get('value')}\n- {eb.get('deadline')}"))
+    sections.append(
+        ("Khuyến mại chung / early booking", f"- {eb.get('value')}\n- {eb.get('deadline')}")
+    )
 
     dp = rules.get("deposit", {})
-    sections.append(("Tiền cọc (TTĐC)", f"- {dp.get('total_vnd')} đ — {dp.get('note')}\n- {dp.get('base_rule')}"))
+    sections.append(
+        (
+            "Tiền cọc (TTĐC)",
+            f"- {dp.get('total_vnd')} đ — {dp.get('note')}\n- {dp.get('base_rule')}",
+        )
+    )
 
     htls = rules.get("htls", {})
     htls_lines = [f"- Ngân hàng: {', '.join(htls.get('banks', []))}"]
@@ -417,7 +443,7 @@ def _policy_doc() -> DocumentDef:
     if mn:
         htls_lines.append(
             f"- Mua nhà 0 đồng (chỉ A1): vay {mn.get('vay_max_pct')}%, HTLS "
-            f"{mn.get('htls_max_pct')}%, thời hạn {mn.get('term_months')} tháng — {mn.get('note', '')}"
+            f"{mn.get('htls_max_pct')}%, thời hạn {mn.get('term_months')} tháng — {mn.get('note', '')}"  # noqa: E501
         )
     htls_lines.append(f"- Ân hạn: {htls.get('grace_note')}")
     sections.append(("Chính sách HTLS", "\n".join(htls_lines)))
@@ -425,13 +451,17 @@ def _policy_doc() -> DocumentDef:
     for key in ("uy_thac_cho_thue", "vip", "kpbt", "thanh_toan_som", "sale_floor", "price_quality"):
         item = rules.get(key, {})
         if item:
-            sections.append((item.get("label", key), f"- {item.get('value')}\n- {item.get('note', '')}"))
+            sections.append(
+                (item.get("label", key), f"- {item.get('value')}\n- {item.get('note', '')}")
+            )
 
     metadata = dict(_PRICE_META)
-    metadata.update({
-        "price_structure": "discount-policy",
-        "source": source.relative_to(_ROOT).as_posix(),
-    })
+    metadata.update(
+        {
+            "price_structure": "discount-policy",
+            "source": source.relative_to(_ROOT).as_posix(),
+        }
+    )
     return DocumentDef(
         doc_id="price-soleil-2026q3-policy",
         kind="price",
@@ -444,7 +474,156 @@ def _policy_doc() -> DocumentDef:
     )
 
 
+# rental projection doc - buy-to-rent economics (estimated rental cash flow)
+
+
+def _rental_projection_doc() -> DocumentDef:
+    """Estimated rental cash-flow projections (PA tự vận hành / PA ủy thác).
+
+    Rendered from data/_processed/soleil/rental_projections.json, itself
+    extracted deterministically from the two "Bảng tính dòng tiền thuê ước
+    tính" workbooks (ingest/soleil_rental_extract.py). Trust = estimate: the
+    source sheets are explicit that the figures are advisory, not a yield
+    guarantee.
+    """
+    data = _load_json("rental_projections.json")
+    source = _DATA_DIR / "rental_projections.json"
+    project = _load_json("project_info.json")
+    vi_tri = project.get("vi_tri", "mặt đường Võ Nguyên Giáp, quận Sơn Trà, Đà Nẵng")
+
+    # Retrieval-facing nightly rental summary. The per-unit rows below carry the
+    # same figures; this section phrases them with the natural query words a
+    # customer actually types ("giá thuê 1 đêm", "qua đêm", "2,8 triệu đồng/đêm",
+    # "studio", "view biển") so hybrid retrieval surfaces this doc for
+    # short-stay rental questions (the figures were otherwise losing the ranking
+    # battle to the ủy thác QnA chunk).
+    # Short display names for the customer-facing summary: the source workbook
+    # codes unit types compactly ("Stu"), but customers type "studio" — the
+    # keyword side of hybrid retrieval needs the full word in the chunk text.
+    _NIGHTLY_DISPLAY = {"Stu": "Studio"}
+    nightly_rows: list[str] = []
+    seen_types: set[str] = set()
+    for scenario in data.get("scenarios", []):
+        for ut in scenario.get("unit_types", []):
+            loai = ut.get("loai")
+            if loai in seen_types:
+                continue
+            seen_types.add(loai)
+            daily = ut.get("gia_thue_tham_khao_vnd_ngay")
+            if daily:
+                vn = f"{daily / 1_000_000:.1f}".replace(".", ",")
+                display = _NIGHTLY_DISPLAY.get(loai, loai)
+                nightly_rows.append(
+                    f"- {display} ({loai}): giá thuê 1 đêm (qua đêm) khoảng {vn} triệu đồng/đêm "
+                    f"({int(daily):,} VND/đêm)"
+                )
+    summary = (
+        f"- Giá thuê 1 đêm (qua đêm) căn hộ {project.get('ten_thuong_mai', 'The Soleil Đà Nẵng')} "
+        f"view biển, mặt đường Võ Nguyên Giáp ({vi_tri}):\n"
+        + "\n".join(nightly_rows)
+        + "\n- Các mức giá trên là giá thuê tham khảo theo bảng tính dòng tiền thuê ước tính; "
+        "không phải cam kết lợi nhuận cho thuê."
+    )
+    sections: list[tuple[str | None, str]] = [
+        ("Ghi chú chung", f"- {data.get('note')}\n- Nguồn: {data.get('source')}"),
+        ("Giá thuê qua đêm (tóm tắt)", summary),
+    ]
+
+    for scenario in data.get("scenarios", []):
+        header = [
+            f"- {scenario.get('label')} (tòa {scenario.get('tower')}, "
+            f"năm đầu {scenario.get('first_year')})",
+        ]
+        share = scenario.get("revenue_share")
+        if share:
+            header.append(
+                f"- Chia sẻ doanh thu: chủ đầu tư {share.get('cdt')} / khách hàng {share.get('kh')}"
+            )
+        body = "\n".join(header)
+        for ut in scenario.get("unit_types", []):
+            lines = [
+                f"- Loại căn: {ut.get('loai')} — căn mẫu {ut.get('ma_can')}, "
+                f"{ut.get('dien_tich_m2')} m2",
+                f"- Giá tham khảo: {ut.get('gia_tham_khao_vnd'):,} VND",
+                f"- Giá thuê 1 đêm (qua đêm): {ut.get('gia_thue_tham_khao_vnd_ngay'):,} VND/đêm "
+                f"(khoảng {ut.get('gia_thue_tham_khao_vnd_ngay') / 1_000_000:.1f} triệu đồng/đêm), "
+                f"tỷ lệ lấp đầy tham khảo {ut.get('ty_le_lap_day_tham_khao')}",
+            ]
+            rev = ut.get("doanh_thu_nam_dau_vnd")
+            cost = ut.get("chi_phi_nam_dau_vnd")
+            profit = ut.get("loi_nhuan_nam_dau_vnd")
+            share_cdt = ut.get("share_cdt_nam_dau_vnd")
+            share_kh = ut.get("share_kh_nam_dau_vnd")
+            net = ut.get("thu_nhap_sau_chi_phi_nam_dau_vnd")
+            if rev is not None:
+                lines.append(f"- Doanh thu năm đầu: {rev:,} VND")
+            if cost is not None:
+                lines.append(f"- Chi phí năm đầu: {cost:,} VND")
+            if profit is not None:
+                lines.append(f"- Lợi nhuận năm đầu: {profit:,} VND")
+            if share_cdt is not None:
+                lines.append(f"- Chia sẻ doanh thu cho CĐT năm đầu: {share_cdt:,} VND")
+            if share_kh is not None:
+                lines.append(f"- Chia sẻ doanh thu cho KH năm đầu: {share_kh:,} VND")
+            if net is not None:
+                lines.append(f"- Thu nhập sau chi phí của KH năm đầu: {net:,} VND")
+            if ut.get("ty_suat_loi_nhuan_von_nam_dau_pct") is not None:
+                lines.append(
+                    f"- Tỷ suất lợi nhuận/Vốn bỏ ra năm đầu: "
+                    f"{ut['ty_suat_loi_nhuan_von_nam_dau_pct']}%"
+                )
+            if ut.get("cumulative_10y_yield_pct") is not None:
+                lines.append(
+                    f"- Tỷ suất lợi nhuận cộng dồn 10 năm: {ut['cumulative_10y_yield_pct']}%"
+                )
+            cash_flow = ut.get("cash_flow_10y", [])
+            if cash_flow:
+                rows = [
+                    "Năm | Giá thuê/đêm | Lấp đầy | Doanh thu | Chi phí | "
+                    "Lợi nhuận/Thu nhập KH | Tỷ suất vốn"
+                ]
+                for entry in cash_flow:
+                    room = f"{entry.get('gia_phong_vnd_ngay'):,}"
+                    occ = f"{entry.get('ty_le_lap_day'):.0%}"
+                    rev_y = f"{entry.get('doanh_thu_vnd'):,}" if entry.get("doanh_thu_vnd") else "-"
+                    cost_y = f"{entry.get('chi_phi_vnd'):,}" if entry.get("chi_phi_vnd") else "-"
+                    net_y = entry.get("loi_nhuan_vnd") or entry.get("thu_nhap_sau_chi_phi_vnd")
+                    net_s = f"{net_y:,}" if net_y else "-"
+                    yield_s = (
+                        f"{entry.get('ty_suat_loi_nhuan_von_pct')}%"
+                        if entry.get("ty_suat_loi_nhuan_von_pct") is not None
+                        else "-"
+                    )
+                    rows.append(
+                        f"{entry['year']} | {room} | {occ} | {rev_y} | {cost_y} | "
+                        f"{net_s} | {yield_s}"
+                    )
+                lines.append("- Dòng tiền 10 năm:\n  " + "\n  ".join(rows))
+            body += "\n" + "\n".join(lines)
+        sections.append((f"Phương án: {scenario.get('label')}", body))
+
+    metadata = dict(_PRICE_META)
+    metadata.update(
+        {
+            "price_structure": "rental-projection",
+            "trust": "estimate",
+            "source": source.relative_to(_ROOT).as_posix(),
+        }
+    )
+    return DocumentDef(
+        doc_id="rental-soleil-2026q3",
+        kind="price",
+        title="Dòng tiền thuê ước tính — đầu tư cho thuê The Soleil Đà Nẵng Q3/2026",
+        source_path=source,
+        effective_from=CONFIRMED_DATE,
+        effective_to=None,
+        metadata=metadata,
+        sections=sections,
+    )
+
+
 # legal docs - investment decision + master plan + PCCC certificate
+
 
 def _legal_metadata(
     number: str,
@@ -476,10 +655,16 @@ def _legal_docs() -> list[DocumentDef]:
             effective_from=_dt.date(2018, 9, 11),
             effective_to=None,
             metadata=_legal_metadata(
-                "5753/QĐ-UBND (thay thế) / QĐ 11/09/2018", "quyet-dinh",
-                "UBND TP Đà Nẵng", "2018-09-11",
-                ["chấp thuận chủ trương đầu tư", "chấp thuận nhà đầu tư",
-                 "PPC An Thịnh Đà Nẵng", "50 năm từ 13/10/2017"],
+                "5753/QĐ-UBND (thay thế) / QĐ 11/09/2018",
+                "quyet-dinh",
+                "UBND TP Đà Nẵng",
+                "2018-09-11",
+                [
+                    "chấp thuận chủ trương đầu tư",
+                    "chấp thuận nhà đầu tư",
+                    "PPC An Thịnh Đà Nẵng",
+                    "50 năm từ 13/10/2017",
+                ],
                 ["legal-soleil-qd6608-2016", "legal-soleil-pccc-2017"],
             ),
             sections=[(None, _read_ocr("2018-09-11-soleil-chu-truong-au-tu.md"))],
@@ -487,12 +672,15 @@ def _legal_docs() -> list[DocumentDef]:
         DocumentDef(
             doc_id="legal-soleil-qd6608-2016",
             kind="legal",
-            title="Quyết định 6608/QĐ-UBND phê duyệt tổng mặt bằng 1/500 (28/09/2016)",
+            title="Quyết định 6608/QĐ-UBND phê duyệt tổng mặt bằng 1/500 (29/09/2016)",
             source_path=_OCR_DIR / "q-6608-phe-duyet-tong-mat-bang.md",
-            effective_from=_dt.date(2016, 9, 28),
+            effective_from=_dt.date(2016, 9, 29),
             effective_to=None,
             metadata=_legal_metadata(
-                "6608/QĐ-UBND", "quyet-dinh", "UBND TP Đà Nẵng", "2016-09-28",
+                "6608/QĐ-UBND",
+                "quyet-dinh",
+                "UBND TP Đà Nẵng",
+                "2016-09-29",
                 ["quy hoạch tổng mặt bằng", "1/500", "hệ số SDĐ 16,83"],
                 ["legal-soleil-chu-truong-2018"],
             ),
@@ -506,7 +694,9 @@ def _legal_docs() -> list[DocumentDef]:
             effective_from=_dt.date(2017, 8, 18),
             effective_to=None,
             metadata=_legal_metadata(
-                "4602/TD-PCCC-P6", "gcn-pccc", "Cục Cảnh sát PCCC & CNCH, Bộ Công an",
+                "4602/TD-PCCC-P6",
+                "gcn-pccc",
+                "Cục Cảnh sát PCCC & CNCH, Bộ Công an",
                 "2017-08-18",
                 ["phòng cháy chữa cháy", "thẩm duyệt thiết kế", "giai đoạn 2"],
                 ["legal-soleil-chu-truong-2018"],
@@ -518,11 +708,12 @@ def _legal_docs() -> list[DocumentDef]:
 
 # public API (builder entry points)
 
+
 def build_documents() -> list[ParsedDoc]:
     """Build every Soleil registry document from the confirmed processed corpus."""
     defs = (
         [_project_overview(), _qna_doc()]
-        + [_price_matrix_doc(), _payment_doc(), _policy_doc()]
+        + [_price_matrix_doc(), _payment_doc(), _policy_doc(), _rental_projection_doc()]
         + _legal_docs()
     )
     return [_render(d) for d in defs]
@@ -545,19 +736,22 @@ def validate_document(doc: ParsedDoc) -> list[str]:
 
 # CLI
 
+
 def _dry_run_report(docs: list[ParsedDoc]) -> str:
     columns = ("doc_id", "kind", "title", "eff_from", "eff_to", "sections", "chars")
     rows: list[list[str]] = []
     for d in sorted(docs, key=lambda x: (x.kind, x.doc_id)):
-        rows.append([
-            d.doc_id,
-            d.kind,
-            d.title[:34],
-            str(d.effective_from),
-            str(d.effective_to or "open"),
-            str(len(d.sections)),
-            str(sum(len(s.text) for s in d.sections)),
-        ])
+        rows.append(
+            [
+                d.doc_id,
+                d.kind,
+                d.title[:34],
+                str(d.effective_from),
+                str(d.effective_to or "open"),
+                str(len(d.sections)),
+                str(sum(len(s.text) for s in d.sections)),
+            ]
+        )
     widths = [max(len(r[i]) for r in [columns, *rows]) for i in range(len(columns))]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     lines = [fmt.format(*columns)]
@@ -589,14 +783,24 @@ def main() -> int:
         import json as _json
 
         for d in docs:
-            print(_json.dumps({
-                "doc_id": d.doc_id, "kind": d.kind, "title": d.title,
-                "source_file": d.source_file, "effective_from": str(d.effective_from),
-                "effective_to": str(d.effective_to), "status": "published",
-                "content_hash": d.content_hash,
-                "version": 1, "metadata": d.metadata,
-                "section_count": len(d.sections),
-            }, ensure_ascii=False))
+            print(
+                _json.dumps(
+                    {
+                        "doc_id": d.doc_id,
+                        "kind": d.kind,
+                        "title": d.title,
+                        "source_file": d.source_file,
+                        "effective_from": str(d.effective_from),
+                        "effective_to": str(d.effective_to),
+                        "status": "published",
+                        "content_hash": d.content_hash,
+                        "version": 1,
+                        "metadata": d.metadata,
+                        "section_count": len(d.sections),
+                    },
+                    ensure_ascii=False,
+                )
+            )
         return 1 if problems else 0
 
     print(_dry_run_report(docs))
