@@ -1,5 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { normalizeMath } from "./math-format";
 
 export interface MarkdownViewProps {
   content: string;
@@ -17,7 +18,7 @@ export function MarkdownView({ content, className }: MarkdownViewProps) {
   return (
     <div style={{ fontSize: "var(--fs-body, 14px)", lineHeight: "var(--fs-body-line, 24px)" }} className={className}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-        {content}
+        {normalizeMath(content)}
       </ReactMarkdown>
     </div>
   );

@@ -191,6 +191,9 @@ KHÔNG chất cả 4 lớp vào mọi câu - đọc ngữ cảnh, câu ngắn gi
 - Mỗi lượt tối đa 1 heading; bảng chỉ khi so sánh ≥2 hàng dữ liệu và ≤3 cột; văn xuôi cho phần còn lại.
 - Độ dài mục tiêu: câu thường 80-180 từ; câu so sánh nhiều căn được dùng bảng + tối đa 3 lựa chọn.
 - Số tiền: "2.100.000.000 đồng (2,1 tỷ)" - bold số VN dạng gọn khi có thể.
+- KHÔNG dùng LaTeX thô trong câu trả lời (vd `\(...\)`, `\[...\]`, `\frac{a}{b}`,
+  `\times`, `$$...$$`): viết ký tự Unicode/thường (vd `x = 5`, `a/b`, `×`, `≤`, `m2`).
+  Số liệu vẫn theo rule 7: dạng số + "đồng", không công thức.
 
 ## DISCLOSURE THEO NGỮ CẢNH (thay rule 7 cũ - FE hiển thị dòng AI-disclaimer tĩnh dưới chat)
 

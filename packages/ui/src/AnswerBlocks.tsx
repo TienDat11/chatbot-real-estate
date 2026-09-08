@@ -12,6 +12,7 @@ import {
   splitBlocks,
   stripMarkdownMarkers,
 } from "./inline-format";
+import { normalizeMath } from "./math-format";
 
 // Colors mirror the app's premium proptech tokens (apps/web/src/lib/tokens.ts):
 // navy #0E2A47 primary, warm border neutral #E9E2D6. The ui package stays
@@ -95,7 +96,6 @@ const HEADING_STYLE = {
   maxWidth: "65ch",
 } as const;
 
-function HeadingBlock({ block }: { block: string }) {
   // [B3] Root cause of "entire answer bold-large": models emit a `##` heading
   // and the following paragraph WITHOUT a blank line, so splitBlocks hands
   // them to us as ONE block. Only the heading LINE itself may take heading
@@ -104,7 +104,6 @@ function HeadingBlock({ block }: { block: string }) {
   const lines = block.split("\n");
   const headingLine = lines[0] ?? "";
   const bodyLines = lines.slice(1).filter((l) => l.trim().length > 0);
-  const text = headingLine.replace(/^\s*#{1,6}\s+/, "");
   return (
     <>
       <div className="rag-answer__heading" style={HEADING_STYLE}>
@@ -257,8 +256,9 @@ function ParagraphBlock({ block }: { block: string }) {
 }
 
 function renderInline(text: string) {
-  // Preprocess with boldPrice so VND amounts get the navy <strong> treatment.
-  const processed = boldPrice(text);
+  // Normalize first (math → Unicode, stray HTML → markdown), THEN boldPrice,
+  // so price-bolding sees clean digits, never a `$…$`/`\text{}` span.
+  const processed = boldPrice(normalizeMath(text));
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}

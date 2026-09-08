@@ -28,6 +28,11 @@ describe("boldPrice", () => {
   it("leaves strings without prices untouched", () => {
     expect(boldPrice("hello world")).toBe("hello world");
   });
+  it("does not treat ~ as inline-code opener (Vietnamese 'approximately')", () => {
+    const out = boldPrice("giá ~2 tỷ, đợt 2 ~500 triệu");
+    expect(out).toContain("**2 tỷ**");
+    expect(out).toContain("**500 triệu**");
+  });
 });
 
 describe("classifyBlock", () => {

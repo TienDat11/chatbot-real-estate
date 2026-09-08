@@ -57,6 +57,12 @@ from api.domain.value_objects.constants import (
 )
 from api.infrastructure.config.config import project_geo_center
 from api.infrastructure.dependencies import get_geo, get_reranker
+from api.domain.services.guard_output import (
+    GuardResult as OutputGuardResult,
+    guard_output,
+    normalize_answer_display,
+    sanitize_output,
+)
 from api.infrastructure.ports.geo import GeoResult
 
 logger = logging.getLogger("api.workflow")
@@ -601,7 +607,7 @@ class RagQueryWorkflow(Workflow):
             token = sanitize_output(token)
             parts.append(token)
             await self._emit(SSE_EVENT_TOKEN, {"text": token})
-        answer = "".join(parts)
+        answer = normalize_answer_display("".join(parts))
         await ctx.store.set("answer", answer)
 
         audit = await ctx.store.get("audit")
