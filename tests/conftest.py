@@ -6,6 +6,12 @@ plus a fake PG sales mapping. Tests opt in by naming the fixture; nothing is
 autouse, so DB-free tests that never touch staff auth pay zero setup cost.
 """
 
+collect_ignore_glob = ["e2e/*"]
+# ``tests/e2e`` runs against live FE+BE dev servers (``pytest -m e2e``) and
+# needs ``playwright`` from the repo venv; CI and the default local run use
+# ``-m "not e2e"``, so collection must skip the directory entirely — importing
+# those modules without playwright installed crashes collection.
+
 import asyncio
 
 import pytest
