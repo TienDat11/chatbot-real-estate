@@ -32,6 +32,7 @@ from api.application.services.project_scope import (
 )
 from api.interfaces.api.main import QueryRequest, create_app
 from tests._auth_seams import sales_bearer_headers
+from tests._training_seams import install_training_seams
 
 # --- 1. training policy: explicit lookup behaviors -----------------------------
 
@@ -223,6 +224,9 @@ _PAYLOAD = {
 def test_sse_routing_frame_strips_lead_cta_in_training(
     client, monkeypatch, local_rsa_jwk, offline_auth_seams
 ) -> None:
+    # Offline registry/chat seams — the training preflight reads PG lazily.
+    install_training_seams(monkeypatch)
+
     async def ok_run(self, query, session_id, as_of, history, on_event=None, **kwargs):
         assert is_training_scope(kwargs["project_key"])
         if on_event is not None:

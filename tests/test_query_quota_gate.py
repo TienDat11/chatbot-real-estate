@@ -42,6 +42,7 @@ from api.infrastructure import dependencies as dependency_injection
 from api.infrastructure.adapters import firebase_auth_jwks
 from api.infrastructure.ports.firebase_auth import VerifiedFirebaseUser
 from api.interfaces.api.main import create_app
+from tests._training_seams import install_training_seams
 
 PROJECT_ID = "sale-chat-bot-11e49"
 ISSUER = f"https://securetoken.google.com/{PROJECT_ID}"
@@ -212,6 +213,11 @@ def install_gate(monkeypatch, quota_store, gate_secret):
 
 @pytest_asyncio.fixture()
 async def client(monkeypatch, install_gate):
+    install_gate()
+    # Training-mode requests run the /query preflight, which resolves the
+    # project registry and chat history lazily — keep those offline so the
+    # suite never depends on a reachable PG.
+    install_training_seams(monkeypatch)
     install_gate()
     monkeypatch.setattr(
         "api.application.pipelines.conv_workflow.RagQueryPipelineConv",

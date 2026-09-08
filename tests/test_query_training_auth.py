@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 from api.application.services.query_quota_gate import UnmanagedTurnContext
 from api.interfaces.api.main import create_app
 from tests._auth_seams import MAPPED_SALES_ID_BY_UID, base_claims, mint_id_token
+from tests._training_seams import install_training_seams
 
 
 class _OfflineQuotaGate:
@@ -62,6 +63,10 @@ class FakePipeline:
 
 @pytest.fixture()
 def client(monkeypatch, offline_auth_seams) -> TestClient:
+    # Training preflight + persist read the registry/chat seams lazily at call
+    # time; without these offline fakes the tests hit the real PG (pass on a
+    # dev machine with DB access, fail in CI and offline runs).
+    install_training_seams(monkeypatch)
     monkeypatch.setattr(
         "api.application.services.query_quota_gate.build_query_quota_gate",
         lambda: _OfflineQuotaGate(),
