@@ -96,6 +96,7 @@ const HEADING_STYLE = {
   maxWidth: "65ch",
 } as const;
 
+function HeadingBlock({ block }: { block: string }) {
   // [B3] Root cause of "entire answer bold-large": models emit a `##` heading
   // and the following paragraph WITHOUT a blank line, so splitBlocks hands
   // them to us as ONE block. Only the heading LINE itself may take heading
@@ -104,6 +105,7 @@ const HEADING_STYLE = {
   const lines = block.split("\n");
   const headingLine = lines[0] ?? "";
   const bodyLines = lines.slice(1).filter((l) => l.trim().length > 0);
+  const text = headingLine.replace(/^\s*#{1,6}\s+/, "");
   return (
     <>
       <div className="rag-answer__heading" style={HEADING_STYLE}>
