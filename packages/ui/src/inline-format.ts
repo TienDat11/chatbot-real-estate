@@ -2,17 +2,30 @@
  * Inline + block formatting helpers for AnswerBlocks (Story 5.6).
  * Pure functions — unit-testable without a DOM.
  */
+import { mapOutsideCode } from "./math-format";
 
 /**
  * BoldPrice regex: wraps VND amounts like "2,1 tỷ", "500 triệu", "1.2 tỷ/m²".
  * [RV-18/08] The "tr" shorthand must NOT match "5 trường học" — a negative
  * lookahead guards against a following Vietnamese letter.
+ * [global] `g` so EVERY amount on a line is bolded, not just the first.
  */
 export const BOLD_PRICE_RE =
-  /(\d{1,3}(?:[.,]\d{1,3})*\s*(?:tỷ|triệu|trieu|tr(?=[^a-zà-ỹA-ZÀ-Ỹ]|$))(?:\s*\/\s*m²)?)/i;
+  /(\b\d{1,3}(?:[.,]\d{1,3})*\s*(?:tỷ|triệu|trieu|tr(?=[^a-zà-ỹA-ZÀ-Ỹ]|$))(?:\s*\/\s*m²)?)/gi;
 
+/**
+ * Wrap VND amounts in markdown `**bold**` so ReactMarkdown v9 (no rehype-raw)
+ * parses them into strong nodes. Guards:
+ * - code spans (`` `2 tỷ` ``) pass through verbatim via mapOutsideCode;
+ * - text already inside `**…**` is left alone (no double-bolding).
+ */
 export function boldPrice(text: string): string {
-  return text.replace(BOLD_PRICE_RE, (match) => `**${match}**`);
+  return mapOutsideCode(text, (plain) =>
+    plain
+      .split(/(\*\*[^*]+\*\*)/g)
+      .map((part) => (part.startsWith("**") && part.endsWith("**") ? part : part.replace(BOLD_PRICE_RE, (m) => `**${m}**`)))
+      .join(""),
+  );
 }
 
 export const DISCLOSURE_KEYWORDS = [
@@ -53,7 +66,7 @@ export function splitBlocks(content: string): string[] {
 }
 
 export function isHeadingBlock(block: string): boolean {
-  return /^#{1,3}\s/.test(block.trim());
+  return /^#{1,6}\s/.test(block.trim());
 }
 
 export function isListBlock(block: string): boolean {

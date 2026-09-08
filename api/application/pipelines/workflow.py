@@ -49,6 +49,7 @@ from api.domain.services.guard_input import guard_input, rule_screen
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
 from api.domain.services.guard_output import guard_output
 from api.domain.services.guard_output import sanitize_output
+from api.domain.services.guard_output import normalize_answer_display
 from api.application.services.merge import Merged, merge_context
 from api.infrastructure.ports.geo import GeoResult
 from api.application.services.rag_leg import RagLegResult, run_rag_leg
@@ -469,7 +470,7 @@ class RagQueryWorkflow(Workflow):
             token = sanitize_output(token)
             parts.append(token)
             await self._emit(SSE_EVENT_TOKEN, {"text": token})
-        answer = "".join(parts)
+        answer = normalize_answer_display("".join(parts))
         await ctx.store.set("answer", answer)
 
         audit = await ctx.store.get("audit")

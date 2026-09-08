@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Typography } from "antd";
+import { normalizeMath } from "./math-format";
 
 export interface MarkdownViewProps {
   content: string;
@@ -15,7 +16,7 @@ export function MarkdownView({ content, className }: MarkdownViewProps) {
   return (
     <Typography style={{ fontSize: "var(--fs-body, 14px)", lineHeight: "var(--fs-body-line, 24px)" }} className={className}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-        {content}
+        {normalizeMath(content)}
       </ReactMarkdown>
     </Typography>
   );

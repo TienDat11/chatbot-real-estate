@@ -9,6 +9,7 @@ import {
   parseTable,
   splitBlocks,
 } from "./inline-format";
+import { normalizeMath } from "./math-format";
 
 export interface AnswerBlocksProps {
   content: string;
@@ -16,7 +17,10 @@ export interface AnswerBlocksProps {
 }
 
 export function AnswerBlocks({ content, className }: AnswerBlocksProps) {
-  const blocks = splitBlocks(content);
+  // Normalize LaTeX/stray-HTML once, BEFORE block splitting: a multi-line
+  // `$$ … $$` or a `$…$` spanning a blank line would otherwise be shredded
+  // and misclassified by splitBlocks/classifyBlock.
+  const blocks = splitBlocks(normalizeMath(content));
   return (
     <div className={className} style={{ fontSize: "var(--fs-body, 17px)", lineHeight: "var(--fs-body-line, 28px)" }}>
       {blocks.map((block, i) => {
@@ -47,7 +51,7 @@ const BlockSwitch = memo(function BlockSwitch({
 });
 
 function HeadingBlock({ block }: { block: string }) {
-  const text = block.replace(/^#{1,3}\s+/, "");
+  const text = block.replace(/^#{1,6}\s+/, "");
   return (
     <div style={{ fontSize: 19, fontWeight: 600, color: "#1F46A8", margin: "14px 0 8px", lineHeight: "26px" }}>
       {renderInline(text)}
@@ -146,8 +150,9 @@ function ParagraphBlock({ block }: { block: string }) {
 }
 
 function renderInline(text: string) {
-  // Preprocess with boldPrice so VND amounts get the navy <strong> treatment.
-  const processed = boldPrice(text);
+  // Normalize first (math → Unicode, stray HTML → markdown), THEN boldPrice,
+  // so price-bolding sees clean digits, never a `$…$`/`\text{}` span.
+  const processed = boldPrice(normalizeMath(text));
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
