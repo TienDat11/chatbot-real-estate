@@ -15,11 +15,14 @@ from api.interfaces.api.main import create_app
 
 # Contract-shaped catalogue mirroring db/seed/project_config.sql after the
 # location/is_hot migration + seed re-run. Kept in loader-output order (HOT
-# first) so it represents what the real fetch_projects() returns.
+# first) so it represents what the real fetch_projects() returns, including
+# the derived display/short labels.
 _CATALOGUE = [
     {
         "project_key": "camellia",
         "name": "The Camellia Son Tra - Da Nang",
+        "display_name": "The Camellia Son Tra - Da Nang",
+        "short_name": "The Camellia Son Tra",
         "location": "Giao lộ Lê Văn Lương - Lê Đức Thọ, phường Thọ Quang, quận Sơn Trà, Đà Nẵng",
         "lat": 16.1052,
         "lng": 108.2558,
@@ -29,6 +32,8 @@ _CATALOGUE = [
         "project_key": "soleil",
         # Verbatim ten_thuong_mai from the seed contract (kept whole).
         "name": "The Soleil Đà Nẵng (Bộ sưu tập căn hộ khách sạn hạng thương gia - C Suite Collection)",  # noqa: E501
+        "display_name": "The Soleil Đà Nẵng",
+        "short_name": "The Soleil",
         "location": "Giao lộ Phạm Văn Đồng - Võ Nguyên Giáp, quận Sơn Trà, Đà Nẵng",
         "lat": 16.0710756,
         "lng": 108.2436243,
@@ -36,7 +41,16 @@ _CATALOGUE = [
     },
 ]
 
-_CONTRACT_KEYS = {"project_key", "name", "location", "lat", "lng", "is_hot"}
+_CONTRACT_KEYS = {
+    "project_key",
+    "name",
+    "display_name",
+    "short_name",
+    "location",
+    "lat",
+    "lng",
+    "is_hot",
+}
 
 
 def _make_client(monkeypatch, projects: list[dict]) -> TestClient:
@@ -49,6 +63,7 @@ def _make_client(monkeypatch, projects: list[dict]) -> TestClient:
 
 
 # --- GET /api/projects -------------------------------------------------------
+
 
 def test_projects_endpoint_returns_contract_shape(monkeypatch) -> None:
     client = _make_client(monkeypatch, list(_CATALOGUE))
@@ -66,6 +81,11 @@ def test_projects_endpoint_returns_contract_shape(monkeypatch) -> None:
     by_key = {p["project_key"]: p for p in projects}
     assert by_key["camellia"]["is_hot"] is True
     assert by_key["camellia"]["name"] == "The Camellia Son Tra - Da Nang"
+    # Derived labels: ASCII seed spelling strips the ' - Da Nang' tail.
+    assert by_key["camellia"]["display_name"] == "The Camellia Son Tra - Da Nang"
+    assert by_key["camellia"]["short_name"] == "The Camellia Son Tra"
+    # Soleil: marketing qualifier + city token both stripped.
+    assert by_key["soleil"]["short_name"] == "The Soleil"
     assert "Thọ Quang" in by_key["camellia"]["location"]
     assert by_key["soleil"]["is_hot"] is False
     assert by_key["soleil"]["lat"] == 16.0710756
@@ -141,6 +161,10 @@ def test_fetch_projects_sorts_hot_first_then_name(monkeypatch) -> None:
     projects = pc.fetch_projects()
     assert [p["project_key"] for p in projects] == ["camellia", "soleil"]
     assert projects[0]["is_hot"] is True
+    # The loader itself derives both labels from ten_thuong_mai.
+    assert projects[0]["short_name"] == "The Camellia Son Tra"
+    assert projects[1]["display_name"] == "The Soleil Đà Nẵng"
+    assert projects[1]["short_name"] == "The Soleil"
 
 
 def test_projects_endpoint_db_dead_returns_empty(monkeypatch) -> None:
@@ -158,6 +182,7 @@ def test_projects_endpoint_db_dead_returns_empty(monkeypatch) -> None:
 
 
 # --- /query 422 PROJECT_SCOPE body -------------------------------------------
+
 
 def test_query_422_project_scope_includes_projects(monkeypatch) -> None:
     from api.application.services.project_scope import ProjectScopeError

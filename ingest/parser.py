@@ -21,6 +21,7 @@ class ParserError(RuntimeError):
 @dataclass
 class ParsedSection:
     """One pre-chunk: text plus optional section title and tables."""
+
     text: str
     section_title: str | None = None
     tables: list[list[list[str]]] = field(default_factory=list)
@@ -40,6 +41,13 @@ class ParsedDoc:
     effective_to: datetime.date | None = None
     # Per-kind attributes (docs/data-contract.md); top-level columns must NOT be duplicated here.
     metadata: dict = field(default_factory=dict)
+    # Project registry key ('camellia'|'soleil'|...). Set by the runners when
+    # they know the corpus; load_document falls back to deriving it from the
+    # doc_id when absent (legacy CLI path). NULL = unresolvable: the loader
+    # passes it through, so on the strict (NOT NULL) registry the insert fails
+    # loudly and on fresh installs the doc stays untagged — never guessed; the
+    # 2026-08-24 migration re-queues such docs for human review.
+    project_key: str | None = None
 
     @property
     def full_text(self) -> str:
@@ -56,7 +64,7 @@ _CLAUSE_RE = re.compile(r"^\s*(\d{1,2})\s*[.)]\s+", re.MULTILINE)
 
 
 def _split_articles(text: str) -> list[tuple[str, str]]:
-    """Return (article_title, body) pairs; falls back to a single raw chunk when no articles match."""
+    """Return (article_title, body) pairs; falls back to a single raw chunk when no articles match."""  # noqa: E501
     matches = list(_ARTICLE_RE.finditer(text))
     if not matches:
         return [(None, text)]
@@ -104,7 +112,9 @@ def _prechunk(article_title: str | None, body: str, cap: int) -> list[ParsedSect
     ]
 
 
-async def parse_document(path: str, kind: str, doc_id: str | None = None, title: str | None = None) -> ParsedDoc:
+async def parse_document(
+    path: str, kind: str, doc_id: str | None = None, title: str | None = None
+) -> ParsedDoc:
     """Parse a PDF/Word/MD/JSON file with Docling into pre-chunked sections.
 
     Raises:

@@ -1,15 +1,15 @@
 import type { Metadata, Viewport } from "next";
-import { Be_Vietnam_Pro } from "next/font/google";
 import { AntdRegistry } from "@ant-design/nextjs-registry";
 import { ProThemeProvider } from "@/components/ProThemeProvider";
+import { ClientNotificationShell } from "@/components/ClientNotificationShell";
+// Self-hosted Be Vietnam Pro (fontsource): the server cannot reach
+// fonts.googleapis.com at runtime, so next/font/google warned and fell back.
+// Each weight css carries all subsets (latin + vietnamese) via unicode-range.
+import "@fontsource/be-vietnam-pro/400.css";
+import "@fontsource/be-vietnam-pro/500.css";
+import "@fontsource/be-vietnam-pro/600.css";
+import "@fontsource/be-vietnam-pro/700.css";
 import "./globals.css";
-
-const beVietnam = Be_Vietnam_Pro({
-  subsets: ["latin", "vietnamese"],
-  weight: ["400", "500", "600", "700"],
-  variable: "--font-be-vietnam",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "RAG Real Estate — Tra cứu pháp lý bất động sản",
@@ -23,10 +23,10 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="vi" className={`${beVietnam.variable} h-full antialiased`}>
-      <body className="min-h-full" style={{ background: "#FAF7F2" }}>
+    <html lang="vi" className="h-full antialiased">
+      <body className="min-h-full">
         <AntdRegistry>
-          <ProThemeProvider>{children}</ProThemeProvider>
+          <ProThemeProvider><ClientNotificationShell>{children}</ClientNotificationShell></ProThemeProvider>
         </AntdRegistry>
       </body>
     </html>

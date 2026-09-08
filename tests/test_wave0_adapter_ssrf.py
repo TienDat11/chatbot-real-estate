@@ -80,7 +80,7 @@ async def test_embedding_canonical_public_host_reaches_mock_request(binding, bas
     monkeypatch.setenv("EMBEDDING_BINDING", binding)
     client = _FakeClient(_FakeResponse({"data": [{"index": 0, "embedding": [0.0] * 1024}]}))
     adapter = OpenAICompatibleNeedProfileEmbedding(
-        api_key="test-key", base_url=base_url, expected_dim=1024,
+        api_key=_FAKE_EMBEDDING_KEY, base_url=base_url, expected_dim=1024,
         allowed_hosts=[base_url.split("//", 1)[1]], allow_private=False,
         resolve_host=public_dns, http_client=client,
     )

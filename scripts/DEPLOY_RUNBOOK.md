@@ -85,11 +85,15 @@ printf '%s' '<EMBEDDING_API_KEY>' | gcloud secrets create EMBEDDING_API_KEY --da
 # 6. API key Rerank
 printf '%s' '<RERANK_API_KEY>' | gcloud secrets create RERANK_API_KEY --data-file=-
 
-# 7. Firebase service account private key — PHẢI tạo từ FILE để giữ nguyên ký tự \n trong khóa.
-#    Lấy file JSON service account từ Firebase Console (Project settings → Service accounts) rồi:
-gcloud secrets create FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY --data-file=path/to/sa.json
-#    (hoặc qua stdin: gcloud secrets create FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY --data-file=- < path/to/sa.json)
-#    KHÔNG dùng printf/echo cho giá trị này — sẽ làm hỏng dấu xuống dòng của private key.
+# 7. Firebase service-account private key.
+#    The application needs only the PEM private-key value, not the whole JSON file.
+#    Extract it locally without committing the JSON key file:
+#      PowerShell: (Get-Content path/to/sa.json -Raw | ConvertFrom-Json).private_key
+#      jq:         jq -r .private_key path/to/sa.json
+#    Store the resulting PEM as the secret value. The app converts literal \n
+#    escapes back to newlines before signing JWT assertions.
+gcloud secrets create FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY --data-file=private-key.pem
+#    Never upload the complete service-account JSON to this secret.
 
 # 8. Cloudflare R2 secret key
 printf '%s' '<R2_SECRET_ACCESS_KEY>' | gcloud secrets create R2_SECRET_ACCESS_KEY --data-file=-
@@ -108,20 +112,22 @@ gcloud run deploy ragre-api \
   --source . \
   --region asia-southeast1 \
   --min-instances=1 \
+  --max-instances=2 \
   --cpu-boost \
-  --no-cpu-throttling \
+  --memory=1Gi --cpu=1 \
   --timeout=360 \
   --startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080 \
   --set-secrets=POSTGRES_PASSWORD=POSTGRES_PASSWORD:latest,ANON_IDENTITY_SECRET=ANON_IDENTITY_SECRET:latest,LEAD_MIRROR_HMAC_SECRET=LEAD_MIRROR_HMAC_SECRET:latest,LLM_API_KEY=LLM_API_KEY:latest,EMBEDDING_API_KEY=EMBEDDING_API_KEY:latest,RERANK_API_KEY=RERANK_API_KEY:latest,FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY=FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest \
-  --set-env-vars=APP_ENV=prod,POSTGRES_HOST=aws-1-ap-southeast-1.pooler.supabase.com,POSTGRES_PORT=5432,POSTGRES_USER=<POSTGRES_USER>,POSTGRES_DATABASE=<POSTGRES_DATABASE>,POSTGRES_MAX_CONNECTIONS=10,EMBEDDING_DIM=1024,RAG_PREWARM_ENABLED=true,CORS_ORIGINS=https://sale-chat-bot-11e49.web.app,EMBEDDING_BINDING=gemini,RERANK_BINDING=aibox
+  --env-vars-file=env-prod.yaml
 ```
 
 Ghi chú xác thực flag (đối chiếu tài liệu `gcloud run deploy` chính thức, docs.cloud.google.com/sdk/gcloud/reference/run/deploy, 2026-09-06):
 - ✅ `--startup-probe` **CÓ là flag chính thức** của `gcloud run deploy` (mục này từng bị ghi là không có). Cú pháp `KEY=VALUE` với key: `periodSeconds`, `timeoutSeconds`, `failureThreshold`, `httpGet.path`, `httpGet.port`.
-- ⚠️ `--cpu-always-allocated` **KHÔNG còn** trên trang reference hiện hành — tên hiện tại của "CPU always allocated" là `--no-cpu-throttling`. Lệnh trên đã dùng `--no-cpu-throttling`; KHÔNG thêm `--cpu-always-allocated` kèm theo.
+- ⚠️ `--cpu-always-allocated` **KHÔNG còn** trên trang reference hiện hành — tên hiện tại của "CPU always allocated" là `--no-cpu-throttling`. **Phiên bản tiết kiệm chi phí trong lệnh trên đã BỎ `--no-cpu-throttling`** (dùng request-based billing — CPU chỉ tính khi xử lý request; idle min-instance rẻ hơn ~4 lần, xem mục 2.2). Nếu bạn vẫn muốn always-CPU (ví dụ cho lead-mirror sweep chạy đúng chu kỳ 24/7) thì thêm lại `--no-cpu-throttling` vào lệnh, hiểu rõ hóa đơn tăng (~$52 vs ~$13/tháng, proxy tier-1).
 - ⚠️ `LLM_BINDING` **không tồn tại** trong `api/infrastructure/config/config.py` (grep toàn bộ `api/` không thấy field `llm_binding`) nên đã bị loại khỏi lệnh. TODO: nếu LightRAG runtime cần binding cho LLM leg, rà lại `ingest/lightrag_init.py` rồi bổ sung sau khi verify.
 - `POSTGRES_USER` / `POSTGRES_DATABASE`: có trong config.py nhưng mặc định là `ragre`/`ragre` — với Supabase pooler thường là `postgres.<ref>` / `postgres`, bắt buộc truyền rõ.
-- Biến bổ sung (tùy tính năng dùng) — verify thêm khi cần: `LLM_BASE_URL`, `R2_ACCOUNT_ID`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_PUBLIC_URL`, `GEO_*`, `OPENROUTER_API_KEY`.
+- Nhóm biến LLM/embedding/rerank trong lệnh trên khớp `.env` local đang chạy tốt (giá model Gemini + Jina, `RERANK_BASE_URL` = `https://api.jina.ai` KHÔNG có đuôi `/v1` — binding `aibox` tự ghép `/v1/rerank`). `LLM_API_KEY`/`EMBEDDING_API_KEY`/`RERANK_API_KEY` lấy từ Secret Manager ở mục 1.
+- Biến bổ sung (tùy tính năng dùng) — verify thêm khi cần: `R2_ACCOUNT_ID`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_PUBLIC_URL`, `IMAGE_CDN_PROJECT_MAP`, `NEXT_PUBLIC_MEDIA_ORIGINS_JSON`, `GEO_*`, `OPENROUTER_API_KEY`. (`IMAGE_CDN_PROJECT_MAP` + `R2_*` cần set nếu muốn ảnh Camellia/Soleil hiển thị đúng qua R2 từ môi trường prod — copy nguyên giá trị JSON từ `.env` local.)
 
 ### 2.1. Phương án YAML cho startup probe (nếu không dùng flag)
 ```bash
@@ -141,66 +147,45 @@ startupProbe:
 gcloud run services replace service.yaml --region asia-southeast1
 ```
 
-### 2.2. Tại sao probe + min-instances + always-CPU
+### 2.2. Tại sao probe + min-instances (+ throttling mặc định)
 - **Cloud Run giữ traffic cho đến khi startup probe pass.** Ngân sách probe ở trên = 8 lần × 10 giây = 80 giây, đủ cho LightRAG init lạnh ~30–40 giây (`get_lightrag` + `initialize_storages`, chạy trong background task lúc khởi động khi `RAG_PREWARM_ENABLED=true`).
 - **`--min-instances=1`**: luôn giữ 1 instance không bị scale về 0 → LightRAG đã warm ở lúc deploy/startup, chat đầu tiên không trả chậm.
-- **`--no-cpu-throttling` (CPU always allocated)**: nếu KHÔNG bật, Cloud Run thu hồi CPU giữa các request → thread prewarm/init bị đóng băng, khi request tới phải "tan băng" = chat đầu chậm lại đúng như vấn đề cần khắc phục. Bật luôn-CPU thì instance idle vẫn giữ ấm LightRAG + pool Postgres.
-- Hai flag này chính là thứ tiêu diệt vấn đề "chat đầu tiên chậm 30–40 giây".
+- **Bỏ `--no-cpu-throttling` (request-based billing, khuyến nghị):** prewarm LightRAG chạy TRONG startup và `/ready` chỉ trả `ok:true` khi `RAG_PREWARM_FINISHED=true` — tức prewarm xong TRƯỚC khi nhận traffic, và Cloud Run cấp CPU đầy đủ trong giai đoạn startup ở cả hai chế độ. Sau đó instance idle chỉ giữ LightRAG ấm trong bộ nhớ (trạng thái RAM), CPU tạm ngưng không làm mất sự ấm đó → chat đầu tiên vẫn nhanh, hóa đơn idle giảm ~4 lần (idle min-instance $0.0000025/vCPU-s so với always-CPU $0.000018/vCPU-s, proxy tier-1). Đổi lại: lead-mirror reconciliation sweep (chu kỳ 5 phút) chỉ chạy khi có request đi qua — chấp nhận được vì tolerance sweep là 300 phút.
+- **`--max-instances=2 --memory=1Gi --cpu=1`**: chặn chi phí khi bị spam; 1Gi chặn OOM của LightRAG/LlamaIndex (mặc định 512MiB chưa verify đủ); 1 vCPU đủ cho 1 worker uvicorn.
+- Hai flag `--min-instances=1` + startup probe `/ready` là thứ tiêu diệt vấn đề "chat đầu tiên chậm 30–40 giây"; CPU throttling mặc định là thứ hạ hóa đơn xuống ~$13/tháng thay vì ~$52.
 
 ---
 
 ## 3. Deploy FE — Cloud Run `ragre-web` + Firebase Hosting
 
 ### 3.1. Ràng buộc monorepo (quan trọng — đọc trước khi chạy)
-`gcloud run deploy --source <dir>` dùng **chính `<dir>` làm build context** và chỉ tìm Dockerfile ngay trong `<dir>` (tài liệu: "If a Dockerfile is present in the source code directory, it will be built using that Dockerfile"). Context `apps/web` sẽ KHÔNG thấy `package.json`/`package-lock.json` ở root và `packages/*` — mà npm workspaces bắt buộc cần root manifest để `npm ci`. Vì vậy:
+`gcloud run deploy --source <dir>` dùng **chính `<dir>` làm build context** và chỉ tìm Dockerfile ngay trong `<dir>` (tài liệu: "If a Dockerfile is present in the source code directory, it will be built using that Dockerfile"). Context `apps/web` sẽ KHÔNG thấy `package.json`/`package-lock.json` ở root và `packages/*` — mà npm workspaces bắt buộc cần root manifest để `npm ci`. Ngoài ra reference `gcloud run deploy` **KHÔNG có flag `--dockerfile`** để chỉ định Dockerfile ở path khác (verify 2026-09-07), nên:
 - ❌ KHÔNG dùng `gcloud run deploy ragre-web --source apps/web` cho build này.
-- ✅ Build với **context = repo root** và `-f apps/web/Dockerfile`, theo một trong hai cách dưới đây.
-- Ghi chú: `--set-build-env-vars` (đã verify là flag thật của `gcloud run deploy`) chỉ có tác dụng với build source/buildpack — ở đây build bằng Dockerfile nên giá trị build-time truyền qua `--build-arg` / substitutions.
+- ✅ Build image bằng **Cloud Build với context = repo root** và `-f apps/web/Dockerfile` (Cách A — file `deploy/cloudbuild-web.yaml` đã có sẵn trong repo), rồi deploy image đã build (Cách B nếu máy có Docker).
 
 ### 3.2. Cách A — Cloud Build (khuyến nghị, không cần Docker cục bộ)
-Tạo file `deploy/cloudbuild-web.yaml` với nội dung dưới đây (điền `PROJECT_ID`):
-```yaml
-steps:
-  - name: gcr.io/cloud-builders/docker
-    args:
-      - build
-      - -f
-      - apps/web/Dockerfile
-      - --build-arg
-      - NEXT_PUBLIC_FIREBASE_API_KEY=$_FE_API_KEY
-      - --build-arg
-      - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=$_FE_AUTH_DOMAIN
-      - --build-arg
-      - NEXT_PUBLIC_FIREBASE_PROJECT_ID=$_FE_PROJECT_ID
-      - --build-arg
-      - NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=$_FE_STORAGE_BUCKET
-      - --build-arg
-      - NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=$_FE_SENDER_ID
-      - --build-arg
-      - NEXT_PUBLIC_FIREBASE_APP_ID=$_FE_APP_ID
-      - --build-arg
-      - NEXT_PUBLIC_API_PROXY_TARGET=$_FE_PROXY_TARGET
-      - -t
-      - asia-southeast1-docker.pkg.dev/PROJECT_ID/ragre/ragre-web:latest
-      - .
-images:
-  - asia-southeast1-docker.pkg.dev/PROJECT_ID/ragre/ragre-web:latest
-options:
-  logging: CLOUD_LOGGING_ONLY
-```
-Build + deploy (chạy từ repo root; 7 giá trị `NEXT_PUBLIC_*` lấy từ Firebase console — chúng là giá trị public nhưng vẫn nên điền cẩn thận):
+File `deploy/cloudbuild-web.yaml` đã tồn tại — KHÔNG cần tự tạo. Nó nhận 9 substitutions `NEXT_PUBLIC_*` (giá trị public lấy từ Firebase console / `.env.local` — chúng là giá trị public nhưng vẫn nên điền cẩn thận) rồi push image vào Artifact Registry repo `ragre` (đã tạo ở bước 0.5). `NEXT_PUBLIC_MAP_TILE_URL` là optional (có fallback CARTO Voyager sẵn trong code) nên không đưa vào Cloud Build config.
+
 ```bash
+# (chạy từ repo root)
 gcloud builds submit . \
   --config deploy/cloudbuild-web.yaml \
-  --substitutions _FE_API_KEY=<NEXT_PUBLIC_FIREBASE_API_KEY>,_FE_AUTH_DOMAIN=<NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN>,_FE_PROJECT_ID=<NEXT_PUBLIC_FIREBASE_PROJECT_ID>,_FE_STORAGE_BUCKET=<NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET>,_FE_SENDER_ID=<NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID>,_FE_APP_ID=<NEXT_PUBLIC_FIREBASE_APP_ID>,_FE_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app
+  --substitutions _FE_API_KEY=<NEXT_PUBLIC_FIREBASE_API_KEY>,_FE_AUTH_DOMAIN=<NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN>,_FE_PROJECT_ID=<NEXT_PUBLIC_FIREBASE_PROJECT_ID>,_FE_STORAGE_BUCKET=<NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET>,_FE_SENDER_ID=<NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID>,_FE_APP_ID=<NEXT_PUBLIC_FIREBASE_APP_ID>,_FE_VAPID_KEY=<NEXT_PUBLIC_FIREBASE_VAPID_KEY>,_FE_MEDIA_ORIGINS_JSON=<NEXT_PUBLIC_MEDIA_ORIGINS_JSON>,_FE_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app
 
 gcloud run deploy ragre-web \
-  --image asia-southeast1-docker.pkg.dev/<FIREBASE_PROJECT_ID>/ragre/ragre-web:latest \
+  --image asia-southeast1-docker.pkg.dev/<PROJECT_ID>/ragre/ragre-web:latest \
   --region asia-southeast1 \
   --min-instances=0 \
+  --max-instances=2 \
+  --cpu-boost \
+  --memory=512Mi --cpu=1 \
   --set-env-vars=NEXT_PUBLIC_API_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app
 ```
-`NEXT_PUBLIC_API_PROXY_TARGET` phải đặt ở **runtime** nữa vì `next.config.ts` đọc nó lúc server start để tính rewrites `/api/*` → BE. 6 biến `NEXT_PUBLIC_FIREBASE_*` chỉ cần ở build (đã inline vào bundle client).
+Ghi chú:
+- `<PROJECT_ID>` = GCP project id đã set ở bước 0.1 (xem bằng `gcloud config get-value project`).
+- ⚠️ `NEXT_PUBLIC_API_PROXY_TARGET` là **build-arg BẮT BUỘC** (đã verify 2026-09-07 trên prod: rewrites `/api/*` được bake vào `routes-manifest.json` lúc build — runtime env KHÔNG recomputed, thiếu build-arg này → mọi call `/api/*` 404 dù `--set-env-vars` có set). Nó cũng được set lại ở runtime qua `--set-env-vars` cho chắc (next.config đọc `??` fallback — chuỗi rỗng không rơi vào fallback). 8 biến còn lại (`NEXT_PUBLIC_FIREBASE_*` ×6, `NEXT_PUBLIC_FIREBASE_VAPID_KEY`, `NEXT_PUBLIC_MEDIA_ORIGINS_JSON`) chỉ cần ở build (đã inline vào bundle client — build thiếu VAPID key làm FCM getToken hỏng, thiếu MEDIA_ORIGINS_JSON làm allowlist ảnh R2 rỗng). Dockerfile giờ có guard fail-fast: build lỗi ngay nếu thiếu API_PROXY_TARGET.
+- `--max-instances=2` chặn chi phí khi bị spam; `--cpu-boost` rút ngắn khởi động SSR; FE giữ `min-instances=0` (scale-to-zero, cold start SSR 1–3s chấp nhận được, request-based billing nên idle không mất tiền).
+- ⚠️ `--substitutions` của gcloud tách giá trị theo dấu phẩy nên `_FE_MEDIA_ORIGINS_JSON` (JSON chứa dấu phẩy) KHÔNG truyền được qua flag này. Với biến này: dùng Cách B (build local — đã verify chạy thành công), hoặc đưa giá trị vào khối `substitutions:` mặc định trong `deploy/cloudbuild-web.yaml` (kiểm chứng trước khi tin; nhớ KHÔNG commit giá trị vào git).
 
 ### 3.3. Cách B — Docker cục bộ (nếu máy có Docker)
 ```bash
@@ -212,16 +197,39 @@ docker buildx build --platform linux/amd64 \
   --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=<...> \
   --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=<...> \
   --build-arg NEXT_PUBLIC_FIREBASE_APP_ID=<...> \
+  --build-arg NEXT_PUBLIC_FIREBASE_VAPID_KEY=<NEXT_PUBLIC_FIREBASE_VAPID_KEY> \
+  --build-arg NEXT_PUBLIC_MEDIA_ORIGINS_JSON="<NEXT_PUBLIC_MEDIA_ORIGINS_JSON — BẮT BUỘC, copy NGUYÊN giá trị JSON từ .env.local, giữ nguyên dấu ngoặc kép; rỗng = guard trong Dockerfile fail build>" \
   --build-arg NEXT_PUBLIC_API_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app \
-  -t asia-southeast1-docker.pkg.dev/<FIREBASE_PROJECT_ID>/ragre/ragre-web:latest \
-  --push .
+  --build-arg NEXT_PUBLIC_MAP_TILE_URL="<NEXT_PUBLIC_MAP_TILE_URL nếu có, từ .env.local — rỗng OK>" \
+  -t asia-southeast1-docker.pkg.dev/<PROJECT_ID>/ragre/ragre-web:latest \
+  -t ragre-web:local \
+  .
+```
 
+```bash
+gcloud auth configure-docker asia-southeast1-docker.pkg.dev
+docker push asia-southeast1-docker.pkg.dev/<PROJECT_ID>/ragre/ragre-web:latest
+```
+
+(--push của buildx phụ thuộc engine driver; tách build rồi push riêng là đường đã verify chạy được trên máy này.)
+
+```bash
 gcloud run deploy ragre-web \
-  --image asia-southeast1-docker.pkg.dev/<FIREBASE_PROJECT_ID>/ragre/ragre-web:latest \
+  --image asia-southeast1-docker.pkg.dev/<PROJECT_ID>/ragre/ragre-web:latest \
   --region asia-southeast1 \
   --min-instances=0 \
+  --max-instances=2 \
+  --cpu-boost \
+  --memory=512Mi --cpu=1 \
   --set-env-vars=NEXT_PUBLIC_API_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app
 ```
+Ghi chú Cách B:
+- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON` chứa JSON có khoảng trắng → bắt buộc bọc trong `"..."` như trên; build đã verify baked đúng vào client bundle.
+- `<PROJECT_ID>` = `sale-chat-ai` (GCP), KHÔNG phải Firebase project id.
+- Các build-arg lấy từ `apps/web/.env.local` (cùng giá trị đã build thử local thành công).
+- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON` giờ là **build-arg bắt buộc** (guard fail-fast trong Dockerfile cạnh guard PROXY_TARGET, verify 2026-09-07). Lưu ý: client bundle inline giá trị lúc BUILD — runtime ENV chỉ phục vụ `next start` (images.remotePatterns). Cả hai nguồn đã verify bake đúng trên revision `ragre-web-00002-6ql`.
+- ⚠️ Ảnh greeting/chat báo hỏng trên prod (2026-09-07) KHÔNG phải do FE: FE + image cho phép mọi URL R2 allowlist (curl `_next/image` → 200). Nguyên nhân: service **ragre-api** thiếu env `IMAGE_CDN_PROJECT_MAP` (+ `R2_ACCOUNT_ID`/`R2_PUBLIC_URL`) — BE fail-closed ở prod (`_project_media_policy` trả origins rỗng) nên `/llms-hello` trả `images: []` và `videos[].url_cdn: null`, BE log: "media entries resolved to zero valid urls: project_key=camellia entry_count=3 invalid_url_count=3". Fix: `gcloud run services update ragre-api --region asia-southeast1 --set-env-vars=IMAGE_CDN_PROJECT_MAP='<JSON từ .env>'` (thuộc BE session — xem mục 281).
+- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON` + `NEXT_PUBLIC_MAP_TILE_URL` đã được bake vào cả runtime ENV của image (Dockerfile runtime stage) → KHÔNG cần `--set-env-vars` cho chúng lúc deploy. `NEXT_PUBLIC_API_PROXY_TARGET` giờ là **build-arg bắt buộc** (guard fail-fast trong Dockerfile), đồng thời vẫn set ở runtime qua `--set-env-vars`.
 
 ### 3.4. Mở quyền cho Firebase Hosting gọi được Cloud Run
 ```bash
@@ -265,12 +273,13 @@ gcloud run services update-traffic ragre-web --region asia-southeast1 --to-revis
 
 ## 6. Chi phí + lý do vùng miền
 
-- **Chi phí "luôn ấm":** `--min-instances=1` + `--no-cpu-throttling` = trả tiền ~24/7 cho một instance nhỏ dù không có traffic. Muốn giảm: đặt `--min-instances=0` (tiết kiệm, đổi lại chấp nhận cold start ~30–40 giây chat đầu tiên sau khi instance ngủ).
-- **Vùng `asia-southeast1` (Singapore):** trùng vùng với Supabase pooler `aws-1-ap-southeast-1` → độ trễ BE↔Postgres thấp nhất, quan trọng vì LightRAG query fan-out nhiều round-trip vào PG. Giữ BE và pooler cùng vùng.
+- **Cấu hình tiết kiệm hiện tại của runbook** (request-based billing, BE `min=1`): idle min-instance chỉ tính ~$0.0000025/vCPU-s + $0.0000025/GiB-s → BE ~$13/tháng (proxy tier-1; tier-2 Singapore cao hơn, xem pricing calculator), FE `min=0` ≈ $0 trong free tier. Nếu thêm `--no-cpu-throttling` (always-CPU) thì BE tăng lên ~$52/tháng — chỉ dùng khi cần background sweep 24/7.
+- **Muốn $0 trên Cloud Run:** đặt `--min-instances=0` và cron ping `/ready` mỗi ~9 phút (UptimeRobot/GitHub Actions scheduled) — instance không phải min-instance thì idle KHÔNG bị tính tiền; đánh đổi là thi thoảng vẫn dính cold start ~30–40s vì Cloud Run có quyền thu hồi instance bất cứ lúc nào.
+- **Vùng `asia-southeast1` (Singapore):** trùng vùng với Supabase pooler `aws-1-ap-southeast-1` → độ trễ BE↔Postgres thấp nhất, quan trọng vì LightRAG query fan-out nhiều round-trip vào PG. Giữ BE và pooler cùng vùng. Nếu sau này chuyển sang Neon: chọn project Neon `aws-ap-southeast-1` để giữ cùng lý do.
 
 ## 7. Việc còn mở (TODO verify)
 
 - `LLM_BINDING`: không có trong `api/infrastructure/config/config.py` — đã loại khỏi lệnh deploy BE (mục 2). Rà lại nếu LightRAG cần.
-- `--cpu-always-allocated`: tên flag cũ, không còn trên reference hiện hành — dùng `--no-cpu-throttling` thay thế.
-- File `deploy/cloudbuild-web.yaml` (mục 3.2) do chủ dự án tự tạo theo nội dung trong tài liệu này; nhớ điền `PROJECT_ID`.
-- Chưa verify tên biến cho LLM gateway prod (`LLM_BASE_URL`, model roles) — bổ sung vào `--set-env-vars` của BE khi có key/provider chốt.
+- `--cpu-always-allocated`: tên flag cũ, không còn trên reference hiện hành — dùng `--no-cpu-throttling` thay thế (runbook mặc định ĐÃ BỎ flag này để tiết kiệm; thêm lại nếu muốn always-CPU).
+- R2 prod: `IMAGE_CDN_PROJECT_MAP`, `R2_ACCOUNT_ID`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_PUBLIC_URL` chưa có trong lệnh deploy BE — ảnh trả về sẽ thiếu nếu không set. Copy giá trị JSON từ `.env` local vào `--set-env-vars` (không phải secret trừ `R2_ACCESS_KEY_ID` — có thể thêm vào Secret Manager nếu muốn).
+- Giá tier-2 chính xác cho `asia-southeast1` chưa verify (trang pricing chỉ render bảng Iowa) — xem Google Cloud pricing calculator trước khi chốt ngân sách.

@@ -23,7 +23,10 @@ from jwt.algorithms import RSAAlgorithm
 
 from api.infrastructure import dependencies as dependency_injection
 from api.infrastructure.adapters import firebase_auth_jwks, firestore_rest_mirror
-from api.infrastructure.adapters.firestore_rest_mirror import FirestoreRestLeadMirror
+from api.infrastructure.adapters.firestore_rest_mirror import (
+    FirestoreRestLeadMirror,
+    _document_fields,
+)
 from api.infrastructure.adapters.noop_realtime_mirror import NoopRealtimeLeadMirror
 from api.infrastructure.ports.firebase_auth import (
     FirebaseAuthTokenAudienceMismatch,
@@ -34,6 +37,7 @@ from api.infrastructure.ports.realtime_mirror import (
     LeadMirrorDocument,
     RealtimeMirrorNotConfiguredError,
 )
+from tests.fixtures.fake_credentials import fake_access_token, fake_pem_private_key
 
 PROJECT_ID = "sale-chat-bot-11e49"
 ISSUER = f"https://securetoken.google.com/{PROJECT_ID}"
@@ -162,7 +166,7 @@ class _FakeResponse:
             raise RuntimeError(f"HTTP {self.status_code}")
 
     def json(self) -> dict:
-        return {"access_token": "fake-access-token", "expires_in": 3600}
+        return {"access_token": fake_access_token(), "expires_in": 3600}
 
 
 class _FakeAsyncClient:
@@ -177,7 +181,9 @@ class _FakeAsyncClient:
         self.requests.append(("POST", url, data))
         return self.token_response
 
-    async def patch(self, url: str, headers: dict | None = None, json: dict | None = None, **kwargs) -> _FakeResponse:
+    async def patch(
+        self, url: str, headers: dict | None = None, json: dict | None = None, **kwargs
+    ) -> _FakeResponse:
         self.requests.append(("PATCH", url, json))
         return self.document_response
 
@@ -187,11 +193,13 @@ class _FakeAsyncClient:
 
 
 @pytest.fixture
-def mirror_with_fake_client(monkeypatch: pytest.MonkeyPatch) -> tuple[FirestoreRestLeadMirror, _FakeAsyncClient]:
+def mirror_with_fake_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[FirestoreRestLeadMirror, _FakeAsyncClient]:
     mirror = FirestoreRestLeadMirror(
         project_id=PROJECT_ID,
         service_account_client_email="mirror@developer.gserviceaccount.com",
-        service_account_private_key="-----BEGIN PRIVATE KEY-----\\nfake\\n-----END PRIVATE KEY-----",
+        service_account_private_key=fake_pem_private_key(),
         rest_base_url="https://firestore.googleapis.com/v1",
     )
     fake_client = _FakeAsyncClient()
@@ -214,11 +222,36 @@ def mirror_with_fake_client(monkeypatch: pytest.MonkeyPatch) -> tuple[FirestoreR
     return mirror, fake_client
 
 
+def test_document_fields_includes_non_null_created_at() -> None:
+    document = LeadMirrorDocument(
+        customer_id="cid",
+        project_key="camellia",
+        lead_status="new",
+        display_name=None,
+        masked_phone=None,
+        assigned_sales_firebase_uid=None,
+        consent_service=False,
+        consent_marketing=False,
+        consent_recorded_at=None,
+        last_customer_message_at=None,
+        updated_at="2026-08-22T00:00:00+00:00",
+        lead_id=9,
+        created_at="2026-08-21T00:00:00+00:00",
+    )
+    fields = _document_fields(document)
+    assert fields["created_at"] == {
+        "timestampValue": "2026-08-21T00:00:00+00:00"
+    }
+    # REST encodes int64 as a decimal string; the FE SDK decodes it to a
+    # JS number for the mapper's safe-positive-integer guard.
+    assert fields["lead_id"] == {"integerValue": "9"}
+
+
 @pytest.mark.asyncio
 async def test_mirror_upsert_maps_fields_and_stamps_updated_at(mirror_with_fake_client) -> None:
     mirror, fake_client = mirror_with_fake_client
     document = LeadMirrorDocument(
-        customer_id="hmac-digest-1",
+        customer_id="customer-digest-1",
         project_key="camellia",
         lead_status="new",
         display_name="Nguyen Van A",
@@ -229,17 +262,22 @@ async def test_mirror_upsert_maps_fields_and_stamps_updated_at(mirror_with_fake_
         consent_recorded_at="2026-08-22T10:00:00+00:00",
         last_customer_message_at=None,
         updated_at="caller-timestamp",
+        lead_id=7,
     )
-    await mirror.upsert_lead_mirror(customer_id="hmac-digest-1", document=document)
+    # ADR-0004: the document id is the per-lead opaque key; the customer
+    # digest rides along as a field.
+    await mirror.upsert_lead_mirror(document_id="lead-doc-id-1", document=document)
 
     method, url, body = fake_client.requests[-1]
     assert method == "PATCH"
     assert url == (
         f"https://firestore.googleapis.com/v1/projects/{PROJECT_ID}"
-        "/databases/(default)/documents/leads/hmac-digest-1"
+        "/databases/(default)/documents/leads/lead-doc-id-1"
     )
     fields = body["fields"]
-    assert fields["customer_id"] == {"stringValue": "hmac-digest-1"}
+    assert "created_at" not in fields
+    assert fields["customer_id"] == {"stringValue": "customer-digest-1"}
+    assert fields["lead_id"] == {"integerValue": "7"}
     assert fields["consent_service"] == {"booleanValue": True}
     assert fields["consent_marketing"] == {"booleanValue": False}
     # None must be omitted, not written as a null value.
@@ -249,12 +287,66 @@ async def test_mirror_upsert_maps_fields_and_stamps_updated_at(mirror_with_fake_
 
 
 @pytest.mark.asyncio
+async def test_mirror_retries_with_verb_only_fake_transport(
+    mirror_with_fake_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mirror, fake_client = mirror_with_fake_client
+    responses = [_FakeResponse(status_code=503), _FakeResponse(status_code=200)]
+
+    async def flaky_patch(
+        url: str, headers: dict | None = None, json: dict | None = None, **kwargs
+    ) -> _FakeResponse:
+        fake_client.requests.append(("PATCH", url, json))
+        return responses.pop(0)
+
+    monkeypatch.setattr(fake_client, "patch", flaky_patch)
+    monkeypatch.setattr(firestore_rest_mirror.asyncio, "sleep", _no_sleep)
+    await mirror.upsert_lead_mirror(
+        document_id="lead-doc-id-1",
+        document=LeadMirrorDocument(
+            customer_id="customer-digest-1",
+            project_key="camellia",
+            lead_status="new",
+            display_name=None,
+            masked_phone=None,
+            assigned_sales_firebase_uid=None,
+            consent_service=False,
+            consent_marketing=False,
+            consent_recorded_at=None,
+            last_customer_message_at=None,
+            updated_at="caller-timestamp",
+            lead_id=7,
+        ),
+    )
+    assert len(fake_client.requests) == 2
+
+
+async def _no_sleep(*args: object, **kwargs: object) -> None:
+    return None
+
+
+@pytest.mark.asyncio
 async def test_mirror_remove_uses_delete(mirror_with_fake_client) -> None:
     mirror, fake_client = mirror_with_fake_client
-    await mirror.remove_lead_mirror("hmac-digest-1")
+    await mirror.remove_lead_mirror("lead-doc-id-1")
     method, url, _ = fake_client.requests[-1]
     assert method == "DELETE"
-    assert url.endswith("/documents/leads/hmac-digest-1")
+    assert url.endswith("/documents/leads/lead-doc-id-1")
+
+
+@pytest.mark.asyncio
+async def test_mirror_remove_missing_document_is_success(mirror_with_fake_client) -> None:
+    """ADR-0004 idempotent delete: legacy-key cleanup hits documents that are
+    already gone (post-backfill steady state) — a 404 must not raise."""
+    mirror, fake_client = mirror_with_fake_client
+
+    async def missing_delete(url: str, headers: dict | None = None, **kwargs) -> _FakeResponse:
+        fake_client.requests.append(("DELETE", url, None))
+        return _FakeResponse(status_code=404)
+
+    fake_client.delete = missing_delete  # type: ignore[method-assign]
+    await mirror.remove_lead_mirror("lead-doc-id-gone")
+    assert fake_client.requests[-1][0] == "DELETE"
 
 
 @pytest.mark.asyncio
@@ -262,7 +354,7 @@ async def test_mirror_health_check_false_on_token_failure(monkeypatch: pytest.Mo
     mirror = FirestoreRestLeadMirror(
         project_id=PROJECT_ID,
         service_account_client_email="mirror@developer.gserviceaccount.com",
-        service_account_private_key="-----BEGIN PRIVATE KEY-----\\nfake\\n-----END PRIVATE KEY-----",
+        service_account_private_key=fake_pem_private_key(),
         rest_base_url="https://firestore.googleapis.com/v1",
     )
 
@@ -324,7 +416,9 @@ async def test_dependency_dispatch_off_yields_noop(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_dependency_dispatch_firestore_without_config_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_dependency_dispatch_firestore_without_config_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(dependency_injection, "_realtime_lead_mirror", None)
 
     class _FirestoreSettings:
@@ -372,7 +466,11 @@ def test_noop_mirror_is_transport_neutral() -> None:
         consent_recorded_at=None,
         last_customer_message_at=None,
         updated_at="2026-08-22T00:00:00+00:00",
+        lead_id=3,
     )
-    assert asyncio.run(noop.upsert_lead_mirror(customer_id="cid", document=document)) is None
-    assert asyncio.run(noop.remove_lead_mirror("cid")) is None
+    assert (
+        asyncio.run(noop.upsert_lead_mirror(document_id="lead-doc-id-1", document=document))
+        is None
+    )
+    assert asyncio.run(noop.remove_lead_mirror("lead-doc-id-1")) is None
     assert asyncio.run(noop.health_check()) is True

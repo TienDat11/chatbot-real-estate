@@ -11,6 +11,11 @@ export interface SourcesListProps {
 /**
  * Lists the cited source documents of the answer.
  * Each source shows: document title, clause, effective date, kind.
+ *
+ * Colors mirror the app's premium proptech tokens (apps/web/src/lib/tokens.ts):
+ * navy #0E2A47 primary, warm border #E9E2D6 / surface-alt #F3EFE7 neutrals.
+ * The ui package stays dependency-free, so the hex values are kept in sync by
+ * convention — change them together.
  */
 export function SourcesList({ sources, max }: SourcesListProps) {
   if (!sources.length) return null;
@@ -27,7 +32,7 @@ export function SourcesList({ sources, max }: SourcesListProps) {
           <List.Item style={{ padding: "4px 0", border: "none" }}>
             <div style={{ display: "flex", gap: 8, alignItems: "flex-start", minWidth: 0 }}>
               <FileTextOutlined
-                style={{ color: "#1F46A8", marginTop: 3, flexShrink: 0, fontSize: 13 }}
+                style={{ color: "#0E2A47", marginTop: 3, flexShrink: 0, fontSize: 13 }}
               />
               <div style={{ minWidth: 0 }}>
                 <Typography.Text
@@ -52,8 +57,8 @@ export function SourcesList({ sources, max }: SourcesListProps) {
                         borderRadius: 6,
                         marginInlineEnd: 0,
                         color: "#5B6478",
-                        background: "#F4F6FA",
-                        border: "1px solid #E9ECF2",
+                        background: "#F3EFE7",
+                        border: "1px solid #E9E2D6",
                       }}
                     >
                       Hiệu lực: {source.effective_from}

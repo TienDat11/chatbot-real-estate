@@ -13,8 +13,10 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from .sql_leg import get_ro_pool
 from ingest.placeholder import FACT_TOKEN_START, extract_placeholders, resolve_placeholders
+
+from .fact_display import enrich_evidence_entry
+from .sql_leg import get_ro_pool
 
 logger = logging.getLogger("api.merge")
 
@@ -63,9 +65,20 @@ def _format_fact_value(row: dict) -> str | None:
 
 
 async def _resolve_fact_value(
-    conn: Any, fact_key: str, subject_key: str, policy_key: str | None, as_of: date | None
+    conn: Any,
+    fact_key: str,
+    subject_key: str,
+    policy_key: str | None,
+    as_of: date | None,
+    project_key: str | None = None,
 ) -> str | None:
-    """Formatted value of the fact in effect at as_of; None when absent/expired."""
+    """Formatted value of the fact in effect at as_of; None when absent/expired.
+
+    ``project_key`` (story 10.4): subject_key alone is not globally unique
+    (identical subject codes can exist in two projects), so the fact lookup is
+    scoped to the request's project. None keeps the legacy unscoped read for
+    project-less callers.
+    """
     row = await conn.fetchrow(
         """
         SELECT f.value_num, f.value_text, f.unit, f.quality, f.range_min, f.range_max
@@ -74,20 +87,27 @@ async def _resolve_fact_value(
         JOIN documents d ON d.doc_id = f.source_doc_id
         WHERE fs.subject_key = $1 AND f.fact_key = $2
           AND ($3::text IS NULL OR f.policy_key = $3)
+          AND ($4::text IS NULL OR fs.project_key = $4)
           AND d.status = 'published'
-          AND f.effective_from <= $4
-          AND (f.effective_to IS NULL OR f.effective_to > $4)
+          AND f.effective_from <= $5
+          AND (f.effective_to IS NULL OR f.effective_to > $5)
         ORDER BY f.effective_from DESC
         LIMIT 1
         """,
-        _normalize_subject_key(subject_key), fact_key, policy_key, as_of or date.today(),
+        _normalize_subject_key(subject_key),
+        fact_key,
+        policy_key,
+        project_key,
+        as_of or date.today(),
     )
     if row is None:
         return None
     return _format_fact_value(row)
 
 
-async def _resolve_chunk_placeholders(chunks: list[dict], conn: Any, as_of: date | None) -> None:
+async def _resolve_chunk_placeholders(
+    chunks: list[dict], conn: Any, as_of: date | None, project_key: str | None = None
+) -> None:
     """Hydrate ⟦FACT tokens in each chunk's content from the facts registry (in place)."""
     refs = {r for c in chunks for r in extract_placeholders(c.get("content") or "")}
     if not refs:
@@ -95,17 +115,17 @@ async def _resolve_chunk_placeholders(chunks: list[dict], conn: Any, as_of: date
     cache: dict[tuple[str, str, str | None], str | None] = {}
     for ref in refs:
         cache[(ref.fact_key, ref.subject_key, ref.policy_key)] = await _resolve_fact_value(
-            conn, ref.fact_key, ref.subject_key, ref.policy_key, as_of
+            conn, ref.fact_key, ref.subject_key, ref.policy_key, as_of, project_key
         )
     for c in chunks:
         content = c.get("content") or ""
         if FACT_TOKEN_START in content:
-            c["content"] = resolve_placeholders(
-                content, lambda fk, sk, pk: cache.get((fk, sk, pk))
-            )
+            c["content"] = resolve_placeholders(content, lambda fk, sk, pk: cache.get((fk, sk, pk)))
 
 
-async def hydrate_chunks(chunks: list[dict], as_of: date | None = None) -> list[dict]:
+async def hydrate_chunks(
+    chunks: list[dict], as_of: date | None = None, project_key: str | None = None
+) -> list[dict]:
     """Attach doc metadata (title, section, kind, effective dates) from the registry.
 
     FACT placeholder tokens in chunk content hydrate to the fact value in effect at
@@ -119,7 +139,7 @@ async def hydrate_chunks(chunks: list[dict], as_of: date | None = None) -> list[
     pool = await get_ro_pool()
     sql = """SELECT c.chunk_id, c.section, d.doc_id, d.title, d.kind, d.effective_from, d.effective_to
              FROM document_chunks c JOIN documents d ON d.doc_id = c.doc_id
-             WHERE c.chunk_id = ANY($1)"""
+             WHERE c.chunk_id = ANY($1)"""  # noqa: E501
     try:
         async with pool.acquire() as conn:
             recs = await conn.fetch(sql, ids)
@@ -139,7 +159,7 @@ async def hydrate_chunks(chunks: list[dict], as_of: date | None = None) -> list[
                     }
                 )
             try:
-                await _resolve_chunk_placeholders(out, conn, as_of)
+                await _resolve_chunk_placeholders(out, conn, as_of, project_key)
             except Exception as exc:  # noqa: BLE001 — tokens stay unresolved, never crash
                 logger.warning("merge: placeholder resolve failed: %s", exc)
         return out
@@ -163,12 +183,20 @@ def build_rag_context(chunks: list[dict]) -> str:
         }
         for c in chunks
     ]
-    return f"{DELIMITER}\nRAG_CONTEXT (chunks từ LightRAG, đã lọc hiệu lực + rerank):\n{json.dumps(payload, ensure_ascii=False)}\n{DELIMITER}"
+    return f"{DELIMITER}\nRAG_CONTEXT (chunks từ LightRAG, đã lọc hiệu lực + rerank):\n{json.dumps(payload, ensure_ascii=False)}\n{DELIMITER}"  # noqa: E501
 
 
 def build_evidence_context(evidence: list[dict]) -> str:
-    """FACT_EVIDENCE block — JSON-encode the fe blocks (the sole numeric source)."""
-    return f"{DELIMITER}\nFACT_EVIDENCE (số liệu từ hệ thống dữ liệu — nguồn số DUY NHẤT, LLM không tự tính):\n{json.dumps(evidence, ensure_ascii=False)}\n{DELIMITER}"
+    """FACT_EVIDENCE block — JSON-encode the fe blocks (the sole numeric source).
+
+    Entries gain additive ``subject_display`` / ``policy_display`` legends (D4) so
+    the model names units and payment methods in prose instead of echoing machine
+    keys. Backfilling here covers every producer (SQL leg, affordability, NL2SQL);
+    machine keys are preserved untouched because guard_output grounds numbers on
+    ``fields`` and citations on ``fe_id``.
+    """
+    enriched = [enrich_evidence_entry(e) for e in evidence or []]
+    return f"{DELIMITER}\nFACT_EVIDENCE (số liệu từ hệ thống dữ liệu — nguồn số DUY NHẤT, LLM không tự tính; khi gọi tên căn hay phương án thanh toán CHỈ dùng subject_display/policy_display, KHÔNG viết subject/policy_key nội bộ):\n{json.dumps(enriched, ensure_ascii=False)}\n{DELIMITER}"  # noqa: E501
 
 
 def build_sources(chunks: list[dict]) -> list[dict]:
@@ -206,9 +234,19 @@ def build_facts(evidence: list[dict]) -> list[dict]:
     ]
 
 
-async def merge_context(query: str, rag_chunks: list[dict], evidence: list[dict], as_of: date | None) -> Merged:
-    """Combine both legs into context blocks plus sources/facts for the UI."""
-    hydrated = await hydrate_chunks(rag_chunks, as_of) if rag_chunks else []
+async def merge_context(
+    query: str,
+    rag_chunks: list[dict],
+    evidence: list[dict],
+    as_of: date | None,
+    project_key: str | None = None,
+) -> Merged:
+    """Combine both legs into context blocks plus sources/facts for the UI.
+
+    ``project_key`` (story 10.4): scopes the FACT-placeholder hydration so a
+    chunk can never pull a fact value from another project's subject.
+    """
+    hydrated = await hydrate_chunks(rag_chunks, as_of, project_key) if rag_chunks else []
     rag_blocks = build_rag_context(hydrated)
     evidence_blocks = build_evidence_context(evidence or [])
     sources = build_sources(hydrated)

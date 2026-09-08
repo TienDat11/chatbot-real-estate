@@ -16,12 +16,13 @@
 BEGIN;
 
 INSERT INTO documents
-  (doc_id, kind, title, source_file, effective_from, effective_to, status, content_hash, metadata)
+  (doc_id, kind, title, source_file, effective_from, effective_to, status, content_hash, metadata, project_key)
 VALUES
   ('price-soleil-2026q3', 'price', 'Bảng giá sự kiện The Soleil Đà Nẵng Q3/2026 (event basket)',
    'data/_processed/soleil/price_matrix.json', '2026-08-21', NULL, 'published',
    encode(digest('seed:price-soleil-2026q3', 'sha256'), 'hex'),
-   '{"project":"soleil","campaign":"soleil-2026q3","currency":"VND","trust":"estimate"}')
+   '{"project":"soleil","campaign":"soleil-2026q3","currency":"VND","trust":"estimate"}',
+   'soleil')
 ON CONFLICT (doc_id) DO NOTHING;
 
 INSERT INTO campaigns
@@ -2481,6 +2482,42 @@ AND NOT EXISTS (
   SELECT 1 FROM facts f
   WHERE f.subject_id = s.id AND f.fact_key = 'htls_banks'
     AND f.value_text = v.value_text
+);
+
+-- Tower structure facts on the project subject (deterministic; QnA 30/10/2025
+-- distances + GCN PCCC 4602 tháp B/A1/A2 + QĐ 6608 master plan). Idempotent:
+-- only inserted when the (subject, fact_key, effective_from) row is absent.
+INSERT INTO facts
+  (subject_id, fact_key, policy_key, campaign_key, value_num, value_text, unit,
+   quality, volatile, effective_from, effective_to, source_doc_id, extract_conf,
+   trust_level)
+SELECT s.id, 'towers', 'project', 'soleil-2026q3', 4, 'A1, A2, B, D', 'count',
+       'exact', FALSE, '2026-08-21'::date, NULL, 'project-soleil-2026q3', 0.90,
+       'confirmed'
+FROM fact_subjects s
+WHERE s.subject_key = 'project:soleil'
+AND NOT EXISTS (
+  SELECT 1 FROM facts f
+  WHERE f.subject_id = s.id AND f.fact_key = 'towers'
+    AND COALESCE(f.policy_key, '') = 'project'
+    AND f.effective_from = '2026-08-21'::date
+);
+
+INSERT INTO facts
+  (subject_id, fact_key, policy_key, campaign_key, value_num, value_text, unit,
+   quality, volatile, effective_from, effective_to, source_doc_id, extract_conf,
+   trust_level)
+SELECT s.id, 'tower_distances', 'project', 'soleil-2026q3', NULL,
+       'A1-A2: 40m; D-A2: 30m; A1-B: 30m; D-B: 30m', 'enum',
+       'exact', FALSE, '2026-08-21'::date, NULL, 'project-soleil-2026q3', 0.90,
+       'confirmed'
+FROM fact_subjects s
+WHERE s.subject_key = 'project:soleil'
+AND NOT EXISTS (
+  SELECT 1 FROM facts f
+  WHERE f.subject_id = s.id AND f.fact_key = 'tower_distances'
+    AND COALESCE(f.policy_key, '') = 'project'
+    AND f.effective_from = '2026-08-21'::date
 );
 
 COMMIT;

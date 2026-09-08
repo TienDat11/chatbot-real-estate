@@ -35,9 +35,11 @@ export function useLeadRealtimeStream(
     // Reset the transient stream state at the START of every (re)subscription:
     // switching projectKey must not keep the previous project's error (or lead
     // list) visible while the new subscription is still connecting.
-    setLeads([]);
-    setError(null);
-    setConnectionState("connecting");
+    const resetId = window.setTimeout(() => {
+      setLeads([]);
+      setError(null);
+      setConnectionState("connecting");
+    }, 0);
 
     const handle = leadRealtimeService.streamLeadsByProject(
       { projectKey },
@@ -47,7 +49,10 @@ export function useLeadRealtimeStream(
         onError: setError,
       }
     );
-    return () => handle.unsubscribe();
+    return () => {
+      window.clearTimeout(resetId);
+      handle.unsubscribe();
+    };
   }, [leadRealtimeService, projectKey]);
 
   return { leads, connectionState, error };

@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
-from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
+from api.application.ports.staff_audit import (
+    STAFF_AUDIT_ACTION_LEAD_STATUS_UPDATED,
+    STAFF_AUDIT_ACTION_MARKETING_CONSENT_WITHDRAWN,
+    STAFF_AUDIT_ACTION_PHONE_REVEALED,
+    StaffAuditEntry,
+)
 from api.application.services.crm_customer_service import (
     reveal_customer_phone_for_assigned_sales_only,
     update_lead_crm_status_and_mirror,
@@ -24,16 +28,9 @@ from api.application.services.crm_customer_service import (
 )
 from api.application.services.lead_mirror_service import compute_customer_id
 from api.application.services.staff_audit_service import record_staff_action
-from api.application.ports.staff_audit import (
-    STAFF_AUDIT_ACTION_LEAD_STATUS_UPDATED,
-    STAFF_AUDIT_ACTION_MARKETING_CONSENT_WITHDRAWN,
-    STAFF_AUDIT_ACTION_PHONE_REVEALED,
-    StaffAuditEntry,
-)
 from api.infrastructure import dependencies as dependency_injection
 from api.infrastructure.ports.leads import get_lead_repository
 from api.infrastructure.ports.realtime_mirror import get_realtime_lead_mirror
-from api.interfaces.api.deps import require_sales_or_admin
 from api.interfaces.api.main import create_app
 from tests.test_admin_auth import (
     ISSUER,
@@ -44,6 +41,7 @@ from tests.test_admin_auth import (
 from tests.test_crm_api import (
     ASSIGNED_SALES_PRINCIPAL,
     CUSTOMER_PHONE,
+    OTHER_SALES_PRINCIPAL,
     FakeCrmLeadRepository,
     seed_lead,
 )
@@ -155,6 +153,7 @@ def test_reveal_records_entry_without_the_raw_phone() -> None:
             customer_id=compute_customer_id(CUSTOMER_PHONE),
             principal=ASSIGNED_SALES_PRINCIPAL,
             audit_store=store,
+            correlation_id="corr-reveal-1",
         )
     )
 
@@ -162,7 +161,11 @@ def test_reveal_records_entry_without_the_raw_phone() -> None:
     entry = store.entries[0]
     assert entry.action == STAFF_AUDIT_ACTION_PHONE_REVEALED
     assert entry.customer_id == compute_customer_id(CUSTOMER_PHONE)
-    assert sorted(entry.detail["revealed_lead_ids"]) == [1, 2]
+    # G3-r6 §10.2: the normative reveal detail is lead_ids/occurred_at/
+    # correlation_id — the old revealed_lead_ids key is retired.
+    assert sorted(entry.detail["lead_ids"]) == [1, 2]
+    assert entry.detail["correlation_id"] == "corr-reveal-1"
+    assert entry.detail["occurred_at"]
     # The audit payload must not become a secondary PII leak channel.
     serialized = json.dumps(
         {
@@ -221,6 +224,74 @@ def test_marketing_withdrawal_records_customer_scoped_entry() -> None:
     assert entry.action == STAFF_AUDIT_ACTION_MARKETING_CONSENT_WITHDRAWN
     assert entry.customer_id == compute_customer_id(CUSTOMER_PHONE)
     assert sorted(entry.detail["withdrawn_lead_ids"]) == [1, 2]
+
+
+def test_marketing_withdrawal_is_customer_wide_across_sales_owners_and_cancels_queue() -> None:
+    # A sales user who owns ONE of the customer's rows withdraws consent for
+    # EVERY row of that customer — including a row assigned to another sales —
+    # and the re-approach queue suggestions for the customer are cancelled.
+    repo = FakeCrmLeadRepository()
+    seed_lead(repo, 1, phone=CUSTOMER_PHONE, assigned_sales_id=1)
+    seed_lead(repo, 2, phone=CUSTOMER_PHONE, assigned_sales_id=2)
+    seed_lead(repo, 3, phone="0913111222", assigned_sales_id=1)
+    store = RecordingStaffAuditStore()
+
+    class RecordingQueueStore:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+
+        async def save_queue_entries(self, entries) -> None:
+            return None
+
+        async def load_attempt_counts_by_customer_id(self) -> dict[str, int]:
+            return {}
+
+        async def cancel_queue_entries_for_customer(self, customer_id: str) -> None:
+            self.cancelled.append(customer_id)
+
+    queue_store = RecordingQueueStore()
+    withdrawn_leads = asyncio.run(
+        withdraw_customer_marketing_consent_and_mirror(
+            repo,
+            RecordingLeadMirror(),
+            customer_id=compute_customer_id(CUSTOMER_PHONE),
+            principal=ASSIGNED_SALES_PRINCIPAL,
+            audit_store=store,
+            reengage_queue_store=queue_store,
+        )
+    )
+
+    assert sorted(lead.id for lead in withdrawn_leads) == [1, 2]
+    assert repo.leads[1].consent_marketing is False
+    assert repo.leads[2].consent_marketing is False
+    assert repo.leads[3].consent_marketing is True
+    assert queue_store.cancelled == [compute_customer_id(CUSTOMER_PHONE)]
+    entry = store.entries[0]
+    assert sorted(entry.detail["withdrawn_lead_ids"]) == [1, 2]
+
+
+def test_marketing_withdrawal_denied_for_sales_owning_no_customer_row() -> None:
+    # The service-level gate refuses a sales user who owns none of the
+    # customer's rows — nothing is mutated and nothing is audited.
+    from api.application.services.crm_customer_service import CrmLeadAccessDeniedError
+
+    repo = FakeCrmLeadRepository()
+    seed_lead(repo, 1, phone=CUSTOMER_PHONE, assigned_sales_id=1)
+    store = RecordingStaffAuditStore()
+
+    with pytest.raises(CrmLeadAccessDeniedError):
+        asyncio.run(
+            withdraw_customer_marketing_consent_and_mirror(
+                repo,
+                RecordingLeadMirror(),
+                customer_id=compute_customer_id(CUSTOMER_PHONE),
+                principal=OTHER_SALES_PRINCIPAL,
+                audit_store=store,
+            )
+        )
+    assert repo.leads[1].consent_marketing is True
+    assert repo.leads[1].marketing_withdrawn_at is None
+    assert store.entries == []
 
 
 # ---------------------------------------------------------------------------

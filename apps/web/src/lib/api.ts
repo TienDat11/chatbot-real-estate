@@ -55,14 +55,39 @@ export interface AckMeta {
  * existing consumers are unaffected.
  */
 export class QueryStreamError extends Error {
-  /** Raw frame data: `{code, message?, quota?, lead_cta?}` per spec §5.2/§5.3. */
+  /** Raw frame data: `{code, message?, retryable?, quota?, lead_cta?}` per spec §5.2/§5.3. */
   readonly data: unknown;
+  /**
+   * Additive backend flag: the frame explicitly marks this failure as safe to
+   * retry (timeout, transient internal). Null = frame carried no flag; callers
+   * fall back to code-based inference.
+   */
+  readonly retryable: boolean | null;
+  /** Backend error code from the structured envelope, when present. */
+  readonly code: string | null;
 
   constructor(message: string, data: unknown) {
     super(message);
     this.name = "QueryStreamError";
     this.data = data;
+    const rec = (data && typeof data === "object" ? data : {}) as {
+      code?: unknown;
+      retryable?: unknown;
+    };
+    this.code = typeof rec.code === "string" ? rec.code : null;
+    // Defensive read: the flag is additive, so absent/legacy frames stay null
+    // instead of inventing a boolean the backend never sent.
+    this.retryable = typeof rec.retryable === "boolean" ? rec.retryable : null;
   }
+}
+
+/**
+ * Fallback inference for error frames that predate the additive `retryable`
+ * flag: timeout and transient internal failures are retryable; policy
+ * rejections and input errors are not.
+ */
+export function isInferRetryableStreamError(code: string | null): boolean {
+  return code === "STREAM_TIMEOUT" || code === "INTERNAL";
 }
 
 /** Callbacks for each event type in the POST /api/query SSE stream. */

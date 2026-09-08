@@ -1,8 +1,11 @@
 @import "tailwindcss";
 
 :root {
-  --background: #faf7f2;
-  --foreground: #1a2233;
+  --background: #f7f9fc;
+  --foreground: #142a43;
+  /* Self-hosted via @fontsource/be-vietnam-pro (see src/app/layout.tsx);
+     same variable contract the old next/font/google loader provided. */
+  --font-be-vietnam: "Be Vietnam Pro";
 }
 
 @theme inline {
@@ -31,30 +34,35 @@ body {
   --c-primary-hover: #0a2139;
   --c-primary-soft: #e8eef7;
   --c-primary-border: #c9d8ec;
-  --c-gold: #c9a24b;
-  --c-gold-hover: #b78f3d;
-  --c-gold-soft: #f7f0df;
-  --c-gold-border: #e4d3a8;
-  --c-terracotta: #a8502e;
-  --c-terracotta-hover: #8f4527;
-  --c-terracotta-soft: #f9ece4;
-  --c-terracotta-border: #eacdbe;
-  --c-charcoal: #1b2737;
-  --c-charcoal-deep: #141d2b;
-  --c-charcoal-soft: #263447;
-  --c-bg: #faf7f2;
+  --c-gold: #8a651a;
+  --c-gold-hover: #6e5012;
+  --c-gold-soft: #fff8e6;
+  --c-gold-border: #e8d39a;
+  --c-terracotta: #934322;
+  --c-terracotta-hover: #75351b;
+  --c-terracotta-soft: #fff0e8;
+  --c-terracotta-border: #e8bfa9;
+  --c-charcoal: #1e3550;
+  --c-charcoal-deep: #142a43;
+  --c-charcoal-soft: #eef3f8;
+  --c-bg: #f7f9fc;
   --c-surface: #ffffff;
-  --c-surface-alt: #f3efe7;
-  --c-border: #e9e2d6;
-  --c-border-strong: #d8cfbf;
-  --c-text: #1a2233;
-  --c-text-muted: #5b6478;
-  --c-text-faint: #8a93a6;
-  --c-text-ghost: #abb3c3;
-  --c-on-dark: #f5f1e8;
-  --c-on-dark-muted: #c2ccdb;
+  --c-surface-alt: #f1f5f9;
+  --c-border: #dce4ed;
+  --c-border-strong: #b8c7d8;
+  /* Boundary tones that clear the 3:1 WCAG non-text floor on white surfaces
+   * (FR-23 / R8 header chips; mirrored by HEADER.chipBorder/accentChipBorder
+   * and CONTROL_BORDER.hover in src/lib/tokens.ts). */
+  --c-border-hover: #6f86a0;
+  --c-gold-strong: #8f6626;
+  --c-text: #142a43;
+  --c-text-muted: #46586d;
+  --c-text-faint: #62758b;
+  --c-text-ghost: #5e7085;
+  --c-on-dark: #ffffff;
+  --c-on-dark-muted: #d9e6f2;
   --c-success: #1e7f4f;
-  --c-warning: #c96f4a;
+  --c-warning: #b25b36;
   --c-danger: #c0392b;
   --c-danger-soft: #fbeae7;
   --c-info-bg: #e8eef7;
@@ -79,14 +87,36 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
   outline-offset: 2px;
 }
 
-/* Suggestion buttons (empty state) — hover via CSS, not inline JS */
+/* Suggestion buttons (empty state) — hover via CSS, not inline JS. The lift
+   is motion, so it only applies when motion is allowed; the gold border +
+   shadow feedback stay for everyone. */
 .suggestion-grid button:hover {
   border-color: var(--c-gold) !important;
   box-shadow: 0 2px 12px rgba(201, 162, 75, 0.35);
-  transform: translateY(-1px);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .suggestion-grid button:hover {
+    transform: translateY(-1px);
+  }
 }
 .suggestion-grid button:active {
   transform: translateY(0);
+}
+
+/* Mobile-safe full-height shells: dvh tracks the collapsing URL bar on mobile
+   browsers. The vh declaration comes first so engines without dynamic
+   viewport units keep a working (static) height. */
+.app-viewport-height {
+  height: 100vh;
+  height: 100dvh;
+}
+.app-viewport-min-height {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.rail-min-height {
+  min-height: calc(100vh - 140px);
+  min-height: calc(100dvh - 140px);
 }
 
 /* Slim scrollbar for the chat area */
@@ -112,6 +142,39 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
   50% {
     opacity: 0;
   }
+}
+
+/* ---------------------------------------------------------------------
+ * Premium thinking/typing states (streaming chat)
+ * Waiting phase: gold shimmer across the Vietnamese stage label; streaming
+ * phase: the typing-caret above. Both collapse under prefers-reduced-motion.
+ * ------------------------------------------------------------------- */
+.streaming-stage-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--c-text-muted, #46586D);
+  background: linear-gradient(90deg, var(--c-text-muted, #46586D) 0%, var(--c-gold, #8A651A) 50%, var(--c-text-muted, #46586D) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: stage-shimmer 2.4s ease-in-out infinite;
+}
+@keyframes stage-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* Trailing ellipsis breathing after the stage label */
+.streaming-stage-label::after {
+  content: "…";
+  animation: stage-ellipsis 1.8s steps(4, end) infinite;
+}
+@keyframes stage-ellipsis {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75% { content: "…"; }
 }
 
 /* Align numbers in the facts table */
@@ -173,56 +236,214 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
 @media (prefers-reduced-motion: reduce) {
   .ack-dots span,
   .step-spinner,
-  .typing-caret::after {
+  .typing-caret::after,
+  .streaming-stage-label,
+  .streaming-stage-label::after {
     animation: none;
   }
   .ack-dots span { opacity: 1; transform: none; }
-}
-
-/* Bubble entrance (only when motion is allowed) */
-@media (prefers-reduced-motion: no-preference) {
-  .message-row {
-    animation: bubble-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* Shimmer depends on background-clip animation; static fallback keeps the
+     label readable without the moving gradient. */
+  .streaming-stage-label {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--c-text-muted, #46586D);
   }
-  @keyframes bubble-in {
-    from { opacity: 0; transform: translateY(8px); }
-    to { opacity: 1; transform: translateY(0); }
+  .streaming-stage-label::after {
+    content: "…";
   }
 }
 
-/* Content-visibility for virtualized message list */
-.message-row {
-  content-visibility: auto;
-  contain-intrinsic-size: 1px 96px;
-}
 
-/* Streaming placeholder keep layout stable (no CLS) */
-.streaming-placeholder {
-  min-height: 88px;
+/* ======================================================================
+ * Answer bubble font clamp ("khung chữ cố định") — B3
+ * CSS has no max-font-size, so the cap is enforced per element: every
+ * heading rendered inside an AnswerBlocks bubble is pinned at or below
+ * ~1.15x the body scale (font-scale classes still flow through the
+ * custom properties, so the cap tracks the accessibility scaling).
+ * ==================================================================== */
+.rag-answer h1,
+.rag-answer h2,
+.rag-answer h3,
+.rag-answer h4,
+.rag-answer h5,
+.rag-answer h6 {
+  font-size: calc(var(--fs-body, 17px) * 1.15);
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--c-primary, #0e2a47);
+  margin: 14px 0 8px;
+}
+.rag-answer .rag-answer__heading {
+  font-size: inherit;
+  line-height: inherit;
+}
+/* The root itself and the streaming pending tail always sit at body scale. */
+.rag-answer,
+.rag-answer .rag-answer__pending {
+  font-size: var(--fs-body, 17px);
+  line-height: var(--fs-body-line, 28px);
 }
 
 /* ======================================================================
  * Premium proptech component layer
  * ==================================================================== */
 
-/* App header — deep navy→charcoal gradient with a gold hairline. */
-.app-header {
-  background: linear-gradient(120deg, var(--c-primary) 0%, var(--c-charcoal-deep) 100%);
-  border-bottom: 2px solid var(--c-gold);
-}
-.app-header .ant-typography {
-  color: var(--c-on-dark);
+.app-shell__header { position: sticky; top: 0; z-index: 20; }
+.app-shell__header-inner { min-height: 72px; max-width: 1440px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; gap: 24px; }
+.app-shell__brand { display: inline-flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; flex-shrink: 0; }
+.app-shell__mark { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--c-primary); color: var(--c-on-dark); font-weight: 700; }
+.app-shell__nav { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
+.app-shell__nav-link { display: inline-flex; align-items: center; gap: 7px; padding: 9px 11px; border-radius: var(--radius-btn); color: var(--c-text-muted); text-decoration: none; font-size: 14px; font-weight: 600; white-space: nowrap; }
+.app-shell__nav-link:hover { background: var(--c-primary-soft); color: var(--c-primary); }
+.app-shell__account { flex-shrink: 0; }
+.app-shell__content { width: 100%; max-width: 1440px; margin: 0 auto; padding: 24px 32px 40px; }
+.app-shell__intro { margin-bottom: 20px; }
+@media (max-width: 760px) {
+  .app-shell__header-inner { min-height: 64px; padding: 10px 16px; gap: 12px; flex-wrap: wrap; }
+  .app-shell__nav { order: 3; flex-basis: 100%; overflow-x: auto; padding-bottom: 2px; }
+  .app-shell__account { margin-left: auto; }
+  .app-shell__content { padding: 16px 16px 32px; }
 }
 
-/* Glass chips on the dark header (phone, project status) */
+/* Bounded shell for full-height chat workspaces (/sales/chat, /sales/train):
+   the canvas must fill the shell's content box instead of claiming its own
+   100dvh — double viewport accounting (shell + canvas each taller than the
+   viewport) forced a page-level scrollbar on top of the message list's own.
+   :has() scopes the bounded height to shells actually hosting a canvas, so
+   document-flow workspaces (CRM, admin) keep their normal page scroll. The
+   map rail's standalone viewport floor would exceed the bounded row, so it is
+   neutralized here; the message list (chat-scroll) stays the only scroller. */
+.app-shell:has(.app-shell-canvas) {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+.app-shell:has(.app-shell-canvas) .app-shell__content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.app-shell-canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.app-shell:has(.app-shell-canvas) .rail-min-height {
+  min-height: 0;
+}
+
+
+/* App header (FR-23 / R8): a LIGHT brand surface — white fill, navy text and
+ * a gold hairline. The historical navy-gradient rules were fully overridden
+ * by the light-surface block below and are removed so no reader trusts
+ * `--c-on-dark` ink here again. All pairings are pinned by HEADER tokens in
+ * tokens.ts and asserted in tokens.contrast.test.ts. */
+.app-header {
+  background: var(--c-surface);
+  color: var(--c-text);
+  border-bottom: 2px solid var(--c-gold);
+  box-shadow: var(--shadow-1);
+}
+.app-header .ant-typography {
+  color: var(--c-text);
+}
+
+/* Header chips: solid soft fills with >= 3:1 boundaries on the white surface
+ * (the previous translucent glass borders fell below the WCAG non-text floor). */
 .header-chip {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(245, 241, 232, 0.22);
-  backdrop-filter: blur(6px);
+  background: var(--c-primary-soft);
+  border-color: var(--c-border-hover);
+  border-style: solid;
+  color: var(--c-primary);
+  backdrop-filter: none;
 }
 .header-chip--accent {
-  background: rgba(201, 162, 75, 0.14);
-  border: 1px solid rgba(201, 162, 75, 0.45);
+  background: var(--c-gold-soft);
+  border-color: var(--c-gold-strong);
+  color: var(--c-text);
+}
+
+/* Root and login share one calm, full-viewport auth surface. */
+.root-auth-shell {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(1000px 480px at 15% -10%, rgba(201, 162, 75, 0.18), transparent 60%),
+    radial-gradient(900px 420px at 90% 110%, rgba(168, 80, 46, 0.16), transparent 55%),
+    linear-gradient(135deg, #0e2a47 0%, #141d2b 55%, #1b2737 100%);
+}
+
+/* Login keeps the visual/auth split on desktop and becomes a single auth card on mobile. */
+@media (max-width: 720px) {
+  .login-visual {
+    display: none !important;
+  }
+}
+
+/* Auth split-screen visual: layered brand gradient (navy -> charcoal with gold
+   and terracotta radial accents) standing in for project photography. Uses the
+   same recipe as .media-gradient--warm so auth surfaces stay on the one brand
+   world; real CDN imagery can be layered on top later without touching markup. */
+.auth-visual {
+  background:
+    radial-gradient(120% 90% at 15% 0%, rgba(201, 162, 75, 0.30), transparent 55%),
+    radial-gradient(120% 90% at 85% 100%, rgba(168, 80, 46, 0.26), transparent 55%),
+    linear-gradient(135deg, var(--c-primary) 0%, var(--c-charcoal-deep) 100%);
+}
+
+/* CRM filter row: project, status, date window, then the live match count.
+   The date window gets the flexible track so it remains usable at tablet widths. */
+.crm-rejected-filter-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(160px, 0.9fr) minmax(240px, 1.7fr) auto;
+  gap: 16px;
+  align-items: center;
+  width: 100%;
+}
+.crm-rejected-filter-grid > * {
+  min-width: 0;
+}
+.crm-rejected-filter-grid > :last-child {
+  display: contents;
+}
+.crm-rejected-filter-grid > :last-child .ant-picker {
+  width: 100%;
+  min-width: 240px;
+}
+.crm-rejected-filter-grid > :last-child .ant-typography {
+  white-space: nowrap;
+}
+@media (max-width: 1119px) {
+  .crm-rejected-filter-grid {
+    grid-template-columns: minmax(180px, 1fr) minmax(160px, 1fr);
+  }
+  .crm-rejected-filter-grid > :last-child .ant-picker {
+    grid-column: 1;
+  }
+  .crm-rejected-filter-grid > :last-child .ant-typography {
+    grid-column: 2;
+    align-self: center;
+  }
+}
+@media (max-width: 720px) {
+  .crm-rejected-filter-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .crm-rejected-filter-grid > :last-child .ant-picker,
+  .crm-rejected-filter-grid > :last-child .ant-typography {
+    grid-column: auto;
+  }
+  .crm-rejected-filter-grid > :last-child .ant-picker {
+    min-width: 0;
+  }
+  .crm-rejected-filter-grid > :last-child .ant-typography {
+    margin-top: 0;
+  }
 }
 
 /* Narrow screens: let the project chip take a full row with the phone chip so
@@ -248,7 +469,10 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
 }
 .hero-badge {
   background: linear-gradient(135deg, var(--c-primary) 0%, var(--c-charcoal) 100%);
-  color: var(--c-gold);
+  /* Light gold on the navy fill: the raw brand gold (#8a651a) only reaches
+     ~2.7:1 against navy, below the WCAG 1.4.11 non-text floor; #e8d39a clears
+     ~9.8:1 (ISSUE-5 FR-1 contrast audit). */
+  color: var(--c-gold-border);
   box-shadow: var(--shadow-gold);
 }
 
@@ -316,11 +540,24 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
   box-shadow: 0 4px 14px rgba(168, 80, 46, 0.4);
 }
 
-/* Gold premium chip — navy text on gold keeps WCAG AA (~6:1) while
-   preserving the premium gold identity. */
+/* Gold premium chip — WHITE text on the gold gradient clears AA (5.31:1);
+ * the previous navy ink only reached 2.75:1 on the darkened gold stop
+ * (FR-23 / R8 contrast audit). */
 .chip-gold {
   background: linear-gradient(135deg, var(--c-gold) 0%, var(--c-gold-hover) 100%);
-  color: #0e2a47;
+  color: #ffffff;
+}
+
+/* Header hot-contact CTA (FR-24 / R8): native button opening LeadForm.
+ * Terracotta fill with white ink via .btn-terracotta (6.85:1, 9.20:1 hover);
+ * the global :focus-visible outline covers keyboard focus. */
+.header-hotline-chip {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  color: #ffffff;
+  cursor: pointer;
+  border: none;
 }
 
 /* Chat composer container */
@@ -335,8 +572,67 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
   box-shadow: 0 0 0 3px rgba(201, 162, 75, 0.18);
 }
 
-/* Dark admin shell */
+/* Shared light surfaces for chat, CRM, admin, and auth. Navy is reserved for
+ * clear brand actions and compact chrome, never used as a page-wide theme.
+ * (.app-header chrome lives in the dedicated FR-23 block above.) */
 .admin-shell {
-  background: linear-gradient(120deg, var(--c-primary) 0%, var(--c-charcoal-deep) 100%);
-  border-bottom: 2px solid var(--c-gold);
+  background: var(--c-surface);
+  color: var(--c-text);
+  border-bottom: 1px solid var(--c-border);
+  box-shadow: var(--shadow-1);
+}
+.admin-shell .ant-typography {
+  color: var(--c-text);
+}
+.root-auth-shell {
+  background: var(--c-bg);
+}
+.auth-visual {
+  background: linear-gradient(145deg, var(--c-primary-soft), var(--c-surface-alt));
+  color: var(--c-text);
+}
+.hero-panel {
+  background: var(--c-surface);
+  border-color: var(--c-border);
+  box-shadow: var(--shadow-1);
+}
+
+/* Consistent 40px minimum controls and visible keyboard affordances. */
+.ant-btn,
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-select-selector,
+.ant-picker {
+  min-height: 40px;
+}
+.ant-btn {
+  padding-inline: 16px;
+  font-weight: 600;
+}
+.ant-btn-lg {
+  min-height: 44px;
+  padding-inline: 20px;
+}
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-select-selector,
+.ant-picker {
+  border-color: var(--c-border-strong);
+}
+.ant-btn:focus-visible,
+.ant-input:focus-visible,
+.ant-input-affix-wrapper:focus-within,
+.ant-select-focused .ant-select-selector,
+.ant-picker-focused {
+  border-color: var(--c-primary) !important;
+  box-shadow: 0 0 0 3px rgba(14, 42, 71, 0.18) !important;
+}
+.ant-btn-primary {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+}
+.ant-btn-primary:hover,
+.ant-btn-primary:focus {
+  background: var(--c-primary-hover) !important;
+  border-color: var(--c-primary-hover) !important;
 }

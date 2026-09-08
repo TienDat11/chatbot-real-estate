@@ -24,10 +24,10 @@ from llama_index.core.workflow import Context
 from api.application.pipelines.reengage_workflow import (
     EmbeddedNeedProfile,
     MatchesScoredEvent,
-    ProjectActivation,
     ProfilesEmbeddedEvent,
-    RejectedCustomerProfile,
+    ProjectActivation,
     ReengageMatchWorkflow,
+    RejectedCustomerProfile,
     aggregate_rejected_lead_rows_into_profiles,
     build_project_sale_profile_text,
     cosine_similarity_between_vectors,
@@ -35,13 +35,11 @@ from api.application.pipelines.reengage_workflow import (
     passes_marketing_consent_gate,
     run_reengage_matching_for_activated_project,
 )
-from api.infrastructure.config.config import get_settings
-from api.infrastructure.ports.leads import LeadRow
 from api.infrastructure import dependencies as dependency_injection
+from api.infrastructure.ports.leads import LeadRow
 from api.interfaces.api import deps as admin_deps
 from api.interfaces.api.admin_routes import ReengageRunRequest
 from api.interfaces.api.main import create_app
-
 
 SOLEIL_ACTIVATION = ProjectActivation(
     project_key="soleil",
@@ -135,6 +133,11 @@ class InMemoryReengageQueueStore:
             counts[entry.customer_id] = counts.get(entry.customer_id, 0) + 1
         return counts
 
+    async def cancel_queue_entries_for_customer(self, customer_id: str) -> None:
+        self.saved_entries = [
+            entry for entry in self.saved_entries if entry.customer_id != customer_id
+        ]
+
 
 def build_workflow(
     *,
@@ -184,18 +187,27 @@ def test_cosine_similarity_zero_vector_scores_zero_not_nan() -> None:
 
 def test_hard_budget_filter_drops_out_of_band_keeps_unknown_budget() -> None:
     profile_in_band = RejectedCustomerProfile(
-        customer_id="c1", display_name=None, rejection_reason=None,
-        budget_vnd=4_000_000_000, consent_marketing=True,
+        customer_id="c1",
+        display_name=None,
+        rejection_reason=None,
+        budget_vnd=4_000_000_000,
+        consent_marketing=True,
         marketing_withdrawn_at=None,
     )
     profile_below_band = RejectedCustomerProfile(
-        customer_id="c2", display_name=None, rejection_reason=None,
-        budget_vnd=2_000_000_000, consent_marketing=True,
+        customer_id="c2",
+        display_name=None,
+        rejection_reason=None,
+        budget_vnd=2_000_000_000,
+        consent_marketing=True,
         marketing_withdrawn_at=None,
     )
     profile_unknown_budget = RejectedCustomerProfile(
-        customer_id="c3", display_name=None, rejection_reason=None,
-        budget_vnd=None, consent_marketing=True,
+        customer_id="c3",
+        display_name=None,
+        rejection_reason=None,
+        budget_vnd=None,
+        consent_marketing=True,
         marketing_withdrawn_at=None,
     )
     assert passes_hard_budget_filter(profile_in_band, SOLEIL_ACTIVATION)
@@ -207,17 +219,28 @@ def test_hard_budget_filter_drops_out_of_band_keeps_unknown_budget() -> None:
 def test_marketing_consent_gate_blocks_opt_out_and_withdrawn() -> None:
     withdrawn_at = datetime(2026, 8, 5, tzinfo=timezone.utc)
     opted_out = RejectedCustomerProfile(
-        customer_id="c1", display_name=None, rejection_reason=None,
-        budget_vnd=None, consent_marketing=False, marketing_withdrawn_at=None,
+        customer_id="c1",
+        display_name=None,
+        rejection_reason=None,
+        budget_vnd=None,
+        consent_marketing=False,
+        marketing_withdrawn_at=None,
     )
     withdrawn = RejectedCustomerProfile(
-        customer_id="c2", display_name=None, rejection_reason=None,
-        budget_vnd=None, consent_marketing=True,
+        customer_id="c2",
+        display_name=None,
+        rejection_reason=None,
+        budget_vnd=None,
+        consent_marketing=True,
         marketing_withdrawn_at=withdrawn_at,
     )
     clean = RejectedCustomerProfile(
-        customer_id="c3", display_name=None, rejection_reason=None,
-        budget_vnd=None, consent_marketing=True, marketing_withdrawn_at=None,
+        customer_id="c3",
+        display_name=None,
+        rejection_reason=None,
+        budget_vnd=None,
+        consent_marketing=True,
+        marketing_withdrawn_at=None,
     )
     assert not passes_marketing_consent_gate(opted_out)
     assert not passes_marketing_consent_gate(withdrawn)
@@ -280,7 +303,10 @@ def test_score_step_filters_budget_then_rank_orders_by_similarity_desc() -> None
         entries = await ctx.store.get("reengage_queue_entries")
         # Descending similarity: the perfect match outranks the 0.6 one.
         assert [entry.customer_id for entry in entries] == ["cust-high", "cust-low"]
-        assert [entry.similarity_score for entry in entries] == [pytest.approx(1.0), pytest.approx(0.6)]
+        assert [entry.similarity_score for entry in entries] == [
+            pytest.approx(1.0),
+            pytest.approx(0.6),
+        ]
         assert [entry.attempt_count for entry in entries] == [1, 1]
 
     asyncio.run(go())
@@ -346,7 +372,7 @@ def test_rank_and_queue_step_rechecks_marketing_consent_gate() -> None:
 
 MARKERS = {
     "Soleil Riverside": [1.0, 0.0],  # activated-project sale profile
-    "het ngan sach": [1.0, 0.0],     # perfect-need customer
+    "het ngan sach": [1.0, 0.0],  # perfect-need customer
     "khong thich vi tri": [0.6, 0.8],  # moderate-match customer
 }
 
@@ -465,6 +491,7 @@ def local_rsa_jwk() -> dict:
 @pytest.fixture(autouse=True)
 def offline_auth_seams(monkeypatch: pytest.MonkeyPatch, local_rsa_jwk: dict) -> None:
     """Same local-JWKS swap as tests/test_admin_auth.py — never touch network."""
+
     async def fake_key_for_kid(kid: str):
         if kid != local_rsa_jwk["kid"]:
             return None

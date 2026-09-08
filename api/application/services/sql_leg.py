@@ -23,6 +23,7 @@ from typing import Any
 import asyncpg
 
 from api import get_cfg
+from api.application.services.fact_display import policy_display, subject_display
 from api.domain.entities.price_calc import (
     affordability_rows,
     affordability_summary,
@@ -476,19 +477,104 @@ def _jsonable(v: Any) -> Any:
     return v
 
 
-def _facts_note(row: dict) -> str:
+# fact_keys whose note must carry the unit explicitly — the LLM mixed "0đ" into a
+# percent field once the unit was left implicit (round-2 defect D2/D3c).
+_FACT_UNIT_NOTES: dict[str, tuple[str, str]] = {
+    "deposit_pct": ("tỷ lệ vốn tự có, đơn vị %", "tỷ lệ % (NULL = chưa có, không phải 0%)"),
+    "term_months": ("thời hạn, đơn vị tháng", "số tháng (NULL = chưa có, không phải 0)"),
+    "area_m2": ("diện tích, đơn vị m²", "m² (NULL = chưa có)"),
+    "price_vnd": ("số tiền, đơn vị đồng (VND)", "đồng (NULL = chưa có)"),
+}
+
+_INTEREST_NULL_NOTE = "lãi suất %/năm (NULL = chưa có, không phải 0%)"
+
+
+def _is_zero_number(v: Any) -> bool:
+    """True only for a genuine numeric zero (Decimal('0.0000') counts)."""
+    if isinstance(v, bool) or v is None:
+        return False
+    if isinstance(v, (int, float, Decimal)):
+        return v == 0
+    return False
+
+
+def _positive_int(v: Any) -> int | None:
+    """Coerce a duration fact to a positive whole-month count, else None."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float, Decimal)):
+        try:
+            iv = int(v)
+        except (ValueError, OverflowError):
+            return None
+        return iv if iv > 0 else None
+    return None
+
+
+def _facts_note(row: dict, term_months: Any = None) -> str:
+    """Provenance note for one fact row — value-aware (round-2 defect D2).
+
+    The "NULL = chưa có" caveat must appear ONLY when the value is genuinely
+    absent. HTLS and owner-funded support policies carry a real 0.0000 interest
+    rate (data/_processed/business_rules.json, db/seed/policy_vay.sql), and
+    labelling that as missing data made the facts panel read as machine garbage.
+    A non-zero rate is reported without inventing a bank figure: the bank rate is
+    decided per case, so the note only states the unit and the data source.
+
+    A real 0% is a TIME-BOUNDED subsidy: the note only states "0%/năm" when the
+    sibling term_months fact proves the duration, otherwise it defers to the
+    policy term — an unbounded 0% claim would mislead the customer.
+    """
     q = row.get("quality") or "exact"
     if q == "range":
         return f"khoảng {row.get('range_min')}–{row.get('range_max')} (dữ liệu range)"
     if q == "approx":
         return f"ước lượng ~{row.get('value_num')} (dữ liệu approx)"
-    if row.get("fact_key") == "interest_rate_pct":
-        return "lãi suất %/năm (NULL = chưa có, không phải 0%)"
+
+    fact_key = row.get("fact_key")
+    value = row.get("value_num")
+    if value is None:
+        value = row.get("value_text")
+
+    if fact_key == "interest_rate_pct":
+        if value is None:
+            return _INTEREST_NULL_NOTE
+        if _is_zero_number(value):
+            label = policy_display(row.get("policy_key"))
+            source = f"theo {label} của chủ đầu tư" if label else "theo chính sách của chủ đầu tư"
+            term = _positive_int(term_months if term_months is not None else row.get("term_months"))
+            if term is not None:
+                return (
+                    f"lãi suất ưu đãi 0%/năm trong {term} tháng đầu {source} "
+                    "- mức hỗ trợ thật, không phải thiếu dữ liệu"
+                )
+            # No duration evidence on this row — a bare 0%/năm would read as
+            # unlimited, so the note defers to the term written in the policy.
+            return f"mức hỗ trợ lãi suất {source}, áp dụng theo thời hạn ghi trong chính sách"
+        return (
+            "lãi suất %/năm theo chính sách trong dữ liệu"
+            " (lãi vay thực tế do ngân hàng quyết định từng case)"
+        )
+
+    unit_note = _FACT_UNIT_NOTES.get(str(fact_key))
+    if unit_note:
+        present_note, null_note = unit_note
+        return present_note if value is not None else null_note
     return "số liệu gốc từ dữ liệu cấu trúc"
 
 
 def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> list[dict]:
     """Convert raw rows into FACT_EVIDENCE blocks (fe-001..) — the sole numeric source for generation."""  # noqa: E501
+    # A 0% HTLS rate is time-bounded, but the duration lives in a SIBLING
+    # term_months fact row for the same subject+policy, so index it up front
+    # for the note builder instead of shipping an unbounded "0%/năm".
+    term_by_scope: dict[tuple, Any] = {}
+    if source != "v_unit_offers":
+        for row in rows:
+            if row.get("fact_key") == "term_months" and row.get("value_num") is not None:
+                term_by_scope.setdefault(
+                    (row.get("subject_key"), row.get("policy_key")), row.get("value_num")
+                )
     fe: list[dict] = []
     for i, row in enumerate(rows, start=1):
         if source == "v_unit_offers":
@@ -505,7 +591,14 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
             entry = {
                 "fe_id": f"fe-{i:03d}",
                 "subject": row.get("subject_key") or f"unit:{row.get('subject_id')}",
+                # Additive legend (D4): machine keys stay byte-identical for
+                # guard_output, the *_display fields give the LLM prose to quote.
+                "subject_display": subject_display(
+                    row.get("subject_key") or f"unit:{row.get('subject_id')}",
+                    row.get("display_name"),
+                ),
                 "policy_key": row.get("policy_key"),
+                "policy_display": policy_display(row.get("policy_key")),
                 "fields": fields,
                 "note": note,
                 "quality": "exact",
@@ -523,9 +616,14 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
             entry = {
                 "fe_id": f"fe-{i:03d}",
                 "subject": row.get("subject_key"),
+                "subject_display": subject_display(row.get("subject_key"), row.get("display_name")),
                 "policy_key": row.get("policy_key"),
+                "policy_display": policy_display(row.get("policy_key")),
                 "fields": fields,
-                "note": _facts_note(row),
+                "note": _facts_note(
+                    row,
+                    term_by_scope.get((row.get("subject_key"), row.get("policy_key"))),
+                ),
                 "quality": row.get("quality") or "exact",
                 "trust_level": row.get("trust_level") or "confirmed",
                 "range": {
