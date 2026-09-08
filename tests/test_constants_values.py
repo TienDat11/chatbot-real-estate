@@ -31,7 +31,7 @@ def test_rerank_timeout_is_3s():
 
 def test_embedding_dims_locked_at_1024():
     assert DEFAULT_EMBEDDING_DIM == 1024
-    assert DEFAULT_EMBEDDING_MODEL == "text-embedding-v4"
+    assert DEFAULT_EMBEDDING_MODEL == "gemini-embedding-001"
 
 
 def test_embedding_dims_match_settings():

@@ -21,6 +21,7 @@ from jwt.algorithms import RSAAlgorithm
 
 from api.infrastructure import dependencies as dependency_injection
 from api.infrastructure.adapters import firebase_auth_jwks
+from api.infrastructure.config.config import get_settings
 from api.interfaces.api import deps as admin_deps
 from api.interfaces.api.deps import (
     AuthenticatedPrincipal,
@@ -34,7 +35,7 @@ PROJECT_ID = "sale-chat-bot-11e49"
 ISSUER = f"https://securetoken.google.com/{PROJECT_ID}"
 
 # Fixed uid -> sales_id rows the fake mapping "returns from PG".
-MAPPED_SALES_ID_BY_UID = {"uid-sales-mapped": 777}
+MAPPED_SALES_ID_BY_UID = {"uid-sales-mapped": 777, "uid-sales": 778}
 
 
 @pytest.fixture(scope="module")
@@ -124,6 +125,10 @@ def offline_auth_seams(monkeypatch: pytest.MonkeyPatch, local_rsa_jwk: dict) -> 
         return MAPPED_SALES_ID_BY_UID.get(firebase_uid)
 
     monkeypatch.setattr(
+        get_settings(), "sales_legacy_key_auth_enabled", False
+    )
+
+    monkeypatch.setattr(
         admin_deps.admin,
         "_fetch_active_sales_id_sync",
         fake_fetch_active_sales_id_sync,
@@ -146,19 +151,19 @@ def role_matrix_app() -> FastAPI:
 
     @app.get("/dependency/admin")
     async def admin_endpoint(
-        authenticated_principal: AuthenticatedPrincipal = Depends(require_admin),
+        authenticated_principal: AuthenticatedPrincipal = Depends(require_admin),  # noqa: B008
     ) -> dict:
         return _principal_payload(authenticated_principal)
 
     @app.get("/dependency/sales")
     async def sales_endpoint(
-        authenticated_principal: AuthenticatedPrincipal = Depends(require_sales),
+        authenticated_principal: AuthenticatedPrincipal = Depends(require_sales),  # noqa: B008
     ) -> dict:
         return _principal_payload(authenticated_principal)
 
     @app.get("/dependency/viewer")
     async def viewer_endpoint(
-        authenticated_principal: AuthenticatedPrincipal = Depends(require_viewer),
+        authenticated_principal: AuthenticatedPrincipal = Depends(require_viewer),  # noqa: B008
     ) -> dict:
         return _principal_payload(authenticated_principal)
 
@@ -326,16 +331,14 @@ def test_sales_session_route_attaches_sales_id_from_mapping(
     assert body["sales_id"] == MAPPED_SALES_ID_BY_UID["uid-sales-mapped"]
 
 
-def test_sales_session_route_allows_unmapped_sales_row(
+def test_sales_session_route_denies_unmapped_sales_row(
     local_rsa_jwk: dict,
 ) -> None:
-    """A verified sales claim stays authorized even without a PG sales row:
-    the mapping enriches the principal, it does not gate access."""
+    """A verified sales claim is denied without an active PG sales row."""
     token = _mint_id_token(
         local_rsa_jwk, _base_claims("uid-sales-unmapped", "sales")
     )
     response = TestClient(create_app()).get(
         "/api/sales/session", headers=_bearer_headers(token)
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["sales_id"] is None
+    assert response.status_code == 403, response.text

@@ -29,8 +29,25 @@ from llama_index.core.workflow import (
 )
 
 from api import get_cfg
-from api.domain.services.utils import sha256_hex
 from api.application.services.audit import write_audit
+from api.application.services.conv_state import conv_directive, get_context
+from api.application.services.generate import stream_answer
+from api.application.services.image_search import (
+    fetch_price_board_images,
+    is_full_price_board_query,
+    search_images,
+)
+from api.application.services.merge import Merged, merge_context
+from api.application.services.project_config import request_project_snapshot
+from api.application.services.project_scope import is_training_scope
+from api.application.services.rag_leg import RagLegResult, run_rag_leg
+from api.application.services.sql_leg import SqlLegResult, run_sql_leg
+from api.domain.services.guard_input import GuardResult as InputGuardResult
+from api.domain.services.guard_input import guard_input, rule_screen
+from api.domain.services.guard_output import GuardResult as OutputGuardResult
+from api.domain.services.guard_output import guard_output, sanitize_output
+from api.domain.services.rewrite import RoutedResult, fallback_route, rewrite_query
+from api.domain.services.utils import sha256_hex
 from api.domain.value_objects.constants import (
     SSE_EVENT_FACTS,
     SSE_EVENT_IMAGES,
@@ -38,22 +55,15 @@ from api.domain.value_objects.constants import (
     SSE_EVENT_SOURCES,
     SSE_EVENT_TOKEN,
 )
-from api.application.services.image_search import search_images
-from api.application.services.project_config import request_project_snapshot
 from api.infrastructure.config.config import project_geo_center
 from api.infrastructure.dependencies import get_geo, get_reranker
-from api.application.services.generate import stream_answer
-from api.application.services.conv_state import conv_directive, get_context
-from api.domain.services.guard_input import GuardResult as InputGuardResult
-from api.domain.services.guard_input import guard_input, rule_screen
-from api.domain.services.guard_output import GuardResult as OutputGuardResult
-from api.domain.services.guard_output import guard_output
-from api.domain.services.guard_output import sanitize_output
-from api.application.services.merge import Merged, merge_context
+from api.domain.services.guard_output import (
+    GuardResult as OutputGuardResult,
+    guard_output,
+    normalize_answer_display,
+    sanitize_output,
+)
 from api.infrastructure.ports.geo import GeoResult
-from api.application.services.rag_leg import RagLegResult, run_rag_leg
-from api.domain.services.rewrite import RoutedResult, fallback_route, rewrite_query
-from api.application.services.sql_leg import SqlLegResult, run_sql_leg
 
 logger = logging.getLogger("api.workflow")
 
@@ -89,6 +99,22 @@ class QueryRejected(Exception):
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(f"rejected: {reason}")
+
+
+def training_retrieval_scope(
+    project_key: str | None, training_context: str | None
+) -> str | None:
+    """Corpus scope every training leg must read: the REAL context project.
+
+    By business decision training and customer chat share ONE project corpus
+    (documents.kind is only ever legal|price|project), so ``_training`` is a
+    prompt-profile marker only and must never reach a retrieval filter — a
+    training turn scoped to no real project retrieves nothing (project
+    isolation is absolute).
+    """
+    if not is_training_scope(project_key):
+        return project_key
+    return training_context
 
 
 def parse_as_of(value: str | None) -> date | None:
@@ -197,6 +223,11 @@ class RagQueryWorkflow(Workflow):
         await ctx.store.set("query", ev.query)
         await ctx.store.set("session_id", session_id)
         await ctx.store.set("project_key", getattr(ev, "project_key", None))
+        # G3-r6: optional context project for training turns (None everywhere
+        # else, so normal-mode state is byte-identical).
+        await ctx.store.set(
+            "training_context_project_key", getattr(ev, "training_context_project_key", None)
+        )
         await ctx.store.set("device_id", getattr(ev, "device_id", None))
         await ctx.store.set("as_of_date", parse_as_of(getattr(ev, "as_of", None)))
         await ctx.store.set("degraded", [])
@@ -273,6 +304,28 @@ class RagQueryWorkflow(Workflow):
         if not routed.routing.get("needs_rag", True):
             await ctx.store.set("rag_result", RagLegResult([], degraded=False))
             return RagDoneEv()
+        project_key = await self._store_get(ctx, "project_key")
+        training_context = await self._store_get(ctx, "training_context_project_key")
+        # Fail closed (FR-25 revision): an unresolved training turn must NEVER
+        # reach run_rag_leg with project_key=None — rag_leg._post_filter drops
+        # its `d.project_key = $2` predicate on None, which would retrieve the
+        # FULL corpus (every project's chunks together). Customer mode may
+        # legitimately pass None per its own scoping contract (single-active
+        # default rule, story 10.1), so this guard is training-only and mirrors
+        # the sql_leg / geo_leg fail-closed shape: loud degrade flag, zero
+        # retrieval, no data from any project.
+        if is_training_scope(project_key) and not training_context:
+            await ctx.store.set(
+                "rag_result",
+                RagLegResult(
+                    [],
+                    degraded=True,
+                    error="training_scope_unresolved",
+                    degraded_reasons=("training_scope_unresolved",),
+                ),
+            )
+            await self._flag(ctx, "training_scope_unresolved")
+            return RagDoneEv()
         try:
             result = await asyncio.wait_for(
                 run_rag_leg(
@@ -280,7 +333,12 @@ class RagQueryWorkflow(Workflow):
                     routed.hl_keywords,
                     routed.ll_keywords,
                     await ctx.store.get("as_of_date"),
-                    await self._store_get(ctx, "project_key"),
+                    # Shared corpus (FR-25 revision): a training turn retrieves
+                    # from its real context project exactly like a customer turn;
+                    # no doc-kind filter exists any more. The training path can
+                    # only get here with a resolved real project (guard above),
+                    # so None below always means customer mode, never training.
+                    training_retrieval_scope(project_key, training_context),
                 ),
                 timeout=STEP_TIMEOUTS["rag"],
             )
@@ -291,7 +349,13 @@ class RagQueryWorkflow(Workflow):
             result = RagLegResult([], degraded=True, error=str(exc))
             await self._flag(ctx, f"rag_error:{exc}")
         if result.degraded:
-            await self._flag(ctx, f"rag_degraded:{result.error or ''}")
+            # Preserve the leg's auditable reason codes (for example,
+            # ``aquery_timeout``) instead of collapsing them into an opaque
+            # error string. Keep the legacy marker only when no structured
+            # reason was supplied by the leg.
+            await self._flag(ctx, *result.degraded_reasons)
+            if not result.degraded_reasons:
+                await self._flag(ctx, f"rag_degraded:{result.error or ''}")
         await ctx.store.set("rag_result", result)
         return RagDoneEv()
 
@@ -301,6 +365,21 @@ class RagQueryWorkflow(Workflow):
         if not routed.routing.get("needs_sql", False):
             await ctx.store.set("sql_result", SqlLegResult([], {"mode": "none"}, degraded=False))
             return SqlDoneEv()
+        # Shared corpus (FR-25 revision): structured facts ARE project data,
+        # so a training turn runs the SQL leg against its real context project
+        # like any customer turn. The marker key must never reach the scope
+        # filter (facts are tagged with real project keys), so an unscoped
+        # training turn skips the leg loudly instead of silently reading wrong.
+        project_key = await self._store_get(ctx, "project_key")
+        training_context = await self._store_get(ctx, "training_context_project_key")
+        if is_training_scope(project_key) and not training_context:
+            await ctx.store.set(
+                "sql_result",
+                SqlLegResult([], {"mode": "none", "error": "training_scope_unresolved"}, degraded=True),
+            )
+            await self._flag(ctx, "training_scope_unresolved")
+            return SqlDoneEv()
+        sql_scope = training_retrieval_scope(project_key, training_context)
         guard: InputGuardResult = await ctx.store.get("guard")
         spec = routed.sql_spec or {}
         if routed.routing.get("structured_path") == "nl2sql":
@@ -320,7 +399,7 @@ class RagQueryWorkflow(Workflow):
                     spec,
                     await ctx.store.get("as_of_date"),
                     guard.clean,
-                    await self._store_get(ctx, "project_key"),
+                    sql_scope,
                 ),
                 timeout=timeout,
             )
@@ -341,11 +420,29 @@ class RagQueryWorkflow(Workflow):
         if not routed.routing.get("needs_geo", False):
             await ctx.store.set("geo_result", GeoResult([], degraded=False))
             return GeoDoneEv()
+        # Shared corpus (FR-25 revision): amenities belong to the project, so
+        # a training turn queries geo around its real context project centre
+        # (the request-bound registry snapshot carries those coords). Without
+        # a resolved context project there is no centre to search around —
+        # complete empty rather than a default project (fail-closed parity
+        # with the rag/sql legs; the step still runs so the merge join stays
+        # intact).
+        project_key = await self._store_get(ctx, "project_key")
+        training_context = await self._store_get(ctx, "training_context_project_key")
+        if is_training_scope(project_key) and not training_context:
+            await ctx.store.set("geo_result", GeoResult([], degraded=False))
+            return GeoDoneEv()
+        # A training turn's centre is its RESOLVED context project: the
+        # request-bound snapshot (registry_key = training_retrieval_scope in
+        # both facades) already carries those coords, so the snapshot branch
+        # below reads the right centre. The sync branch must use the resolved
+        # key too — never the '_training' marker, which project_geo_center
+        # maps to the default centre.
+        geo_scope = training_retrieval_scope(project_key, training_context)
         # Geo center is per-project (story 8.2/10.2): the per-request registry
         # record wins; the Settings defaults remain the legacy Camellia fallback
         # when the record carries no coordinates. Direct workflow runs outside
         # the request-bound snapshot (eval/tests) keep the legacy sync read.
-        project_key = await self._store_get(ctx, "project_key")
         record = request_project_snapshot()
         if record is not None:
             center_lat, center_lng = record.geo_center or (
@@ -353,7 +450,7 @@ class RagQueryWorkflow(Workflow):
                 get_cfg("geo_center_lng", 108.2558),
             )
         else:
-            center_lat, center_lng = project_geo_center(project_key or "")
+            center_lat, center_lng = project_geo_center(geo_scope or "")
         try:
             result = await asyncio.wait_for(
                 get_geo().places_around(
@@ -400,24 +497,57 @@ class RagQueryWorkflow(Workflow):
             await self._flag(ctx, "rerank_degraded")
         await ctx.store.set("reranked_chunks", chunks)
 
-        merged: Merged = await merge_context(guard.clean, chunks, sql_result.rows, as_of)
+        # Resolve the REAL data scope once (FR-25 revision): the marker stays
+        # in meta.project_key as the prompt-profile signal (generate/
+        # select_answer_tier key off it), but EVERY data consumer below —
+        # merge_context placeholder hydration, image enrichment, and the
+        # estimates fallback via meta.retrieval_project_key — must read the
+        # resolved context project, never '_training' (which matches no facts,
+        # images, or estimates and silently strips training answers of their
+        # structured data). Customer mode resolves byte-identically.
         session_id = await ctx.store.get("session_id")
         project_key = await self._store_get(ctx, "project_key")
         device_id = await self._store_get(ctx, "device_id")
+        training = is_training_scope(project_key)
+        retrieval_scope = training_retrieval_scope(
+            project_key, await self._store_get(ctx, "training_context_project_key")
+        )
+
+        merged: Merged = await merge_context(
+            guard.clean,
+            chunks,
+            sql_result.rows,
+            as_of,
+            retrieval_scope,
+        )
 
         # Illustrative image enrichment is best-effort: search_images never raises,
         # so a degraded/empty result only omits images, never the pipeline.
         # Project scoping (story 10.4 / M6): the project predicate rides in the
         # search SQL itself; the unscoped legacy call is kept for project-less
         # runs (eval, direct workflow tests) whose search seam is single-arg.
-        if project_key:
-            images = await search_images(routed.rewritten, project_key=project_key)
+        # Full price-board intent: the user asked for EVERY unit type's board, so
+        # a deterministic fetch replaces semantic top_k=4 (which truncates the
+        # multi-page set exactly when completeness matters).
+        # Shared corpus (FR-25 revision): project imagery IS project data, so a
+        # training turn gets the same scoped enrichment as a customer turn;
+        # only the sales persona/CTA directive stays suppressed for the lookup
+        # profile, and an unscoped training turn reads no images at all
+        # (project isolation is absolute — `not retrieval_scope` also fails
+        # closed on an empty-string context, never falling to the unscoped
+        # legacy single-arg call).
+        if training and not retrieval_scope:
+            images = []
+        elif retrieval_scope and is_full_price_board_query(routed.rewritten):
+            images = await fetch_price_board_images(retrieval_scope)
+        elif retrieval_scope:
+            images = await search_images(routed.rewritten, project_key=retrieval_scope)
         else:
             images = await search_images(routed.rewritten)
         await ctx.store.set("images", images)
         conv_dir = None
         conv_state_str = None
-        if session_id:
+        if not training and session_id:
             ctx_conv = get_context(session_id, device_id)
             conv_dir = conv_directive(ctx_conv.state, project_key)
             conv_state_str = ctx_conv.state
@@ -425,7 +555,12 @@ class RagQueryWorkflow(Workflow):
             query=guard.clean,
             rewritten=routed.rewritten,
             as_of=as_of.isoformat() if as_of else None,
-            project_key=project_key,  # story 10.2: prompt render scope
+            project_key=project_key,  # story 10.2: prompt render scope (marker in training)
+            # FR-25 revision: the data scope for every downstream data
+            # consumer (estimates fallback, audits) — the REAL project in
+            # training mode, None only when training is unresolved (which
+            # gates the fallback closed too). Customer mode: same value.
+            retrieval_project_key=retrieval_scope,
             degraded=await ctx.store.get("degraded"),
             sql_row_count=len(sql_result.rows),
             has_approx=any(
@@ -462,6 +597,9 @@ class RagQueryWorkflow(Workflow):
     async def generate(self, ctx: Context, ev: MergedEv) -> GeneratedEv:
         merged: Merged = await ctx.store.get("merged")
         routed: RoutedResult = await ctx.store.get("routed")
+        # No training-specific grounding gate any more (FR-25 revision): a
+        # training turn grounds on the shared project corpus and degrades to
+        # the same ungrounded handling as customer mode.
         parts: list[str] = []
         async for token in stream_answer(
             merged, await ctx.store.get("history"), routed.high_stakes
@@ -469,7 +607,7 @@ class RagQueryWorkflow(Workflow):
             token = sanitize_output(token)
             parts.append(token)
             await self._emit(SSE_EVENT_TOKEN, {"text": token})
-        answer = "".join(parts)
+        answer = normalize_answer_display("".join(parts))
         await ctx.store.set("answer", answer)
 
         audit = await ctx.store.get("audit")
@@ -525,6 +663,7 @@ class RagQueryWorkflow(Workflow):
             }
         )
 
+
 class RagQueryPipeline:
     """Back-compat facade: `await run(**kwargs) -> dict` over the workflow.
 
@@ -544,21 +683,30 @@ class RagQueryPipeline:
         project_key: str | None = None,
         device_id: str | None = None,
         on_event: EventCallback | None = None,
+        training_context_project_key: str | None = None,
     ) -> dict:
         # One async registry read per request (B2/M1): the record is bound into
         # the request snapshot so every downstream legacy helper (identity,
-        # geo, media) reads it without touching the DB synchronously.
+        # geo, media) reads it without touching the DB synchronously. A
+        # training turn reads the REAL context project (shared corpus), never
+        # the mode marker.
         from api.application.services.project_config import (  # noqa: PLC0415
             bound_request_project,
             load_project_registry_record,
         )
 
-        record = await load_project_registry_record(project_key)
+        registry_key = training_retrieval_scope(project_key, training_context_project_key)
+        record = await load_project_registry_record(registry_key)
         with bound_request_project(record):
             wf = RagQueryWorkflow(on_event=on_event if on_event is not None else self._on_event)
             handler = wf.run(
-                query=query, session_id=session_id, as_of=as_of, history=history or [],
-                project_key=project_key, device_id=device_id,
+                query=query,
+                session_id=session_id,
+                as_of=as_of,
+                history=history or [],
+                project_key=project_key,
+                device_id=device_id,
+                training_context_project_key=training_context_project_key,
             )
             return await handler
 

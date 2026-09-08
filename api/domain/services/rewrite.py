@@ -14,33 +14,75 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from api.infrastructure.dependencies import llm, model_for_role
+
+from ..entities.price_calc import extract_budget, extract_price_intent
 from ..value_objects.constants import LLM_CALL_TIMEOUT_S
 from .synonyms import enrich_hl_keywords
-from api.infrastructure.dependencies import llm, model_for_role
 
 logger = logging.getLogger("api.rewrite")
 
 # Deterministic keywords for high-stakes routing and NL2SQL gating.
 HIGH_STAKES_KEYWORDS = (
-    "cầm cố", "thế chấp", "chuyển nhượng", "công chứng", "quy hoạch", "thuế",
-    "sổ đỏ", "giải chấp", "tranh chấp", "ủy quyền", "kê biên", "hiệu lực",
+    "cầm cố",
+    "thế chấp",
+    "chuyển nhượng",
+    "công chứng",
+    "quy hoạch",
+    "thuế",
+    "sổ đỏ",
+    "giải chấp",
+    "tranh chấp",
+    "ủy quyền",
+    "kê biên",
+    "hiệu lực",
 )
 
 AGGREGATE_KEYWORDS = (
-    "bao nhiêu căn", "mấy căn", "số lượng căn", "trung bình", "tổng", "tổng cộng",
-    "so sánh", "đếm", "count", "average", "avg", "sum", "giá trên m2", "giá trên mét",
-    "giá trung bình", "trung bình giá", "cao nhất", "thấp nhất", "nhiều nhất", "ít nhất",
+    "bao nhiêu căn",
+    "mấy căn",
+    "số lượng căn",
+    "trung bình",
+    "tổng",
+    "tổng cộng",
+    "so sánh",
+    "đếm",
+    "count",
+    "average",
+    "avg",
+    "sum",
+    "giá trên m2",
+    "giá trên mét",
+    "giá trung bình",
+    "trung bình giá",
+    "cao nhất",
+    "thấp nhất",
+    "nhiều nhất",
+    "ít nhất",
+    # Unit superlative picks ("căn rẻ nhất" / "studio vip nhất") are compare
+    # questions. Bare "nhất" is omitted on purpose: it false-positives inside
+    # "nhất định"/"nhất trí", so only full phrases belong here.
+    "rẻ nhất",
+    "vip nhất",
 )
 
 # Canonical VN money parser (also used by guard/extract) — one implementation.
-from ..entities.price_calc import extract_budget, extract_price_intent
 
 # Deterministic geo intent — ORed with the LLM routing decision so the maps leg
 # fires on amenity/location queries even when the router omits needs_geo.
 GEO_INTENT_KEYWORDS = (
-    "gần chợ", "gần trường", "gần bệnh viện", "gần biển", "gần siêu thị",
-    "gần công viên", "tiện ích", "xung quanh", "vị trí dự án", "khu vực dự án",
-    "gần dự án", "quanh dự án",
+    "gần chợ",
+    "gần trường",
+    "gần bệnh viện",
+    "gần biển",
+    "gần siêu thị",
+    "gần công viên",
+    "tiện ích",
+    "xung quanh",
+    "vị trí dự án",
+    "khu vực dự án",
+    "gần dự án",
+    "quanh dự án",
 )
 
 
@@ -64,7 +106,9 @@ def detect_aggregate_intent(query: str) -> bool:
 
 
 # Few-shot prompt, read once at import.
-_REWRITE_PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "rewrite_fewshot.md"  # parents[2]=api/ (HF-0: canonical api/prompts/)
+_REWRITE_PROMPT_PATH = (
+    Path(__file__).resolve().parents[2] / "prompts" / "rewrite_fewshot.md"
+)  # parents[2]=api/ (HF-0: canonical api/prompts/)
 
 _FEWSHOT: str = ""
 if _REWRITE_PROMPT_PATH.exists():
@@ -88,7 +132,9 @@ class RoutedResult:
     ll_keywords: list[str]
     high_stakes: bool
     as_of: str | None
-    degraded: list[str] = field(default_factory=list)  # ['router_degraded', 'nl2sql_downgraded', ...]
+    degraded: list[str] = field(
+        default_factory=list
+    )  # ['router_degraded', 'nl2sql_downgraded', ...]
 
 
 def fallback_route(query: str, as_of: str | None, reason: str) -> RoutedResult:
@@ -289,11 +335,15 @@ def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> Ro
     )
 
 
-def _truncate_history(history: list[dict] | None, max_turns: int = 4, max_chars: int = 3200) -> list[dict]:
+def _truncate_history(
+    history: list[dict] | None, max_turns: int = 4, max_chars: int = 3200
+) -> list[dict]:
     """History capped to 4 turns / ~3200 chars, dropping oldest turns first."""
     if not history:
         return []
-    turns = [t for t in history if isinstance(t, dict) and t.get("role") in ("user", "assistant")][-max_turns:]
+    turns = [t for t in history if isinstance(t, dict) and t.get("role") in ("user", "assistant")][
+        -max_turns:
+    ]
     total = 0
     kept: list[dict] = []
     for t in reversed(turns):
@@ -306,9 +356,10 @@ def _truncate_history(history: list[dict] | None, max_turns: int = 4, max_chars:
 
 
 def _build_user_payload(query: str, history: list[dict] | None, as_of: str | None) -> str:
-    hist_txt = "\n".join(
-        f"{t['role']}: {t['content']}" for t in _truncate_history(history)
-    ) or "(không có lịch sử)"
+    hist_txt = (
+        "\n".join(f"{t['role']}: {t['content']}" for t in _truncate_history(history))
+        or "(không có lịch sử)"
+    )
     return (
         f"{_FEWSHOT}\n\n"
         f"## Nhiệm vụ hiện tại\n"
@@ -327,7 +378,16 @@ async def rewrite_query(query: str, history: list[dict] | None, as_of: str | Non
     ]
     model = model_for_role("rewrite")
 
-    attempts = [messages, messages + [{"role": "user", "content": "JSON của bạn không hợp lệ. Hãy trả về đúng MỘT JSON object duy nhất, theo đúng schema các ví dụ."}]]
+    attempts = [
+        messages,
+        messages
+        + [
+            {
+                "role": "user",
+                "content": "JSON của bạn không hợp lệ. Hãy trả về đúng MỘT JSON object duy nhất, theo đúng schema các ví dụ.",  # noqa: E501
+            }
+        ],
+    ]
     for i, msgs in enumerate(attempts):
         try:
             text = await llm.complete(msgs, json_mode=True, model=model, timeout=LLM_CALL_TIMEOUT_S)

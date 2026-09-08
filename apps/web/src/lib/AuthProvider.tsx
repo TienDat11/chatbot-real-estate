@@ -63,3 +63,8 @@ export function useAuth() {
   }
   return context;
 }
+
+/** Optional seam for shared surfaces such as ChatPage used in embedded tests. */
+export function useOptionalAuth(): AuthContextValue | null {
+  return useContext(AuthContext);
+}

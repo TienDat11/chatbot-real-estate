@@ -22,8 +22,24 @@ import type {
 /** Snake_case shape of a lead document as stored in Firestore. */
 export interface LeadDocumentDto {
   id: string;
+  /**
+   * Opaque backend customer identity (HMAC of the phone) written by ADR-0004
+   * mirrors; absent on documents mirrored before the field existed, whose
+   * document id still was the customer digest.
+   */
+  customer_id?: string | null;
+  /**
+   * Numeric Postgres leads.id written by newer mirrors; absent on documents
+   * mirrored before the field existed (read as undefined on the domain).
+   */
+  lead_id?: number | null;
   project_key: string;
   device_id: string | null;
+  /**
+   * Optional mirror of the backend display name; newer documents carry both
+   * this and the legacy `name`, older ones carry only `name`.
+   */
+  display_name?: string | null;
   name: string | null;
   /** Pre-masked by the backend mirror writer; the FE never holds raw phones. */
   masked_phone: string | null;
@@ -85,9 +101,24 @@ export function mapLeadDocumentData(
 ): Lead {
   return {
     id: documentId,
+    // Opaque customer identity needed by the CRM reveal/consent routes; the
+    // mirror carries it as a FIELD since ADR-0004 (the document id no longer
+    // is the customer digest), and the drawer falls back to the document id
+    // for legacy documents that predate the field.
+    customerId: toOptionalCustomerId(documentData.customer_id),
+    // Numeric Postgres leads.id needed by the integer-only CRM status/
+    // conversation routes; without it crmApiClient's guard would reject every
+    // drawer call with 400 even though the mirror document carries the id.
+    leadId: toOptionalNumericLeadId(documentData.lead_id),
     projectKey: documentData.project_key,
     deviceId: documentData.device_id ?? null,
-    name: documentData.name ?? null,
+    // display_name is the mirrored canonical name; `name` stays as the legacy
+    // alias so pre-display_name documents still decode (mirrors the
+    // lead_status/status fallback pattern above). Same `??` convention as the
+    // other nullable strings: only null/absent falls through, empty strings
+    // are preserved verbatim.
+    name:
+      documentData.display_name ?? documentData.name ?? null,
     maskedPhone: documentData.masked_phone ?? null,
     note: documentData.note ?? null,
     budgetVnd: documentData.budget_vnd ?? null,
@@ -112,6 +143,33 @@ export function mapLeadDocumentData(
     updatedAt: toIso8601StringOrFallback(documentData.updated_at),
     closedAt: toIso8601StringOrNull(documentData.closed_at),
   };
+}
+
+/**
+ * Safe decode of the mirrored numeric lead id. Mirrors the crmApiClient guard
+ * exactly (safe positive integer): documents written before the field existed
+ * (absent) or malformed values decode as undefined instead of leaking an
+ * unusable id into the domain — the API client stays the single place that
+ * turns a missing id into a user-facing error.
+ */
+function toOptionalNumericLeadId(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * Safe decode of the mirrored opaque customer_id (ADR-0004): documents
+ * mirrored before the field existed (absent) or malformed values decode as
+ * undefined instead of leaking a bogus identity — consumers then fall back to
+ * the legacy document-id-as-customer-id contract.
+ */
+function toOptionalCustomerId(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) {
+    return undefined;
+  }
+  return value;
 }
 
 /** Converts a Firestore Timestamp (or an already-stored ISO string) to ISO-8601. */

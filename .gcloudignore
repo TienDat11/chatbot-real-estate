@@ -1,0 +1,57 @@
+# Used by `gcloud run deploy --source .` for ragre-api (root Dockerfile) and
+# by `gcloud builds submit` when no --ignore-file is given. Keep runtime code
+# + monorepo manifests in context (the FE Cloud Build path builds from the
+# root context and needs root manifests, packages/ and apps/web sources);
+# keep secrets, data, venvs and local artifacts out.
+# 2026-09-07: local C: disk exhausted (Errno 28) because .venv (multi-GB) was
+# staged into the source tarball — venvs must never enter the upload.
+
+# VCS / secrets
+.git
+.gitignore
+.env
+.env.*
+
+# Python — venvs and caches (the image installs from requirements.txt)
+.venv
+**/__pycache__
+**/*.pyc
+.ruff_cache
+.pytest_cache
+
+# Node build output
+**/node_modules
+**/.next
+**/.turbo
+**/*.tsbuildinfo
+
+# Data, docs, non-runtime dirs (root image COPYs only requirements.txt, api/, ingest/)
+data/
+docs/
+db/
+tests/
+eval/
+scripts/
+tools/
+deploy/
+_bmad/
+ragre_mvp/
+**/*.pdf
+**/*.xlsx
+
+# Local agent tooling / state
+.github
+.claude
+.agents
+.dsh
+.zcode
+.mimosa
+.gitnexus
+.playwright-mcp
+
+# Local artifacts
+*.log
+*.png
+*.dump
+coverage*
+env-prod.yaml

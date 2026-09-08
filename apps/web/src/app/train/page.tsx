@@ -1,22 +1,19 @@
-import { App as AntdApp } from "antd";
-import { AuthProvider } from "@/lib/AuthProvider";
-import { RequireRole } from "@/components/RequireRole";
-import { TrainWorkspace } from "@/features/train/TrainWorkspace";
+import { redirect } from "next/navigation";
+import { resolveSessionParam } from "@/lib/canonicalProjectUrl";
 
 /**
- * Training chat page (story 11.2). Server component shell: AuthProvider +
- * RequireRole gate the route to sales only, and AntdApp enables the
- * message/notification contexts for the client workspace. The workspace
- * itself carries the training-mode chat (no selling surfaces).
+ * Legacy /train entry: normalizes onto the authenticated training surface at
+ * /sales/train, preserving the session id (canonical spelling) so deep links
+ * keep hydrating; train-only query params (filters, mode) have no meaning on
+ * the training workspace. redirect() throws inside Next, so execution never
+ * reaches past the redirect call in production; mocked redirects fall through
+ * for tests.
  */
-export default function TrainPage() {
-  return (
-    <AuthProvider>
-      <RequireRole allowedRoles={["sales"]}>
-        <AntdApp>
-          <TrainWorkspace />
-        </AntdApp>
-      </RequireRole>
-    </AuthProvider>
-  );
+export default async function LegacyTrainPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}): Promise<void> {
+  const sessionId = resolveSessionParam(await searchParams);
+  redirect(`/sales/train${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`);
 }

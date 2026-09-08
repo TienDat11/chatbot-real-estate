@@ -48,6 +48,32 @@ _EM_DASH = "—"
 _EN_DASH = "–"
 # Price/estimate answer indicator: value words OR has_approx meta flag (set by workflow).
 _PRICE_HINT_RE = re.compile("(giá|tỷ đồng|triệu đồng|đồng\\s*\\(|định hướng|m²|m2)", re.IGNORECASE)
+# --- Raw-LaTeX guard (prompt §GIỌNG VĂN) ---------------------------------------
+# The answer LLM occasionally emits LaTeX ("\(x = 5\)", "\frac{a}{b}") which the
+# chat UI renders as raw markup. The prompt now bans it; these patterns back that
+# rule with a NON-DESTRUCTIVE rewrite at the joined-answer boundary only (never
+# per token — see sanitize_output for the token-safe dash rule):
+#   * only delimiters/commands are rewritten or dropped, no text is removed;
+#   * braced forms are matched non-recursively ([^{}]*) so a stray/unbalanced
+#     brace is left untouched instead of being swallowed;
+#   * unknown commands survive verbatim rather than being guessed at.
+_LATEX_DELIM_RE = re.compile(r"\\\[|\\\]|\\\(|\\\)|\$\$")
+_LATEX_FRAC_RE = re.compile(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
+_LATEX_TEXT_RE = re.compile(r"\\(?:text|textrm|mathrm|operatorname)\s*\{([^{}]*)\}")
+_LATEX_ENV_RE = re.compile(r"\\(?:begin|end)\s*\{[^{}]*\}")
+_LATEX_LR_RE = re.compile(r"\\(?:left|right)(?![A-Za-z])")
+# Only unambiguous, lossless symbol swaps — anything not listed is left as-is.
+_LATEX_CMD_MAP = {
+    "times": "×", "cdot": "·", "div": "÷", "pm": "±",
+    "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠",
+    "approx": "≈", "rightarrow": "→", "Rightarrow": "→", "to": "→",
+    "degree": "°", "circ": "°", "dots": "…", "ldots": "…",
+}
+_LATEX_CMD_RE = re.compile(r"\\(%s)(?![A-Za-z])" % "|".join(sorted(_LATEX_CMD_MAP, key=len, reverse=True)))
+# Escaped literals: "\%" -> "%" (the backslash is markup, the char is content).
+_LATEX_ESCAPE_RE = re.compile(r"\\([%&_#$])")
+# Detection only — flags leftover markup the rewrite does not cover (e.g. "\alpha").
+_LATEX_MARKER_RE = re.compile(r"\\\[|\\\]|\\\(|\\\)|\$\$|\\[A-Za-z]+|\\%")
 
 
 @dataclass
@@ -256,6 +282,25 @@ def sanitize_output(text: str) -> str:
     so flagging and normalization stay in one place.
     """
     return (text or "").replace(_EM_DASH, "-").replace(_EN_DASH, "-")
+
+
+def normalize_answer_display(text: str) -> str:
+    """Rewrite raw LaTeX in a COMPLETED answer to readable Unicode/plain math.
+
+    Applied once to the joined answer (workflow generate step), never to streamed
+    tokens, so SSE emission keeps its exact token-by-token semantics. Purely
+    additive/substitutive: delimiters and known commands are rewritten, unknown
+    markup is left verbatim, and no content is dropped or truncated.
+    """
+    if not text:
+        return text or ""
+    out = _LATEX_FRAC_RE.sub(r"\1/\2", text)
+    out = _LATEX_TEXT_RE.sub(r"\1", out)
+    out = _LATEX_ENV_RE.sub("", out)
+    out = _LATEX_LR_RE.sub("", out)
+    out = _LATEX_CMD_RE.sub(lambda m: _LATEX_CMD_MAP.get(m.group(1), m.group(0)), out)
+    out = _LATEX_ESCAPE_RE.sub(r"\1", out)
+    return _LATEX_DELIM_RE.sub("", out)
 
 
 async def guard_output(

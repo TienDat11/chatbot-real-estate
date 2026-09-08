@@ -20,6 +20,8 @@ from ingest.placeholder import replace_fact_with_placeholder, sanitize_forged_to
 
 logger = logging.getLogger(__name__)
 
+INGEST_STATUSES = frozenset({"extract_failed", "chunks_only", "facts_loaded", "review_required"})
+
 
 class LoadError(RuntimeError):
     """Rollback already happened — context kept for writing ingest_log/review records."""
@@ -32,6 +34,7 @@ class LoadResult:
     chunk_count: int
     fact_count: int
     lightrag_doc_id: str | None
+    ingest_status: str
 
 
 def _normalize_subject_key(key: str) -> str:
@@ -41,6 +44,28 @@ def _normalize_subject_key(key: str) -> str:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Project registry keys the doc_id convention may carry in the second token.
+# Anything else is a national/legacy doc (no project) and stays untagged so it
+# is never mis-scoped into a project it does not belong to.
+_KNOWN_DOC_ID_PROJECT_TOKENS = frozenset({"soleil", "camellia", "tower-a", "tower-b"})
+
+
+def _derive_project_key(doc_id: str) -> str | None:
+    """Infer the project registry key from the doc_id naming convention.
+
+    Doc ids are built as ``<kind>-<project>-<slug>`` (e.g. ``price-soleil-2026q3-policy``,
+    ``project-camellia-qna``), so the second token is the project key — but only
+    when it is a known project key. ``nd-101-2024`` would naively read as
+    project ``101``, so the token is validated against the known keys; None
+    means "cannot infer" (the loader then keeps the column NULL — legacy docs
+    stay invisible to project-scoped queries rather than being mis-scoped).
+    """
+    tokens = doc_id.split("-")
+    if len(tokens) >= 2 and tokens[1] in _KNOWN_DOC_ID_PROJECT_TOKENS:
+        return tokens[1]
+    return None
 
 
 async def _upsert_campaign(
@@ -62,7 +87,11 @@ async def _upsert_campaign(
               source_doc_id  = EXCLUDED.source_doc_id,
               status         = 'active'
         """,
-        campaign_key, project_key, effective_from, effective_to, source_doc_id,
+        campaign_key,
+        project_key,
+        effective_from,
+        effective_to,
+        source_doc_id,
     )
 
 
@@ -80,7 +109,10 @@ async def _upsert_subject(conn, fact: ExtractedFact) -> int:
               project_key  = COALESCE(EXCLUDED.project_key, fact_subjects.project_key)
         RETURNING id
         """,
-        _normalize_subject_key(fact.subject_key), fact.subject_type, display, project_key,
+        _normalize_subject_key(fact.subject_key),
+        fact.subject_type,
+        display,
+        project_key,
     )
     return int(row["id"])
 
@@ -128,6 +160,8 @@ async def load_document(
     facts: list[ExtractedFact] | None = None,
     *,
     preserve_seed_facts: bool = False,
+    project_key: str | None = None,
+    ingest_status: str = "facts_loaded",
 ) -> LoadResult:
     """Persist the registry in one transaction, then ainsert into LightRAG.
 
@@ -141,6 +175,9 @@ async def load_document(
             true-replaced. Cannot be combined with `facts`: the seed rows are the
             single source of truth (data-contract §3.2), and a re-insert would collide
             on the facts_no_overlap GiST exclusion.
+        project_key: explicit project registry key. When None the loader falls
+            back to parsed.project_key then to the doc_id convention; a doc whose
+            key cannot be resolved stays NULL (legacy) so it is never mis-scoped.
 
     Raises:
         LoadError: transaction rolled back; the caller records review_queue/ingest_log.
@@ -152,11 +189,17 @@ async def load_document(
             f"preserve_seed_facts cannot combine with facts (doc={parsed.doc_id}): "
             "seed rows already hold the campaign figures (data-contract §3.2)"
         )
+    if ingest_status not in INGEST_STATUSES:
+        raise ValueError(f"unknown ingest_status={ingest_status!r}")
     conn = await asyncpg.connect(settings.pg_dsn)
     version = 1
     fact_rows: list[tuple[int, str]] = []  # (fact_id, chunk_id)
     eff_from = _effective_from(parsed)
     eff_to = _effective_to(parsed)
+    # Project scoping (story 10.4): the registry tag is the single source of
+    # truth the retrieval post-filter joins on, so it must be populated here.
+    # Resolution order: explicit kwarg > ParsedDoc field > doc_id convention.
+    resolved_project_key = project_key or parsed.project_key or _derive_project_key(parsed.doc_id)
     try:
         async with conn.transaction():
             # 1) documents upsert (version+1 when already present)
@@ -164,18 +207,29 @@ async def load_document(
                 """
                 INSERT INTO documents (
                   doc_id, kind, title, source_file, effective_from, effective_to,
-                  status, content_hash, version, metadata
-                ) VALUES ($1,$2,$3,$4,$5,$6,'published',$7,1,$8::jsonb)
+                  status, content_hash, version, project_key, metadata
+                ) VALUES ($1,$2,$3,$4,$5,$6,'published',$7,1,$8,$9::jsonb)
                 ON CONFLICT (doc_id) DO UPDATE
                   SET status='published',
                       version = documents.version + 1,
+                      kind = EXCLUDED.kind,
+                      title = EXCLUDED.title,
+                      effective_from = EXCLUDED.effective_from,
+                      effective_to = EXCLUDED.effective_to,
                       content_hash = EXCLUDED.content_hash,
+                      project_key = COALESCE(EXCLUDED.project_key, documents.project_key),
                       metadata = EXCLUDED.metadata,
                       updated_at = now()
                 RETURNING version
                 """,
-                parsed.doc_id, parsed.kind, parsed.title, parsed.source_file,
-                eff_from, eff_to, parsed.content_hash,
+                parsed.doc_id,
+                parsed.kind,
+                parsed.title,
+                parsed.source_file,
+                eff_from,
+                eff_to,
+                parsed.content_hash,
+                resolved_project_key,
                 json.dumps(parsed.metadata, ensure_ascii=False),
             )
             version = int(doc_row["version"])
@@ -206,9 +260,7 @@ async def load_document(
             # 3) assign each unique fact to exactly one chunk (span → containing chunk,
             #    span-less table facts → first chunk) so the GiST facts_no_overlap
             #    exclusion never sees the same (subject, fact_key, policy_key) twice.
-            fact_targets: dict[
-                tuple[str, str, str | None, object], tuple[ExtractedFact, int]
-            ] = {}
+            fact_targets: dict[tuple[str, str, str | None, object], tuple[ExtractedFact, int]] = {}
             for i, chunk in enumerate(chunks):
                 for fact in facts or []:
                     key = (
@@ -237,7 +289,12 @@ async def load_document(
                     ON CONFLICT (chunk_id) DO UPDATE
                       SET content = EXCLUDED.content, text_hash = EXCLUDED.text_hash
                     """,
-                    parsed.doc_id, cid, i, chunk.text, _sha256(chunk.text), chunk.section_title,
+                    parsed.doc_id,
+                    cid,
+                    i,
+                    chunk.text,
+                    _sha256(chunk.text),
+                    chunk.section_title,
                 )
                 for fact in chunk_facts.get(i, []):
                     subject_id = await _upsert_subject(conn, fact)
@@ -250,7 +307,8 @@ async def load_document(
                 await conn.execute(
                     "INSERT INTO chunk_fact_refs (chunk_id, fact_id) VALUES ($1,$2) "
                     "ON CONFLICT DO NOTHING",
-                    cid, fact_id,
+                    cid,
+                    fact_id,
                 )
 
             # 5) ingest_log
@@ -259,9 +317,12 @@ async def load_document(
                 INSERT INTO ingest_log (doc_id, action, version, chunk_count, detail)
                 VALUES ($1,'insert',$2,$3,$4)
                 """,
-                parsed.doc_id, version, len(chunks),
-                f"facts={len(fact_rows)} kind={parsed.kind}",
+                parsed.doc_id,
+                version,
+                len(chunks),
+                f"facts={len(fact_rows)} kind={parsed.kind} status={ingest_status}",
             )
+
         # COMMIT happens when the transaction block exits.
     except Exception as exc:  # noqa: BLE001
         await conn.close()
@@ -270,9 +331,17 @@ async def load_document(
     # 6) ainsert after COMMIT — outside the transaction.
     lightrag_doc_id: str | None = None
     try:
-        from ingest.lightrag_init import adelete_by_doc_id, ainsert_document, get_lightrag
+        from ingest.lightrag_init import (
+            adelete_by_doc_id,
+            ainsert_document,
+            get_lightrag,
+            project_workspace,
+        )
 
-        rag = get_lightrag()
+        # The LightRAG write must land in the document project's workspace, or
+        # the row is unreachable by that project's query path (Soleil lives in
+        # its own workspace since the 2026-08-28 scope-repair migration).
+        rag = get_lightrag(project_workspace(resolved_project_key))
         if version > 1:
             # Re-ingest: LightRAG docs are keyed by the previous version's
             # chunk_ids (doc_id:version:index), so drop each old chunk's doc —
@@ -299,6 +368,7 @@ async def load_document(
         chunk_count=len(chunks),
         fact_count=len(fact_rows),
         lightrag_doc_id=lightrag_doc_id,
+        ingest_status=ingest_status,
     )
 
 
@@ -316,7 +386,10 @@ async def expire_facts(subject_id: int, fact_key: str, policy_key: str | None, a
               AND ($4::text IS NULL OR policy_key = $4)
               AND (effective_to IS NULL OR effective_to > $1)
             """,
-            as_of, subject_id, fact_key, policy_key,
+            as_of,
+            subject_id,
+            fact_key,
+            policy_key,
         )
     finally:
         await conn.close()
@@ -355,14 +428,17 @@ async def _ingest_dir(docs_dir: str, changed: str, kind: str) -> int:
         try:
             parsed = await parse_document(str(p), kind)
             facts = None
+            ingest_status = "extract_failed"
             try:
                 facts = await extract_facts(parsed.full_text, parsed.doc_id, parsed.kind)
+                ingest_status = "facts_loaded" if facts else "chunks_only"
             except Exception as exc:  # noqa: BLE001 — chunks stay indexable without facts
                 logger.warning(
                     "fact extraction failed (doc=%s) — loading chunks only: %s",
-                    parsed.doc_id, exc,
+                    parsed.doc_id,
+                    exc,
                 )
-            result = await load_document(parsed, facts)
+            result = await load_document(parsed, facts, ingest_status=ingest_status)
             print(
                 f"ingested {parsed.doc_id} v{result.version} "
                 f"chunks={result.chunk_count} facts={result.fact_count} "

@@ -16,6 +16,23 @@ import pytest
 import api.application.services.image_search as img
 
 
+@pytest.fixture(autouse=True)
+def _trust_faked_media_urls(monkeypatch):
+    """Unit tests assert ranking/margins, never the CDN origin policy.
+
+    The policy seam (``valid_media_url``) is owned by test_media_url_hostile.py
+    and depends on the env IMAGE_CDN_PROJECT_MAP, whose real entries reject the
+    faked R2 host used by these rows. Route every row's URL through that seam as
+    trusted so the suite stays env-independent.
+    """
+
+    monkeypatch.setattr(
+        img,
+        "valid_media_url",
+        lambda value, project_key=None, media_kind=None: value,
+    )
+
+
 def run(coro):
     """Drive one coroutine on a fresh loop (no pytest-asyncio dependency)."""
     return asyncio.run(coro)
@@ -29,7 +46,7 @@ def _row(unit=None, unit_type=None, image_id="img-1", score=0.8, **overrides):
         "title": f"title-{image_id}",
         "caption": "Mặt bằng căn hộ",
         "alt_text": "Mặt bằng",
-        "url_cdn": "https://cdn.example/img.png",
+        "url_cdn": "https://pub-1f1d0c5479e2c0cc749435475f301810.r2.dev/images/camellia/matbang/img.png",
         "width": 1200,
         "height": 900,
         "linked_subject_key": f"unit:{unit}" if unit else None,
@@ -107,8 +124,17 @@ def test_row_to_image_contract_shape():
     row = _row(unit="CH-03", unit_type="3PN", image_id="x")
     out = img._row_to_image(row, 0.9, "exact", "Đúng căn CH-03 bạn hỏi")
     assert set(out) == {
-        "image_id", "kind", "title", "caption", "alt_text", "url_cdn",
-        "width", "height", "score", "match", "reason",
+        "image_id",
+        "kind",
+        "title",
+        "caption",
+        "alt_text",
+        "url_cdn",
+        "width",
+        "height",
+        "score",
+        "match",
+        "reason",
     }
     assert out["image_id"] == "x"
     assert out["kind"] == "matbang"
@@ -142,7 +168,7 @@ def test_rerank_orders_exact_then_similar_then_semantic(monkeypatch):
         (_row(unit=None, unit_type="3PN", image_id="similar", score=0.7), 0.7),
         (_row(unit="CH-03", unit_type="3PN", image_id="exact", score=0.5), 0.5),
     ]
-    out = run(img._rerank_by_unit({"CH-03"}, scored, 10))
+    out = run(img._rerank_by_unit({"CH-03"}, scored, 10, project_key="camellia"))
 
     assert [i["image_id"] for i in out] == ["exact", "similar", "semantic"]
     assert [i["match"] for i in out] == ["exact", "similar", "semantic"]
@@ -154,13 +180,14 @@ def test_rerank_orders_exact_then_similar_then_semantic(monkeypatch):
 def test_rerank_rescues_missing_exact_with_ceiling_score(monkeypatch):
     rescued = _row(unit="CH-03", unit_type="3PN", image_id="rescued", score=0.0)
 
-    async def rescue(code):
+    async def rescue(code, project_key=None):
         assert code == "CH-03"
+        assert project_key == "camellia"
         return rescued
 
     monkeypatch.setattr(img, "_query_by_unit", rescue)
     scored = [(_row(unit=None, unit_type="3PN", image_id="semantic", score=0.8), 0.8)]
-    out = run(img._rerank_by_unit({"CH-03"}, scored, 10))
+    out = run(img._rerank_by_unit({"CH-03"}, scored, 10, project_key="camellia"))
 
     assert out[0]["image_id"] == "rescued"
     assert out[0]["match"] == "exact"
@@ -202,7 +229,7 @@ async def _embed_fake(text):
 
 
 def test_search_images_empty_query_returns_empty():
-    assert run(img.search_images("")) == []
+    assert run(img.search_images("", project_key="camellia")) == []
 
 
 def test_search_images_degrades_to_empty_on_embed_error(monkeypatch):
@@ -210,7 +237,7 @@ def test_search_images_degrades_to_empty_on_embed_error(monkeypatch):
         raise RuntimeError("embed down")
 
     monkeypatch.setattr(img, "_embed_query", boom)
-    assert run(img.search_images("view biển")) == []
+    assert run(img.search_images("view biển", project_key="soleil")) == []
 
 
 def test_search_images_degrades_to_empty_on_db_error(monkeypatch):
@@ -222,7 +249,7 @@ def test_search_images_degrades_to_empty_on_db_error(monkeypatch):
         yield  # pragma: no cover - unreachable
 
     monkeypatch.setattr(img, "with_rls_identity", failing_rls)
-    assert run(img.search_images("view biển")) == []
+    assert run(img.search_images("view biển", project_key="soleil")) == []
 
 
 def test_search_images_filters_below_threshold_and_margin(monkeypatch):
@@ -240,7 +267,7 @@ def test_search_images_filters_below_threshold_and_margin(monkeypatch):
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
-    out = run(img.search_images("dự án view biển", top_k=4, threshold=0.4))
+    out = run(img.search_images("dự án view biển", top_k=4, threshold=0.4, project_key="camellia"))
 
     assert [i["image_id"] for i in out] == ["high"]
     assert all(i["match"] == "semantic" for i in out)
@@ -257,26 +284,32 @@ def test_search_images_keeps_candidates_within_margin_of_top(monkeypatch):
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
-    out = run(img.search_images("dự án view biển", top_k=4, threshold=0.4))
+    out = run(img.search_images("dự án view biển", top_k=4, threshold=0.4, project_key="camellia"))
 
     assert [i["image_id"] for i in out] == ["high", "close", "tail"]
 
 
 def test_search_images_drops_unrelated_tail_for_payment_query(monkeypatch):
     """Payment query must not trail into a floor-plan image that only shares project
-    vocabulary — the exact regression reported: top payment hit 0.62, unrelated
-    floor plan 0.51 (gap 0.11 > cross_kind_margin 0.05) must be dropped, not attached.
+    vocabulary — the exact regression reported. Scores follow the measured
+    gemini-embedding-001 scale (scripts/measure_image_scores.py): top payment hit
+    0.7430, unrelated floor-plan tail 0.58 sits below the 0.695 floor AND beyond
+    the cross-kind window, so it must be dropped, not attached.
     """
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     rows = [
-        _row(image_id="payment-1", kind="thanh-toan", score=0.62),
-        _row(image_id="payment-2", kind="thanh-toan", score=0.6),
-        _row(image_id="payment-3", kind="thanh-toan", score=0.58),
-        _row(image_id="matbang-tail", kind="matbang", score=0.51),
+        _row(image_id="payment-1", kind="thanh-toan", score=0.7430),
+        _row(image_id="payment-2", kind="thanh-toan", score=0.7424),
+        _row(image_id="payment-3", kind="thanh-toan", score=0.7239),
+        _row(image_id="matbang-tail", kind="matbang", score=0.58),
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
-    out = run(img.search_images("phương thức thanh toán mua căn hộ camellia", top_k=4))
+    out = run(
+        img.search_images(
+            "phương thức thanh toán mua căn hộ camellia", top_k=4, project_key="camellia"
+        )
+    )
 
     assert [i["image_id"] for i in out] == ["payment-1", "payment-2", "payment-3"]
     assert all(i["kind"] == "thanh-toan" for i in out)
@@ -285,21 +318,25 @@ def test_search_images_drops_unrelated_tail_for_payment_query(monkeypatch):
 def test_search_images_payment_query_keeps_all_four_same_kind_images(monkeypatch):
     """THE regression this fix addresses: all four payment-method images come back.
 
-    Measured scores for the payment question (same-kind cluster): 0.5615 / 0.5520
-    / 0.5231 / 0.4586. The old scalar margin (0.07) dropped the 4th (htls, gap
-    0.1029 > 0.07); same_kind_margin (0.15) holds the whole cluster and every
-    member still clears the 0.45 floor (0.4586 > 0.45).
+    Measured scores for the payment question on gemini-embedding-001
+    (same-kind cluster): 0.7430 / 0.7424 / 0.7239 / 0.7032. The 0.695 floor
+    keeps every member (4th-hit buffer 0.008) and same_kind_margin (0.15)
+    holds the whole cluster (widest gap 0.0398).
     """
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     rows = [
-        _row(image_id="thanh-thoi", kind="thanh-toan", score=0.5615),
-        _row(image_id="chuan", kind="thanh-toan", score=0.5520),
-        _row(image_id="som-95", kind="thanh-toan", score=0.5231),
-        _row(image_id="htls", kind="thanh-toan", score=0.4586),
+        _row(image_id="thanh-thoi", kind="thanh-toan", score=0.7430),
+        _row(image_id="chuan", kind="thanh-toan", score=0.7424),
+        _row(image_id="som-95", kind="thanh-toan", score=0.7239),
+        _row(image_id="htls", kind="thanh-toan", score=0.7032),
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
-    out = run(img.search_images("phương thức thanh toán mua căn hộ camellia", top_k=4))
+    out = run(
+        img.search_images(
+            "phương thức thanh toán mua căn hộ camellia", top_k=4, project_key="camellia"
+        )
+    )
 
     assert [i["image_id"] for i in out] == ["thanh-thoi", "chuan", "som-95", "htls"]
     assert all(i["kind"] == "thanh-toan" for i in out)
@@ -309,18 +346,23 @@ def test_search_images_payment_query_keeps_all_four_same_kind_images(monkeypatch
 def test_search_images_cross_kind_tail_dropped_beyond_cross_margin(monkeypatch):
     """A different-kind image close in score is still rejected by the tight window.
 
-    top thanh-toan 0.62 with a matbang 0.51 behind it (gap 0.11) exceeds
-    cross_kind_margin (0.05), so only the payment image survives — the exact
-    "hỏi thanh toán ra ảnh mặt bằng" bug.
+    Mirrors the measured floor-plan case (matbang top 0.8168 vs toroi 0.7991,
+    gap 0.0177): top thanh-toan 0.7430 with a matbang 0.72 behind it (gap 0.023)
+    exceeds cross_kind_margin (0.015), so only the payment image survives — the
+    exact "hỏi thanh toán ra ảnh mặt bằng" bug.
     """
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     rows = [
-        _row(image_id="payment-1", kind="thanh-toan", score=0.62),
-        _row(image_id="matbang-tail", kind="matbang", score=0.51),
+        _row(image_id="payment-1", kind="thanh-toan", score=0.7430),
+        _row(image_id="matbang-tail", kind="matbang", score=0.72),
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
-    out = run(img.search_images("phương thức thanh toán mua căn hộ camellia", top_k=4))
+    out = run(
+        img.search_images(
+            "phương thức thanh toán mua căn hộ camellia", top_k=4, project_key="camellia"
+        )
+    )
 
     assert [i["image_id"] for i in out] == ["payment-1"]
 
@@ -334,7 +376,9 @@ def test_search_images_returns_nothing_when_no_relevant_image(monkeypatch):
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
-    out = run(img.search_images("tổng quan thị trường bất động sản Đà Nẵng"))
+    out = run(
+        img.search_images("tổng quan thị trường bất động sản Đà Nẵng", project_key="camellia")
+    )
 
     assert out == []
 
@@ -352,7 +396,9 @@ def test_search_images_unit_query_reranks_exact_to_head(monkeypatch):
 
     monkeypatch.setattr(img, "_query_by_unit", no_rescue)
 
-    out = run(img.search_images("mặt bằng căn CH-3", top_k=4, threshold=0.4))
+    out = run(
+        img.search_images("mặt bằng căn CH-3", top_k=4, threshold=0.4, project_key="camellia")
+    )
 
     assert out[0]["image_id"] == "target"
     assert out[0]["match"] == "exact"
@@ -375,10 +421,12 @@ def test_search_project_images_passes_preference_order_to_query(monkeypatch):
         yield _CaptureConn()
 
     monkeypatch.setattr(img, "with_rls_identity", rls)
-    out = run(img.search_project_images())
+    out = run(img.search_project_images(project_key="camellia"))
 
     assert out == []
-    query, kind, order_str, top_k = captured["args"]
+    query, kind, order_str, top_k, project_key = captured["args"]
+    assert query == img.PROJECT_IMAGES_QUERY_PROJECT_SCOPED
+    assert project_key == "camellia"
     assert kind == "matbang"
     assert order_str == "cover,render,amenity_map,amenity_collage"
     assert top_k == 6
@@ -394,7 +442,7 @@ def test_search_project_images_returns_four_shaped_images_dropping_units(monkeyp
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
 
-    out = run(img.search_project_images(top_k=4))
+    out = run(img.search_project_images(top_k=4, project_key="camellia"))
 
     assert len(out) == 4
     assert "unitlinked" not in {i["image_id"] for i in out}
@@ -411,7 +459,7 @@ def test_search_project_images_degrades_to_empty_on_db_error(monkeypatch):
         yield  # pragma: no cover - unreachable
 
     monkeypatch.setattr(img, "with_rls_identity", failing)
-    assert run(img.search_project_images()) == []
+    assert run(img.search_project_images(project_key="camellia")) == []
 
 
 # --- search_images: boundary gates (threshold / kind-aware margin / top_k / pool) --------
@@ -428,7 +476,7 @@ def test_search_images_score_exactly_at_threshold_is_kept(monkeypatch):
     monkeypatch.setattr(
         img, "with_rls_identity", lambda: _fake_rls([_row(image_id="edge", score=0.45)])
     )
-    out = run(img.search_images("dự án view biển", threshold=0.45))
+    out = run(img.search_images("dự án view biển", threshold=0.45, project_key="camellia"))
     assert [i["image_id"] for i in out] == ["edge"]
 
 
@@ -440,7 +488,7 @@ def test_search_images_score_below_threshold_by_epsilon_is_dropped(monkeypatch):
         "with_rls_identity",
         lambda: _fake_rls([_row(image_id="weak", score=0.45 - 1e-9)]),
     )
-    out = run(img.search_images("dự án view biển", threshold=0.45))
+    out = run(img.search_images("dự án view biển", threshold=0.45, project_key="camellia"))
     assert out == []
 
 
@@ -455,7 +503,11 @@ def test_search_images_same_kind_gap_exactly_at_margin_is_kept(monkeypatch):
         _row(image_id="edge", score=0.55),  # computed gap 0.1499999999999999
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
-    out = run(img.search_images("dự án view biển", threshold=0.4, same_kind_margin=0.15))
+    out = run(
+        img.search_images(
+            "dự án view biển", threshold=0.4, same_kind_margin=0.15, project_key="camellia"
+        )
+    )
     assert [i["image_id"] for i in out] == ["top", "edge"]
 
 
@@ -467,7 +519,11 @@ def test_search_images_same_kind_gap_beyond_margin_by_epsilon_is_dropped(monkeyp
         _row(image_id="edge", score=0.9 - 0.15 - 1e-9),
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
-    out = run(img.search_images("dự án view biển", threshold=0.4, same_kind_margin=0.15))
+    out = run(
+        img.search_images(
+            "dự án view biển", threshold=0.4, same_kind_margin=0.15, project_key="camellia"
+        )
+    )
     assert [i["image_id"] for i in out] == ["top"]
 
 
@@ -481,7 +537,11 @@ def test_search_images_cross_kind_gap_exactly_at_margin_is_kept(monkeypatch):
         _row(image_id="edge", kind="matbang", score=0.45),  # computed gap 0.04999999999999999
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
-    out = run(img.search_images("dự án view biển", threshold=0.4, cross_kind_margin=0.05))
+    out = run(
+        img.search_images(
+            "dự án view biển", threshold=0.4, cross_kind_margin=0.05, project_key="camellia"
+        )
+    )
     assert [i["image_id"] for i in out] == ["top", "edge"]
 
 
@@ -493,7 +553,11 @@ def test_search_images_cross_kind_gap_beyond_margin_by_epsilon_is_dropped(monkey
         _row(image_id="edge", kind="matbang", score=0.9 - 0.05 - 1e-9),
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
-    out = run(img.search_images("dự án view biển", threshold=0.4, cross_kind_margin=0.05))
+    out = run(
+        img.search_images(
+            "dự án view biển", threshold=0.4, cross_kind_margin=0.05, project_key="camellia"
+        )
+    )
     assert [i["image_id"] for i in out] == ["top"]
 
 
@@ -508,7 +572,9 @@ def test_search_images_legacy_margin_overrides_both_windows(monkeypatch):
         _row(image_id="near", kind="thanh-toan", score=0.8),  # gap 0.1 > 0.07
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
-    out = run(img.search_images("dự án view biển", threshold=0.4, margin=0.07))
+    out = run(
+        img.search_images("dự án view biển", threshold=0.4, margin=0.07, project_key="camellia")
+    )
     assert [i["image_id"] for i in out] == ["top"]
 
 
@@ -522,7 +588,7 @@ def test_search_images_kind_aware_windows_apply_independently(monkeypatch):
         _row(image_id="cross-kind", kind="matbang", score=0.8),  # gap 0.1 > 0.05
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
-    out = run(img.search_images("dự án view biển", threshold=0.4))
+    out = run(img.search_images("dự án view biển", threshold=0.4, project_key="camellia"))
     assert [i["image_id"] for i in out] == ["top", "same-kind"]
 
 
@@ -532,7 +598,7 @@ def test_search_images_top_k_slices_after_margin_gate(monkeypatch):
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     rows = [_row(image_id=f"r{i}", score=0.9 - 0.01 * i) for i in range(5)]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
-    out = run(img.search_images("dự án view biển", top_k=2, threshold=0.4))
+    out = run(img.search_images("dự án view biển", top_k=2, threshold=0.4, project_key="camellia"))
     assert [i["image_id"] for i in out] == ["r0", "r1"]
 
 
@@ -555,11 +621,11 @@ def test_search_images_fetch_pool_is_max_top_k_8(monkeypatch):
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     monkeypatch.setattr(img, "with_rls_identity", rls)
 
-    run(img.search_images("dự án view biển", top_k=2))
+    run(img.search_images("dự án view biển", top_k=2, project_key="camellia"))
     assert calls[0][2] == 8  # max(2, 8)
 
     calls.clear()
-    run(img.search_images("dự án view biển", top_k=10))
+    run(img.search_images("dự án view biển", top_k=10, project_key="camellia"))
     assert calls[0][2] == 10  # top_k above the pool floor keeps its own size
 
 
@@ -570,13 +636,13 @@ def test_search_images_all_rows_below_floor_returns_empty(monkeypatch):
         "with_rls_identity",
         lambda: _fake_rls([_row(image_id="a", score=0.44), _row(image_id="b", score=0.41)]),
     )
-    assert run(img.search_images("tổng quan thị trường bất động sản")) == []
+    assert run(img.search_images("tổng quan thị trường bất động sản", project_key="camellia")) == []
 
 
 def test_search_images_no_rows_returns_empty(monkeypatch):
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls([]))
-    assert run(img.search_images("dự án view biển")) == []
+    assert run(img.search_images("dự án view biển", project_key="camellia")) == []
 
 
 def test_search_images_single_row_through_gate_returns_it(monkeypatch):
@@ -586,7 +652,7 @@ def test_search_images_single_row_through_gate_returns_it(monkeypatch):
     monkeypatch.setattr(
         img, "with_rls_identity", lambda: _fake_rls([_row(image_id="solo", score=0.7)])
     )
-    out = run(img.search_images("dự án view biển", threshold=0.4))
+    out = run(img.search_images("dự án view biển", threshold=0.4, project_key="camellia"))
     assert [i["image_id"] for i in out] == ["solo"]
 
 
@@ -600,7 +666,7 @@ def test_search_images_tied_top_scores_both_kept_in_score_desc_order(monkeypatch
         _row(image_id="tail", score=0.7),  # gap 0.2 > same_kind_margin 0.15 -> dropped
     ]
     monkeypatch.setattr(img, "with_rls_identity", lambda: _fake_rls(rows))
-    out = run(img.search_images("dự án view biển", threshold=0.4))
+    out = run(img.search_images("dự án view biển", threshold=0.4, project_key="camellia"))
     assert [i["image_id"] for i in out] == ["first", "second"]
 
 
@@ -619,7 +685,9 @@ def test_search_images_unit_query_skips_margin_gate(monkeypatch):
         return None
 
     monkeypatch.setattr(img, "_query_by_unit", no_rescue)
-    out = run(img.search_images("mặt bằng căn CH-3", top_k=4, threshold=0.4))
+    out = run(
+        img.search_images("mặt bằng căn CH-3", top_k=4, threshold=0.4, project_key="camellia")
+    )
 
     assert [i["image_id"] for i in out] == ["exact", "far"]
 
@@ -637,12 +705,15 @@ def test_search_images_unit_rescue_bypasses_floor(monkeypatch):
 
     rescued = _row(unit="CH-03", unit_type="3PN", image_id="target", score=0.0)  # low raw score
 
-    async def rescue(code):
+    async def rescue(code, project_key=None):
         assert code == "CH-03"
+        assert project_key == "camellia"
         return rescued
 
     monkeypatch.setattr(img, "_query_by_unit", rescue)
-    out = run(img.search_images("mặt bằng căn CH-3", top_k=4, threshold=0.4))
+    out = run(
+        img.search_images("mặt bằng căn CH-3", top_k=4, threshold=0.4, project_key="camellia")
+    )
 
     assert out[0]["image_id"] == "target"
     assert out[0]["score"] == 1.0
@@ -665,7 +736,7 @@ def test_search_images_empty_query_short_circuits_without_calls(monkeypatch):
     monkeypatch.setattr(img, "_embed_query", spy_embed)
     monkeypatch.setattr(img, "with_rls_identity", spy_rls)
 
-    assert run(img.search_images("")) == []
+    assert run(img.search_images("", project_key="camellia")) == []
     assert calls == {"embed": 0, "db": 0}
 
 
@@ -690,7 +761,7 @@ def test_search_images_whitespace_query_still_queries_but_returns_empty(monkeypa
     monkeypatch.setattr(img, "_embed_query", spy_embed)
     monkeypatch.setattr(img, "with_rls_identity", spy_rls)
 
-    assert run(img.search_images("   ")) == []
+    assert run(img.search_images("   ", project_key="camellia")) == []
     assert calls == {"embed": 1, "db": 1}
 
 
@@ -737,10 +808,11 @@ def test_image_query_sql_contract_published_gate():
     assert "i.status = 'published'" in img.IMAGE_QUERY
 
 
-def test_search_images_fetch_args_are_vector_literal_and_pool(monkeypatch):
-    """fetch must receive exactly (query, vec_literal, pool): the vector literal is
-    a '[...]' string (asyncpg cannot encode a bare float list for a vector column)
-    and the pool is an int — the two args a refactor could silently swap."""
+def test_search_images_fetch_args_are_vector_literal_pool_project_and_identity(monkeypatch):
+    """fetch must receive exactly (query, vec_literal, pool, project_key, model, dims):
+    the vector literal is a '[...]' string (asyncpg cannot encode a bare float list
+    for a vector column), the pool is an int, and the embedding identity (model,
+    dims) rides along so foreign-embedding rows can never enter the ranking."""
     captured = {}
 
     class _CaptureConn:
@@ -754,10 +826,207 @@ def test_search_images_fetch_args_are_vector_literal_and_pool(monkeypatch):
 
     monkeypatch.setattr(img, "_embed_query", _embed_fake)
     monkeypatch.setattr(img, "with_rls_identity", rls)
-    out = run(img.search_images("dự án view biển", top_k=4))
+    # Pin the identity contract to settings, not a frozen literal: the .env may
+    # point at any active model; the guard must mirror exactly that config.
+    expected_model, expected_dims = img._embedding_identity()
+    out = run(img.search_images("dự án view biển", top_k=4, project_key="camellia"))
 
-    query, vec_literal, pool = captured["args"]
-    assert query == img.IMAGE_QUERY
+    query, vec_literal, pool, project_key, emb_model, emb_dims = captured["args"]
+    assert query == img.IMAGE_QUERY_PROJECT_SCOPED
+    assert project_key == "camellia"
     assert vec_literal == "[0.5]"  # _embed_fake -> [0.5] -> server-side literal
     assert isinstance(pool, int) and pool == 8
+    assert emb_model == expected_model
+    assert emb_dims == expected_dims == 1024
     assert out[0]["image_id"] == "a"
+
+
+# --- full price-board intent + deterministic fetch -----------------------------
+
+# The reported bug question asked for EVERY unit type's price board; single-type
+# price questions must stay on the semantic path.
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # THE reported user question (diacritics on).
+        ("Bạn gửi tôi bảng giá của từng loại căn hộ được không?", True),
+        ("Cho em xem bảng giá các loại căn hộ", True),
+        ("bảng giá mọi loại căn hộ", True),
+        ("bảng giá mỗi loại căn hộ", True),
+        ("cho tôi bảng giá tất cả căn hộ", True),
+        # "toàn bộ" phrasing without the "loại" noun.
+        ("gửi tôi toàn bộ bảng giá dự án", True),
+        # Single-type / unit-specific questions stay semantic.
+        ("bảng giá căn studio", False),
+        ("căn CH-03 giá bao nhiêu", False),
+        ("bảng giá căn hộ 3PN view biển", False),
+        ("thế chấp cầm cố quy định thế nào", False),
+    ],
+)
+def test_is_full_price_board_query(text: str, expected: bool):
+    assert img.is_full_price_board_query(text) is expected
+
+
+def _board_row(page: int) -> dict:
+    """A DB-shaped banggia row whose metadata.page drives the reading order."""
+    return {
+        "image_id": f"bg-{page}",
+        "kind": "banggia",
+        "title": f"Bảng giá trang {page}",
+        "caption": "Bảng giá đợt bán",
+        "alt_text": "Bảng giá",
+        "url_cdn": f"https://pub-1f1d0c5479e2c0cc749435475f301810.r2.dev/images/camellia/banggia/bg-{page}.png",
+        "width": 1200,
+        "height": 900,
+        "linked_subject_key": None,
+        "metadata": {"page": page},
+    }
+
+
+def test_project_scoped_sql_contracts_never_fallback_cross_project():
+    """Every project-aware query carries an exact project predicate."""
+    for sql in (
+        img.IMAGE_QUERY_PROJECT_SCOPED,
+        img.QUERY_BY_UNIT_PROJECT_SCOPED,
+        img.PROJECT_IMAGES_QUERY_PROJECT_SCOPED,
+        img.PRICE_BOARD_BY_PROJECT_QUERY,
+    ):
+        assert "i.project_key =" in sql
+
+
+def test_image_query_project_scoped_sql_contract_embedding_identity():
+    """The scoped vector pass must filter on the embedding identity (model, dims).
+
+    image_embeddings rows carry their producing model/dims (schema.sql:96-97);
+    a cosine between vectors from different embedding spaces is a number but not
+    a similarity, and could surface wrong-corpus imagery above the floor. The
+    model/dims parameters are the LAST positional args ($4/$5) so legacy 4-arg
+    callers fail loudly instead of silently binding the wrong values.
+    """
+    sql = img.IMAGE_QUERY_PROJECT_SCOPED
+    assert "e.model = $4" in sql
+    assert "e.dims = $5" in sql
+    assert sql.index("i.project_key = $3") < sql.index("e.model = $4")
+
+
+def test_embedding_identity_tracks_active_config(monkeypatch):
+    """_embedding_identity returns the model actually used for the query vector.
+
+    The gemini/default binding embeds with settings.embedding_model; the
+    openrouter binding embeds with embedding_openrouter_model. The guard must
+    match whichever client produced the vector, not a frozen literal.
+    """
+    monkeypatch.setattr(img.settings, "embedding_binding", "gemini")
+    monkeypatch.setattr(img.settings, "embedding_model", "gemini-embedding-001")
+    monkeypatch.setattr(img.settings, "embedding_dim", 1024)
+    assert img._embedding_identity() == ("gemini-embedding-001", 1024)
+
+    monkeypatch.setattr(img.settings, "embedding_binding", "openrouter")
+    monkeypatch.setattr(img.settings, "embedding_openrouter_model", "openai/text-embedding-3-small")
+    assert img._embedding_identity() == ("openai/text-embedding-3-small", 1024)
+
+
+def test_price_board_sql_contract():
+    """Load-bearing fragments: published banggia rows of ONE project, ordered by
+    manifest page with a defensive cap — changing any of these silently breaks
+    completeness or ordering of the full-board gallery."""
+    sql = img.PRICE_BOARD_BY_PROJECT_QUERY
+    assert "i.status = 'published'" in sql
+    assert "i.kind = 'banggia'" in sql
+    assert "i.project_key = $1" in sql
+    # Tolerant ordering: the ::int cast must be guarded by a digit-only CASE so a
+    # published row with a missing/non-numeric page cannot throw and suppress the
+    # whole board; malformed rows sort last (NULLS LAST) instead of failing.
+    assert r"CASE WHEN i.metadata->>'page' ~ '^\d+$' THEN (i.metadata->>'page')::int END" in sql
+    assert "NULLS LAST" in sql
+    assert "i.title" in sql
+    assert "LIMIT 32" in sql
+
+
+def test_fetch_price_board_images_returns_all_pages_shaped(monkeypatch):
+    """Every page comes back in manifest order with the FE image contract; the
+    deterministic path labels items "semantic" with a human reason."""
+    captured = {}
+    rows = [_board_row(p) for p in range(1, 7)]  # 6 pages, SQL pre-ordered
+
+    class _CaptureConn:
+        async def fetch(self, *args, **kwargs):
+            captured["args"] = args
+            return rows
+
+    @asynccontextmanager
+    async def rls():
+        yield _CaptureConn()
+
+    monkeypatch.setattr(img, "with_rls_identity", rls)
+
+    out = run(img.fetch_price_board_images("camellia"))
+
+    assert captured["args"] == (img.PRICE_BOARD_BY_PROJECT_QUERY, "camellia")
+    assert [i["image_id"] for i in out] == [f"bg-{p}" for p in range(1, 7)]
+    assert set(out[0]) == {
+        "image_id",
+        "kind",
+        "title",
+        "caption",
+        "alt_text",
+        "url_cdn",
+        "width",
+        "height",
+        "score",
+        "match",
+        "reason",
+    }
+    assert all(i["match"] == "semantic" for i in out)
+    assert all(i["score"] == 1.0 for i in out)
+    assert all(i["reason"] for i in out)
+
+
+def test_fetch_price_board_images_degrades_to_empty_on_db_error(monkeypatch):
+    @asynccontextmanager
+    async def failing():
+        raise RuntimeError("db down")
+        yield  # pragma: no cover - unreachable
+
+    monkeypatch.setattr(img, "with_rls_identity", failing)
+
+    assert run(img.fetch_price_board_images("camellia")) == []
+
+
+def test_price_board_malformed_pages_still_returned_and_sorted_last(monkeypatch):
+    """A published row with a missing or non-numeric metadata.page must not make
+    the ::int cast throw and suppress the whole board: ALL rows come back, valid
+    pages keep ascending manifest order, malformed rows trail deterministically
+    (non-numeric page text before NULL pages, then title) — mirroring the
+    CASE ... NULLS LAST contract pinned in test_price_board_sql_contract."""
+    rows = [
+        _board_row(1),
+        _board_row(3),
+        {**_board_row(2), "metadata": {"page": "abc"}},  # non-numeric page text
+        {**_board_row(4), "metadata": {}},  # missing page key
+        {**_board_row(5), "metadata": {"page": None}},  # null page
+    ]  # fed pre-ordered exactly as the tolerant SQL would emit them
+
+    captured = {}
+
+    class _CaptureConn:
+        async def fetch(self, *args, **kwargs):
+            captured["args"] = args
+            return rows
+
+    @asynccontextmanager
+    async def rls():
+        yield _CaptureConn()
+
+    monkeypatch.setattr(img, "with_rls_identity", rls)
+
+    out = run(img.fetch_price_board_images("camellia"))
+
+    assert captured["args"] == (img.PRICE_BOARD_BY_PROJECT_QUERY, "camellia")
+    # Nothing is lost: 5 rows in, 5 images out — the board is non-empty.
+    assert len(out) == 5
+    assert [i["image_id"] for i in out] == ["bg-1", "bg-3", "bg-2", "bg-4", "bg-5"]
+    # Valid pages still lead in ascending order; the malformed rows are the tail.
+    assert [i["image_id"] for i in out[:2]] == ["bg-1", "bg-3"]

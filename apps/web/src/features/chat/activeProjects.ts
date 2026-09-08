@@ -24,6 +24,10 @@ export interface ActiveProject {
   project_key: string;
   /** Commercial name shown as the primary label (contract `name`). */
   name: string;
+  /** Backend-bounded display label; legal name remains available separately. */
+  display_name?: string;
+  /** Compact name for tight header labels (contract `short_name`, e.g. "The Soleil"). */
+  short_name?: string;
   /** Legacy alias carried by the 422-body catalogue; prefer `name`. */
   ten_thuong_mai?: string;
   /** Detailed address shown under the name (contract `location`). */
@@ -42,7 +46,16 @@ export interface ActiveProject {
 
 /** Display name helper: new contract field first, legacy alias second. */
 export function projectDisplayName(project: ActiveProject): string {
-  return project.name ?? project.ten_thuong_mai ?? project.project_key;
+  return project.display_name ?? project.name ?? project.ten_thuong_mai ?? project.project_key;
+}
+
+/**
+ * Short label for tight slots (chat header title): backend `short_name` first,
+ * falling back to the full display name so pre-short_name payloads render
+ * exactly as before.
+ */
+export function projectShortName(project: ActiveProject): string {
+  return project.short_name ?? projectDisplayName(project);
 }
 
 /** Display location helper: new contract field first, legacy alias second. */
@@ -59,6 +72,7 @@ export const FALLBACK_ACTIVE_PROJECTS: ActiveProject[] = [
   {
     project_key: "camellia",
     name: "The Camellia Sơn Trà - Đà Nẵng",
+    short_name: "The Camellia",
     ten_thuong_mai: "The Camellia Sơn Trà - Đà Nẵng",
     ten_phap_ly: "Trung tâm Thương mại, văn phòng cho thuê và nhà ở cao tầng",
     location: "Giao lộ Lê Văn Lương - Lê Đức Thọ, phường Sơn Trà, Đà Nẵng",
@@ -70,6 +84,7 @@ export const FALLBACK_ACTIVE_PROJECTS: ActiveProject[] = [
   {
     project_key: "soleil",
     name: "The Soleil Đà Nẵng",
+    short_name: "The Soleil",
     ten_thuong_mai: "The Soleil Đà Nẵng",
     ten_phap_ly: "Tổ hợp Ánh Dương - Soleil",
     location: "Giao lộ Phạm Văn Đồng - Võ Nguyên Giáp, quận Sơn Trà, Đà Nẵng",
@@ -115,6 +130,8 @@ function mapProjectRow(row: unknown): ActiveProject | null {
   return {
     project_key: projectKey,
     name,
+    display_name: typeof r.display_name === "string" && r.display_name.length > 0 ? r.display_name : undefined,
+    short_name: typeof r.short_name === "string" && r.short_name.length > 0 ? r.short_name : undefined,
     ten_thuong_mai: typeof r.ten_thuong_mai === "string" ? r.ten_thuong_mai : undefined,
     location: typeof r.location === "string" ? r.location : undefined,
     vi_tri: typeof r.vi_tri === "string" ? r.vi_tri : undefined,
@@ -132,8 +149,32 @@ function parseProjectRows(projects: unknown): ActiveProject[] | null {
   return mapped.length > 0 ? mapped : null;
 }
 
+const PROJECT_LIST_TTL_MS = 60_000;
+let projectListCache: { data: ActiveProject[] | null; expires: number } | null = null;
+let projectListInFlight: Promise<ActiveProject[] | null> | null = null;
+
+/** Clears the client catalogue cache between isolated consumers and tests. */
+export function resetActiveProjectsCache(): void {
+  projectListCache = null;
+  projectListInFlight = null;
+}
+
 /** Fetches active projects from GET /api/projects, if the endpoint exists. */
 async function fetchProjectList(): Promise<ActiveProject[] | null> {
+  const now = Date.now();
+  if (projectListCache && projectListCache.expires > now) return projectListCache.data;
+  if (projectListInFlight) return projectListInFlight;
+  projectListInFlight = fetchProjectListUncached();
+  try {
+    const data = await projectListInFlight;
+    projectListCache = { data, expires: Date.now() + PROJECT_LIST_TTL_MS };
+    return data;
+  } finally {
+    projectListInFlight = null;
+  }
+}
+
+async function fetchProjectListUncached(): Promise<ActiveProject[] | null> {
   try {
     const res = await fetch("/api/projects", {
       headers: { Accept: "application/json" },

@@ -111,7 +111,7 @@ def _image_rows(project: str, src_dir: pathlib.Path, kind: str, r2_base: str):
             "title": title,
             "caption": caption,
             "alt_text": caption,
-            "url_cdn": f"{r2_base}/images/{kind}/{slug}",
+            "url_cdn": f"{r2_base}/images/{project}/{kind}/{slug}",
             "width": width,
             "height": height,
             "content_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -157,7 +157,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Source folder not found: {args.src_dir}")
         return 1
 
-    rows = list(_image_rows(args.project, args.src_dir, args.kind, settings.r2_public_base))
+    rows = list(
+        _image_rows(args.project, args.src_dir, args.kind, settings.image_cdn_base(args.project))
+    )
     if not rows:
         print(f"No images under {args.src_dir}.")
         return 1

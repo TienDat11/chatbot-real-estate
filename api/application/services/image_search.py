@@ -18,8 +18,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from typing import Any
 
+from api.application.services.media_config import valid_media_url
 from api.application.services.sql_leg import with_rls_identity
 from api.infrastructure.config.config import settings
 
@@ -39,14 +41,16 @@ SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
 FROM image_embeddings e
 JOIN images i ON i.image_id = e.image_id
 WHERE i.status = 'published' AND i.kind NOT IN ('phaply', 'qna')
-ORDER BY e.embedding <=> $1::vector
+ORDER BY e.embedding <=> $1::vector, i.image_id
 LIMIT $2
 """
 
 # Project-scoped variant (M6): the caller-known project_key rides in the SQL so
 # the vector pass never ranks another project's corpus and no post-filter query
-# is needed. Unscoped callers keep IMAGE_QUERY byte-for-byte (contract tests
-# pin its fragments and the exact fetch args).
+# is needed. The embedding-identity predicate ($4/$5) keeps rows embedded by a
+# different model/dims out of the ranking: a vector from another embedding space
+# still produces a cosine score, but the score is meaningless and can surface
+# wrong-corpus imagery above the relevance floor.
 IMAGE_QUERY_PROJECT_SCOPED = """
 SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
        i.width, i.height, i.linked_subject_key, i.metadata,
@@ -55,7 +59,8 @@ FROM image_embeddings e
 JOIN images i ON i.image_id = e.image_id
 WHERE i.status = 'published' AND i.kind NOT IN ('phaply', 'qna')
   AND i.project_key = $3
-ORDER BY e.embedding <=> $1::vector
+  AND e.model = $4 AND e.dims = $5
+ORDER BY e.embedding <=> $1::vector, i.image_id
 LIMIT $2
 """
 
@@ -117,6 +122,37 @@ ORDER BY array_position(string_to_array($2, ','), i.metadata->>'type')
 LIMIT $3
 """
 
+# Full price-board fetch: the board ships one image per unit type (metadata.page
+# is the manifest page number), so a "bảng giá từng loại căn hộ" question needs
+# EVERY published page in reading order — something the semantic path cannot
+# promise with its top_k cap. The page cast is guarded by a digit-only CASE:
+# an unguarded ::int throws on any published row whose page is missing text or
+# non-numeric, and the caller's catch would suppress the ENTIRE board. The
+# guarded CASE sorts such rows last (NULLS LAST), then by raw page text, then
+# title, so malformed rows are returned too and the order stays deterministic.
+# The LIMIT is purely defensive (a mis-seeded project must not drag an
+# unbounded result); 32 pages is far above any board.
+PRICE_BOARD_BY_PROJECT_QUERY = r"""
+SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
+       i.width, i.height, i.linked_subject_key, i.metadata
+FROM images i
+WHERE i.status = 'published'
+  AND i.kind = 'banggia'
+  AND i.project_key = $1
+ORDER BY CASE WHEN i.metadata->>'page' ~ '^\d+$' THEN (i.metadata->>'page')::int END NULLS LAST,
+         i.metadata->>'page',
+         i.title
+LIMIT 32
+"""
+
+# Full-board intent detection runs on diacritic-stripped text because Vietnamese
+# input varies ("bảng giá" / "bang gia"); a price intent plus an all-types scope
+# keyword ("từng loại"/"mọi loại"/"các loại"/"tất cả"/"toàn bộ") separates it
+# from single-type queries ("bảng giá căn studio", "căn CH-03 giá bao nhiêu"),
+# which must stay on the semantic path.
+_FULL_BOARD_INTENT_RE = re.compile(r"\bbang\s+gia\b")
+_FULL_BOARD_SCOPE_RE = re.compile(r"\b(?:tung|moi|cac)\s+loai\b|\btat\s+ca\b|\btoan\s+bo\b")
+
 
 def _embedding_base_url() -> str:
     """Normalize the embedding base URL to carry the /v1 API path.
@@ -129,16 +165,60 @@ def _embedding_base_url() -> str:
 
 
 async def _embed_query(text: str) -> list[float]:
-    """Return the 1024-dim embedding for a query string (LOCK: text-embedding-v4)."""
+    """Return the 1024-dim embedding for a query string (LOCK: text-embedding-v4).
+
+    Shares the embedding binding config (EMBEDDING_* with the revision-3
+    OpenRouter opt-in) instead of a divergent client, and always requests
+    ``encoding_format="float"``: some gateways (Nvidia) reject a base64
+    encoding_format, so the dense-float form is requested explicitly and
+    base64 is never sent.
+    """
     import openai
 
-    client = openai.AsyncOpenAI(
-        api_key=settings.embedding_api_key, base_url=_embedding_base_url()
+    binding = (settings.embedding_binding or "").strip().lower()
+    if binding == "gemini":
+        # Gemini [OI]-compat embedding host (same key/base URL as the LLM leg).
+        api_key = settings.embedding_api_key
+        base_url = _embedding_base_url()
+        model = settings.embedding_model
+    elif binding == "openrouter":
+        api_key = settings.openrouter_api_key or settings.embedding_api_key
+        base_url = settings.openrouter_base_url
+        model = settings.embedding_openrouter_model
+    else:
+        api_key = settings.embedding_api_key
+        base_url = _embedding_base_url()
+        model = settings.embedding_model
+    client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+    resp = await client.embeddings.create(
+        model=model,
+        input=[text],
+        dimensions=settings.embedding_dim,
+        encoding_format="float",
     )
-    resp = await client.embeddings.create(model=settings.embedding_model, input=[text])
     # Sort by index for stability; the batch API may reorder responses.
     ordered = sorted(resp.data, key=lambda d: d.index)
-    return [float(x) for x in ordered[0].embedding]
+    vector = [float(x) for x in ordered[0].embedding]
+    if len(vector) != settings.embedding_dim:
+        raise ValueError(
+            f"image query embedding dim drift: expected {settings.embedding_dim}, got {len(vector)}"
+        )
+    return vector
+
+
+def _embedding_identity() -> tuple[str, int]:
+    """Return the (model, dims) pair the query embedding is produced with.
+
+    Every image_embeddings row records which model/dims embedded it; comparing
+    a query vector against a row vector from a DIFFERENT embedding space yields
+    a numeric cosine but a meaningless ranking. The active config is the single
+    truth here, and the scoped SQL filters rows on it (defense-in-depth next to
+    the ingest-time LOCK).
+    """
+    binding = (settings.embedding_binding or "").strip().lower()
+    if binding == "openrouter":
+        return settings.embedding_openrouter_model, settings.embedding_dim
+    return settings.embedding_model, settings.embedding_dim
 
 
 def _normalize_unit_code(code: str) -> str | None:
@@ -197,8 +277,34 @@ def _row_type(row: dict[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+def _allowed_cdn_origins(project_key: str | None) -> set[str]:
+    """Compatibility wrapper around the single project-aware media policy."""
+    from api.application.services.media_config import allowed_media_origins
+
+    return allowed_media_origins(project_key)
+
+
+def _is_allowed_media_url(value: object, project_key: str | None) -> bool:
+    return valid_media_url(value, project_key) is not None
+
+
+def _image_url(row: dict[str, Any], project_key: str | None = None) -> str | None:
+    """Return an existing URL only when its origin is configured for the project."""
+    candidates = [row.get("url_cdn")]
+    metadata = _meta_of(row)
+    candidates.extend((metadata.get("url_cdn"), metadata.get("url"), metadata.get("cdn_url")))
+    for value in candidates:
+        if url := valid_media_url(value, project_key or row.get("project_key"), "gallery"):
+            return url
+    return None
+
+
 def _row_to_image(
-    row: dict[str, Any], score: float, match: str, reason: str | None
+    row: dict[str, Any],
+    score: float,
+    match: str,
+    reason: str | None,
+    project_key: str | None = None,
 ) -> dict[str, Any]:
     """Shape a DB row into the stable image contract plus match/reason labels."""
     return {
@@ -207,7 +313,7 @@ def _row_to_image(
         "title": row.get("title"),
         "caption": row.get("caption"),
         "alt_text": row.get("alt_text"),
-        "url_cdn": row.get("url_cdn"),
+        "url_cdn": _image_url(row, project_key),
         "width": row.get("width"),
         "height": row.get("height"),
         "score": score,
@@ -216,9 +322,7 @@ def _row_to_image(
     }
 
 
-async def _query_by_unit(
-    code: str, project_key: "str | None" = None
-) -> dict[str, Any] | None:
+async def _query_by_unit(code: str, project_key: str | None = None) -> dict[str, Any] | None:
     """Fetch the single image whose linked unit key equals code; None on miss.
 
     ``project_key`` (M6) scopes the rescue so a scoped query naming CH-03 can
@@ -242,7 +346,7 @@ async def _rerank_by_unit(
     target_codes: set[str],
     scored: list[tuple[dict[str, Any], float]],
     top_k: int,
-    project_key: "str | None" = None,
+    project_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """Re-order vector hits so exact unit matches lead, same-type units follow.
 
@@ -283,18 +387,65 @@ async def _rerank_by_unit(
     for row, score in ordered:
         unit = _row_unit(row)
         if unit and unit in target_codes:
-            out.append(_row_to_image(row, score, "exact", f"Đúng căn {unit} bạn hỏi"))
+            out.append(_row_to_image(row, score, "exact", f"Đúng căn {unit} bạn hỏi", project_key))
             continue
         unit_type = _row_type(row)
         if unit_type and unit_type in ref_types:
-            out.append(_row_to_image(row, score, "similar", f"Căn {unit_type} tương tự để so sánh"))
+            out.append(
+                _row_to_image(
+                    row, score, "similar", f"Căn {unit_type} tương tự để so sánh", project_key
+                )
+            )
             continue
-        out.append(_row_to_image(row, score, "semantic", None))
+        out.append(_row_to_image(row, score, "semantic", None, project_key))
     return out[:top_k]
 
 
+def _strip_diacritics(text: str) -> str:
+    """Lowercase and strip Vietnamese combining marks ("bảng giá" -> "bang gia")."""
+    normalized = unicodedata.normalize("NFD", (text or "").lower())
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def is_full_price_board_query(query_text: str) -> bool:
+    """True when the user asks for the price board of ALL unit types at once.
+
+    Pure intent detection on diacritic-stripped text: a price-board mention plus
+    an all-types scope keyword. Single-type price questions deliberately fail
+    this so they keep the semantic path.
+    """
+    normalized = _strip_diacritics(query_text)
+    return bool(
+        _FULL_BOARD_INTENT_RE.search(normalized) and _FULL_BOARD_SCOPE_RE.search(normalized)
+    )
+
+
+async def fetch_price_board_images(project_key: str) -> list[dict[str, Any]]:
+    """Every published price-board page of one project, in manifest page order.
+
+    Deterministic SQL instead of the vector pass: a full-board question needs the
+    complete multi-page set, which the semantic top_k cap silently truncates, and
+    skipping the embedding call makes this path cheaper and timeout-free.
+    Best-effort like every image leg: any DB failure degrades to [].
+    """
+    try:
+        async with with_rls_identity() as conn:
+            recs = await conn.fetch(PRICE_BOARD_BY_PROJECT_QUERY, project_key)
+    except Exception as exc:  # noqa: BLE001 — imagery is garnish, never fatal
+        logger.warning("image_search: price board fetch degraded: %s", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    for r in recs:
+        image = _row_to_image(
+            dict(r), 1.0, "semantic", "Bảng giá toàn dự án theo từng loại căn hộ", project_key
+        )
+        if image["url_cdn"]:
+            out.append(image)
+    return out
+
+
 async def search_project_images(
-    top_k: int = 6, kind: str = "matbang", project_key: "str | None" = None
+    top_k: int = 6, kind: str = "matbang", project_key: str | None = None
 ) -> list[dict[str, Any]]:
     """Return representative project imagery for the first-open greeting.
 
@@ -307,23 +458,19 @@ async def search_project_images(
     returns [] so the greeting never 500s.
     """
     order = ["cover", "render", "amenity_map", "amenity_collage"]
+    # A greeting without a bound project is not allowed to browse a shared image
+    # corpus; unknown-project requests must be empty rather than Camellia fallback.
+    if not project_key:
+        return []
     try:
         async with with_rls_identity() as conn:
-            if project_key:
-                recs = await conn.fetch(
-                    PROJECT_IMAGES_QUERY_PROJECT_SCOPED,
-                    kind,
-                    ",".join(order),
-                    top_k,
-                    project_key,
-                )
-            else:
-                recs = await conn.fetch(
-                    PROJECT_IMAGES_QUERY,
-                    kind,
-                    ",".join(order),
-                    top_k,
-                )
+            recs = await conn.fetch(
+                PROJECT_IMAGES_QUERY_PROJECT_SCOPED,
+                kind,
+                ",".join(order),
+                top_k,
+                project_key,
+            )
     except Exception as exc:  # noqa: BLE001 — greeting imagery is a garnish, never fatal
         logger.warning("image_search: project images degraded: %s", exc)
         return []
@@ -334,18 +481,20 @@ async def search_project_images(
     for r in rows:
         if _row_unit(r):
             continue
-        out.append(_row_to_image(r, 1.0, "semantic", None))
+        image = _row_to_image(r, 1.0, "semantic", None, project_key)
+        if image["url_cdn"]:
+            out.append(image)
     return out[:top_k]
 
 
 async def search_images(
     query_text: str,
     top_k: int = 4,
-    threshold: float = 0.45,
+    threshold: float = 0.695,
     margin: float | None = None,
     same_kind_margin: float = 0.15,
-    cross_kind_margin: float = 0.05,
-    project_key: "str | None" = None,
+    cross_kind_margin: float = 0.015,
+    project_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return up to top_k published illustrative images that pass a relevance gate.
 
@@ -353,20 +502,24 @@ async def search_images(
     has no matching image returns nothing instead of a best-effort floor plan:
 
     - ``threshold`` is an absolute floor on the caption-embedding cosine score.
-      Cross-topic pairs that only share project context ("The Camellia Sơn Trà",
-      "căn hộ") measure 0.40-0.46 with text-embedding-v4, so the old 0.4 floor let
-      unrelated tail images attach to any query. 0.45 rejects those while keeping
-      every genuinely topical cluster (payment 0.56+, floor plan 0.50+, price 0.62+).
+      Measured 2026-09-05 on gemini-embedding-001 (keep-all dump:
+      scripts/measure_image_scores.py): on-topic clusters are payment
+      0.7032-0.7430, floor-plan 0.8137-0.8168, unit plans 0.6978-0.7387, while
+      off-topic wording tops at 0.7126 ("tổng quan thị trường...") and
+      0.6378 ("sân bay..."). gemini-001 inflates all cosines ~+0.2 vs the old
+      text-embedding-v4 scale, so the old 0.45 floor let off-topic queries
+      attach 2-4 images. 0.695 keeps every measured on-topic cluster (payment
+      4th hit 0.7032 keeps a 0.008 buffer) and caps off-topic queries at their
+      single top borderline hit.
     - ``same_kind_margin`` / ``cross_kind_margin`` are relative gates against the
-      top hit, split by whether a candidate shares the top hit's ``kind``. One
-      scalar margin cannot both keep a full topical cluster and reject an
-      off-topic tail, because the two score ranges overlap: the four payment-method
-      images span 0.4586-0.5615 (widest same-kind gap 0.1029), while a floor-plan
-      at 0.509 sits only 0.104 below a 0.613 payment hit. ``same_kind_margin``
-      (0.15) is wide enough to hold the whole payment cluster; ``cross_kind_margin``
-      (0.05) is tight enough to drop the floor-plan. The legacy ``margin`` argument
-      is kept for back-compat: when passed, the single scalar drives both windows
-      (exactly the old behavior).
+      top hit, split by whether a candidate shares the top hit's ``kind``.
+      ``same_kind_margin`` (0.15) holds each measured topical cluster: the widest
+      same-kind gap is payment 0.0398 and floor-plan 0.0031. ``cross_kind_margin``
+      (0.015) drops the measured near-top cross-kind tail — the toroi pair on a
+      floor-plan query sits 0.0177 below the matbang top (0.8168 vs 0.7991) —
+      while a wider 0.05 (tuned on v4) let them attach. The legacy ``margin``
+      argument is kept for back-compat: when passed, the single scalar drives
+      both windows (exactly the old behavior).
 
     The vector pass fetches a candidate pool larger than ``top_k`` so both gates
     choose from a fuller picture before the final top_k slice. When the query names
@@ -377,7 +530,9 @@ async def search_images(
     embedding or DB error: image retrieval is a garnish to the answer, never a
     reason to fail the pipeline.
     """
-    if not query_text:
+    # Project-less retrieval is intentionally empty: image rows are tenant data,
+    # so a missing or unknown project must never trigger a legacy corpus fallback.
+    if not query_text or not project_key:
         return []
     try:
         vector = await _embed_query(query_text)
@@ -388,10 +543,11 @@ async def search_images(
         # starved by the LIMIT; a topical cluster that lands just outside the top_k
         # raw neighbors still gets a chance to pass the gates.
         pool = max(top_k, 8)
+        emb_model, emb_dims = _embedding_identity()
         async with with_rls_identity() as conn:
             if project_key:
                 recs = await conn.fetch(
-                    IMAGE_QUERY_PROJECT_SCOPED, vec_literal, pool, project_key
+                    IMAGE_QUERY_PROJECT_SCOPED, vec_literal, pool, project_key, emb_model, emb_dims
                 )
             else:
                 recs = await conn.fetch(IMAGE_QUERY, vec_literal, pool)
@@ -400,10 +556,19 @@ async def search_images(
         logger.warning("image_search: degraded (no images): %s", exc)
         return []
 
+    # Soleil's first-party corpus has filename-derived captions rather than the
+    # richer Camellia editorial captions, and measured gemini-embedding-001
+    # scores run lower for it (scripts/measure_image_scores.py 2026-09-05:
+    # on-topic 0.6767-0.7227 vs Camellia 0.6978-0.8168). 0.65 keeps every
+    # measured on-topic hit (unit floor 0.6902 would miss the default 0.695)
+    # while dropping the 0.606-0.614 tail that attaches floor-plan images to
+    # amenity-style questions. The old 0.40 predates the vector-space migration
+    # and admitted broad cross-intent matches on the new scale.
+    effective_threshold = min(threshold, 0.65) if project_key == "soleil" else threshold
     scored: list[tuple[dict[str, Any], float]] = []
     for r in rows:
         score = r.get("score")
-        if score is None or float(score) < threshold:
+        if score is None or float(score) < effective_threshold:
             continue
         scored.append((r, float(score)))
 
@@ -430,6 +595,15 @@ async def search_images(
             if gap > window:
                 continue
             kept.append((r, s))
-        return [_row_to_image(r, s, "semantic", None) for r, s in kept][:top_k]
+        out: list[dict[str, Any]] = []
+        for r, s in kept:
+            image = _row_to_image(r, s, "semantic", None, project_key)
+            if image["url_cdn"]:
+                out.append(image)
+        return out[:top_k]
 
-    return await _rerank_by_unit(set(codes), scored, top_k, project_key)
+    return [
+        image
+        for image in await _rerank_by_unit(set(codes), scored, top_k, project_key)
+        if image.get("url_cdn")
+    ]

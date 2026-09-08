@@ -15,6 +15,20 @@ vi.mock("@/infrastructure/firebase/firebaseAuthenticationService", () => ({
   }),
 }));
 
+// App-router navigation is mocked so the guard's signed-out redirect contract
+// (login?next=<original path+query>) is observable without a Next runtime.
+const navigation = vi.hoisted(() => ({
+  replace: vi.fn(),
+  pathname: "/admin",
+  search: "foo=bar",
+}));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: navigation.replace }),
+  usePathname: () => navigation.pathname,
+  useSearchParams: () => new URLSearchParams(navigation.search),
+}));
+
 import { onAuthChange } from "@/infrastructure/firebase/firebaseAuthenticationService";
 import { AuthProvider } from "@/lib/AuthProvider";
 import { RequireRole } from "@/components/RequireRole";
@@ -40,6 +54,9 @@ describe("RequireRole", () => {
   beforeEach(() => {
     capturedAuthChangeCallback = null;
     vi.mocked(onAuthChange).mockClear();
+    navigation.replace.mockClear();
+    navigation.pathname = "/admin";
+    navigation.search = "foo=bar";
   });
 
   afterEach(() => {
@@ -70,10 +87,45 @@ describe("RequireRole", () => {
     expect(loginButton.getAttribute("href")).toBe("/login");
   });
 
+  it("redirects a signed-out user to /login preserving path and query in next=", async () => {
+    renderGuard(["admin"]);
+    capturedAuthChangeCallback!(null);
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenCalledWith(
+        `/login?next=${encodeURIComponent("/admin?foo=bar")}`
+      )
+    );
+  });
+
+  it("stays fail-closed on 403 for a signed-out user and never redirects them to a 403 shell", async () => {
+    renderGuard(["admin"]);
+    capturedAuthChangeCallback!(null);
+    expect(await screen.findByText("403")).toBeTruthy();
+    // The redirect fires as a best-effort navigation; the guard must not treat
+    // it as authorization success or render protected content.
+    expect(screen.queryByTestId("protected-content")).toBeNull();
+  });
+
   it("renders a 403 result for signed-out users", async () => {
     renderGuard(["admin"]);
     capturedAuthChangeCallback!(null);
     expect(await screen.findByText("403")).toBeTruthy();
+  });
+
+  it("keeps an authenticated user without the required role fail-closed at 403 without a login redirect", async () => {
+    renderGuard(["admin"]);
+    capturedAuthChangeCallback!(authenticatedUser("viewer"));
+    expect(await screen.findByText("403")).toBeTruthy();
+    expect(navigation.replace).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("protected-content")).toBeNull();
+  });
+
+  it("never redirects when the guard is mounted on the login route itself", async () => {
+    navigation.pathname = "/login";
+    renderGuard(["admin"]);
+    capturedAuthChangeCallback!(null);
+    expect(await screen.findByText("403")).toBeTruthy();
+    expect(navigation.replace).not.toHaveBeenCalled();
   });
 
   it("transitions from spinner to children once auth resolves", async () => {

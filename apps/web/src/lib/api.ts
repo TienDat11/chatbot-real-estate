@@ -9,12 +9,85 @@ import type {
 } from "@rag-ragre/contracts";
 import { API_QUERY_ENDPOINT, API_SSE_EVENTS } from "@rag-ragre/contracts";
 
+/**
+ * Wall-clock cap for one POST /api/query SSE stream. A cold LightRAG first
+ * query can stay silent for 40s+ before the first token; 180s keeps that
+ * alive while still failing a truly stalled stream fast enough for the
+ * interrupted-stream retry UX.
+ */
+export const QUERY_STREAM_TIMEOUT_MS = 180_000;
+
 /** Metadata delivered on the `done` SSE event (besides the streamed answer). */
 export interface DoneMeta {
   trace_id: string;
   latency_ms: number;
   confidence?: Confidence;
   requires_review?: boolean;
+  /**
+   * Secure wave §5.3: the final sanitized answer (authoritative) — callers
+   * replace the streamed message body with it.
+   */
+  answer?: string;
+  /** Post-consumption quota snapshot (authoritative, §5.1 shape). */
+  quota?: unknown;
+  /** Newly minted anon token when the caller had none/invalid (§5.3). */
+  anon_token?: string;
+  /**
+   * Cross-project guardrail (optional, ships incrementally): when the question
+   * targets another active project the backend suggests the destination here.
+   * Kept `unknown` because validation lives in normalizeProjectRedirect —
+   * one file owns the shape so backend drift cannot crash the chat.
+   */
+  project_redirect?: unknown;
+}
+
+/** Payload of the SSE `ack` event since the secure wave (§5.3). */
+export interface AckMeta {
+  /** Pre-consumption quota snapshot (§5.1 shape). */
+  quota?: unknown;
+  /** Newly minted anon token when the caller sent none/invalid. */
+  anon_token?: string;
+}
+
+/**
+ * SSE `error` frame carrying a structured backend envelope (e.g.
+ * ANONYMOUS_QUOTA_EXCEEDED, §5.3); plain-string errors stay plain Errors so
+ * existing consumers are unaffected.
+ */
+export class QueryStreamError extends Error {
+  /** Raw frame data: `{code, message?, retryable?, quota?, lead_cta?}` per spec §5.2/§5.3. */
+  readonly data: unknown;
+  /**
+   * Additive backend flag: the frame explicitly marks this failure as safe to
+   * retry (timeout, transient internal). Null = frame carried no flag; callers
+   * fall back to code-based inference.
+   */
+  readonly retryable: boolean | null;
+  /** Backend error code from the structured envelope, when present. */
+  readonly code: string | null;
+
+  constructor(message: string, data: unknown) {
+    super(message);
+    this.name = "QueryStreamError";
+    this.data = data;
+    const rec = (data && typeof data === "object" ? data : {}) as {
+      code?: unknown;
+      retryable?: unknown;
+    };
+    this.code = typeof rec.code === "string" ? rec.code : null;
+    // Defensive read: the flag is additive, so absent/legacy frames stay null
+    // instead of inventing a boolean the backend never sent.
+    this.retryable = typeof rec.retryable === "boolean" ? rec.retryable : null;
+  }
+}
+
+/**
+ * Fallback inference for error frames that predate the additive `retryable`
+ * flag: timeout and transient internal failures are retryable; policy
+ * rejections and input errors are not.
+ */
+export function isInferRetryableStreamError(code: string | null): boolean {
+  return code === "STREAM_TIMEOUT" || code === "INTERNAL";
 }
 
 /** Callbacks for each event type in the POST /api/query SSE stream. */
@@ -28,7 +101,8 @@ export interface QueryStreamHandlers {
   onVideos?: (videos: Video[]) => void;
   onToken?: (text: string) => void;
   onDone?: (meta: DoneMeta) => void;
-  onAck?: () => void;
+  /** Secure wave §5.3: ack may carry the quota snapshot + a minted token. */
+  onAck?: (meta?: AckMeta) => void;
   onError?: (error: Error) => void;
 }
 
@@ -65,6 +139,54 @@ export class QueryRequestError extends Error {
 }
 
 /**
+ * Injectable bearer-token source for POST /api/query: when a provider is
+ * installed and resolves a token, every query ships
+ * `Authorization: Bearer <token>` so the backend treats the session as
+ * authenticated (sales/admin get quota cap null) instead of burning the
+ * anonymous allowance. Registration is a UI concern — ChatPage installs the
+ * Firebase ID-token reader on mount and clears it on unmount, so other
+ * streamQuery callers (e.g. TrainWorkspace) are unaffected unless they opt in.
+ */
+export type QueryAuthTokenProvider = () => Promise<string | null> | string | null;
+
+let queryAuthTokenProvider: QueryAuthTokenProvider | null = null;
+
+/** Installs (or, with null, removes) the per-request /query token provider. */
+export function setQueryAuthTokenProvider(provider: QueryAuthTokenProvider | null): void {
+  queryAuthTokenProvider = provider;
+}
+
+/**
+ * Explicit per-call bearer credential override. The training gate mints and
+ * validates ONE Firebase ID token per send and passes it here so the actual
+ * fetch uses exactly that credential — the per-request provider seam is
+ * skipped, closing the sign-out race where a second provider resolve between
+ * "gate" and "request" returns null and a bearer-less /query leaves the
+ * browser. A null/empty override blocks the request outright instead of
+ * degrading to no header.
+ */
+export interface QueryAuthOverride {
+  bearerToken: string | null;
+}
+
+/**
+ * Resolves the Authorization headers for ONE query; never rejects — an absent
+ * provider, an empty/null token or a throwing provider all degrade to "no
+ * header", which keeps the historical anonymous flow byte-identical.
+ */
+async function resolveQueryAuthHeaders(): Promise<Record<string, string>> {
+  if (!queryAuthTokenProvider) return {};
+  try {
+    const token = await queryAuthTokenProvider();
+    return typeof token === "string" && token.length > 0
+      ? { Authorization: `Bearer ${token}` }
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Streams a chat query through POST /api/query (SSE) and fans out events to
  * the provided handlers. Supports standard `event:`/`data:` framing plus a
  * `events:` batch line (JSON array of events).
@@ -76,6 +198,12 @@ export class QueryRequestError extends Error {
  * `signal` lets the caller cancel an in-flight stream (e.g. a project switch,
  * review M5); an aborted stream resolves silently instead of surfacing
  * onError, because cancellation is intentional, not a failure.
+ *
+ * Bearer seam: when a token provider is installed (setQueryAuthTokenProvider)
+ * each request carries a fresh `Authorization: Bearer <token>` header; absent
+ * provider or null token sends no header at all (anonymous flow unchanged).
+ * `authOverride` instead pins one caller-minted credential to THIS request
+ * (single mint, provider skipped) or blocks the request when null/empty.
  */
 export async function streamQuery(
   req: {
@@ -86,16 +214,52 @@ export async function streamQuery(
     as_of?: string;
     history?: { role: "user" | "assistant"; content: string }[];
     /**
-     * Story 11.3: /train sends "training" so the backend answers from the
-     * _training namespace with the coaching prompt (no sales persona, no CTA).
-     * Additive field — backends predating story 11.3 ignore it harmlessly.
+     * Story 11.3 / ISSUE-5: /train sends "training" so the backend answers
+     * from the _training namespace with the coaching prompt (no sales persona,
+     * no CTA). Typed contract mirrors the backend
+     * QueryRequest.answer_mode: Literal["normal","training"]; backends
+     * predating it ignore the field harmlessly.
      */
-    answer_mode?: "customer" | "training";
+    answer_mode?: "normal" | "training";
+    context?: { project_key: string };
+    /**
+     * Secure wave §5.6: server-minted signed anonymous identity token. Sent
+     * on every query so the backend can key quota to a durable identity; the
+     * response/ack self-heals by returning a fresh token when absent/invalid.
+     */
+    anon_token?: string;
     /** Aborts the fetch + SSE read loop; no error is reported when set. */
     signal?: AbortSignal;
   },
-  handlers: QueryStreamHandlers
+  handlers: QueryStreamHandlers,
+  // Single-mint override (security wave review): see QueryAuthOverride.
+  authOverride?: QueryAuthOverride
 ): Promise<void> {
+  // Bearer seam: an explicit override pins ONE caller-minted credential to
+  // this request (single mint — the provider seam is never consulted a second
+  // time, so a sign-out between gate and fetch cannot strip the header);
+  // null/empty blocks the fetch outright so no bearer-less /query can leave.
+  // Without an override the per-request provider resolves fresh per call;
+  // absent provider/null token degrades to no extra headers (anonymous flow).
+  let authHeaders: Record<string, string>;
+  if (authOverride !== undefined) {
+    if (authOverride.bearerToken === null || authOverride.bearerToken.length === 0) {
+      handlers.onError?.(new Error("Phiên đăng nhập hết hạn. Vui lòng đăng nhập lại."));
+      return;
+    }
+    authHeaders = { Authorization: `Bearer ${authOverride.bearerToken}` };
+  } else {
+    authHeaders = await resolveQueryAuthHeaders();
+  }
+
+  // Hard cap on the whole stream (see QUERY_STREAM_TIMEOUT_MS), combined with
+  // the caller's own signal. AbortSignal.any keeps the two independent: an
+  // intentional caller abort stays silent (checked below via req.signal), while
+  // a timeout abort still surfaces onError so the interrupted-stream UX fires.
+  const streamSignal = req.signal
+    ? AbortSignal.any([req.signal, AbortSignal.timeout(QUERY_STREAM_TIMEOUT_MS)])
+    : AbortSignal.timeout(QUERY_STREAM_TIMEOUT_MS);
+
   let response: Response;
   try {
     response = await fetch(API_QUERY_ENDPOINT, {
@@ -103,9 +267,11 @@ export async function streamQuery(
       headers: {
         "Content-Type": "application/json",
         Accept: "text/event-stream",
+        ...(req.device_id ? { "X-Device-Id": req.device_id } : {}),
+        ...authHeaders,
       },
       body: JSON.stringify(req),
-      signal: req.signal,
+      signal: streamSignal,
     });
   } catch (cause) {
     if (req.signal?.aborted) return;
@@ -218,7 +384,9 @@ function dispatchChunk(chunk: string, handlers: QueryStreamHandlers): void {
 function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
   switch (evt.event) {
     case API_SSE_EVENTS.ACK:
-      handlers.onAck?.();
+      handlers.onAck?.(
+        evt.data && typeof evt.data === "object" ? (evt.data as AckMeta) : undefined
+      );
       break;
     case API_SSE_EVENTS.ROUTING:
       if (evt.data && typeof evt.data === "object") {
@@ -226,14 +394,18 @@ function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
       }
       break;
     case API_SSE_EVENTS.SOURCES:
-      handlers.onSources?.(asArray<Source>(evt.data));
+      handlers.onSources?.(
+        (evt.data as { sources?: Source[] } | null)?.sources ?? asArray<Source>(evt.data)
+      );
       break;
     case API_SSE_EVENTS.PLACES:
       // Backend emits an object `{"places": [...]}`, not a bare array.
       handlers.onPlaces?.((evt.data as { places?: NearbyPlace[] } | null)?.places ?? asArray<NearbyPlace>(evt.data));
       break;
     case API_SSE_EVENTS.FACTS:
-      handlers.onFacts?.(asArray<FactEvidence>(evt.data));
+      handlers.onFacts?.(
+        (evt.data as { facts?: FactEvidence[] } | null)?.facts ?? asArray<FactEvidence>(evt.data)
+      );
       break;
     case API_SSE_EVENTS.IMAGES:
       // Backend emits an object `{"images": [...]}`, not a bare array.
@@ -255,11 +427,22 @@ function handleEvent(evt: RawSseEvent, handlers: QueryStreamHandlers): void {
       handlers.onDone?.(evt.data as DoneMeta);
       break;
     case API_SSE_EVENTS.ERROR: {
+      // Structured frames (e.g. ANONYMOUS_QUOTA_EXCEEDED, §5.3) keep their
+      // envelope on a typed error so callers can branch without re-parsing;
+      // plain-string frames stay the historical plain Error.
+      if (evt.data && typeof evt.data === "object") {
+        const rec = evt.data as { message?: unknown };
+        const message =
+          typeof rec.message === "string" && rec.message.length > 0
+            ? rec.message
+            : "Có lỗi xảy ra khi xử lý câu hỏi.";
+        handlers.onError?.(new QueryStreamError(message, evt.data));
+        break;
+      }
       const message =
         typeof evt.data === "string"
           ? evt.data
-          : (evt.data as { message?: string } | null)?.message ??
-            "Có lỗi xảy ra khi xử lý câu hỏi.";
+          : "Có lỗi xảy ra khi xử lý câu hỏi.";
       handlers.onError?.(new Error(message));
       break;
     }
@@ -289,14 +472,44 @@ const API_HELLO_ENDPOINT = "/api/llms-hello";
 
 // Greeting media is a progressive enhancement (text renders first), so a
 // hanging hello endpoint must not leave the patch pending indefinitely
-// (review M9). 5s aligns with the lib timeout convention
-// (routeDirections DEFAULT_TIMEOUT_MS).
-const GREETING_MEDIA_TIMEOUT_MS = 5000;
+// (review M9). The backend LLM (POST /api/llms-hello) was measured returning
+// 5.0-5.5s in QA, so 5s caused deterministic aborts (net::ERR_ABORTED) and
+// a flaky gallery; 15s gives that latency a ceiling plus margin while still
+// bounding a hung endpoint.
+const GREETING_MEDIA_TIMEOUT_MS = 15000;
 
 /** Media attached to a project greeting by POST /api/llms-hello. */
+export interface GreetingPayload {
+  greeting?: string;
+  suggestions?: string[];
+  images?: Image[];
+  videos?: Video[];
+}
+
 export interface GreetingMediaPayload {
   images: Image[];
   videos: Video[];
+}
+
+/** Fetches the project/audience-scoped first assistant greeting. */
+export async function fetchGreeting(
+  projectKey: string,
+  options: { deviceId?: string; audience?: "customer" | "sales" } = {},
+): Promise<GreetingPayload> {
+  const response = await fetch(API_HELLO_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.deviceId ? { "X-Device-Id": options.deviceId } : {}),
+    },
+    body: JSON.stringify({
+      project_key: projectKey,
+      audience: options.audience ?? "customer",
+    }),
+    signal: AbortSignal.timeout(GREETING_MEDIA_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`llms-hello failed: ${response.status}`);
+  return (await response.json()) as GreetingPayload;
 }
 
 /** Fetch project-scoped greeting media; rejects on non-2xx so callers can no-op. */
@@ -323,6 +536,109 @@ export async function fetchGreetingMedia(
 /* Lead submission (Story 5.7) - POST /api/lead.                      */
 /* ------------------------------------------------------------------ */
 
+export interface ChatSessionSummary {
+  session_id: string;
+  project_key: string;
+  title: string;
+  message_count: number;
+  handed_off: boolean;
+  last_active_at: string;
+}
+
+export interface ChatSessionMessage {
+  role: "user" | "assistant";
+  content: string;
+  meta?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface TrainingSessionSummary {
+  id: string;
+  title: string | null;
+  context: { project_key: string | null };
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface TrainingSessionDetail extends TrainingSessionSummary {
+  answer_mode: "training";
+  messages: ChatSessionMessage[];
+}
+
+export async function fetchTrainingSessions(projectKey: string): Promise<TrainingSessionSummary[]> {
+  // The training history endpoints live on the sales router, whose prefix is
+  // /api/sales — a bare /api/training path 404s against the backend.
+  const response = await fetch(`/api/sales/training/sessions?project_key=${encodeURIComponent(projectKey)}`, {
+    headers: await resolveQueryAuthHeaders(),
+  });
+  if (!response.ok) throw new Error(`training sessions failed: ${response.status}`);
+  const payload = (await response.json()) as { items?: TrainingSessionSummary[] };
+  return payload.items ?? [];
+}
+
+export async function fetchTrainingSession(sessionId: string): Promise<TrainingSessionDetail> {
+  const response = await fetch(`/api/sales/training/sessions/${encodeURIComponent(sessionId)}`, {
+    headers: await resolveQueryAuthHeaders(),
+  });
+  if (!response.ok) throw new Error(`training session failed: ${response.status}`);
+  return (await response.json()) as TrainingSessionDetail;
+}
+
+/**
+ * Identity headers shared by every history/session endpoint (secure wave):
+ * the backend answers 401 unless BOTH the persistent device id and the signed
+ * anon token are present, then scopes rows by their combination — so a
+ * mismatched identity is an intentional ownership rejection the callers
+ * surface as a recoverable error, never retried with faked credentials.
+ */
+async function chatSessionHeaders(deviceId: string, anonToken: string | null): Promise<Record<string, string>> {
+  return {
+    Accept: "application/json",
+    "X-Device-Id": deviceId,
+    ...(anonToken ? { "X-Anon-Token": anonToken } : {}),
+    ...(await resolveQueryAuthHeaders()),
+  };
+}
+
+/**
+ * Loads persisted sessions for the current device and project. Requires the
+ * signed anon identity: GET /api/sessions 401s without `X-Device-Id` +
+ * `X-Anon-Token`, and a null `anonToken` therefore surfaces that rejection.
+ */
+export async function fetchChatSessions(
+  deviceId: string,
+  projectKey: string,
+  anonToken: string | null
+): Promise<ChatSessionSummary[]> {
+  const response = await fetch(`/api/sessions?device_id=${encodeURIComponent(deviceId)}&project_key=${encodeURIComponent(projectKey)}`, {
+    headers: await chatSessionHeaders(deviceId, anonToken),
+  });
+  if (!response.ok) throw new Error(`sessions failed: ${response.status}`);
+  const payload = (await response.json()) as { sessions?: ChatSessionSummary[] } | ChatSessionSummary[];
+  return Array.isArray(payload) ? payload : payload.sessions ?? [];
+}
+
+/**
+ * Loads a persisted transcript; callers may render it read-only. `project_key`
+ * is a REQUIRED backend query parameter (its absence is a 422) and, together
+ * with the two identity headers, scopes the lookup so another visitor's
+ * session id resolves to an intentional 404 instead of leaking a transcript.
+ */
+export async function fetchChatSessionMessages(
+  deviceId: string,
+  sessionId: string,
+  projectKey: string,
+  anonToken: string | null
+): Promise<ChatSessionMessage[]> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/messages?project_key=${encodeURIComponent(projectKey)}`, {
+    headers: await chatSessionHeaders(deviceId, anonToken),
+  });
+  if (!response.ok) throw new Error(`session messages failed: ${response.status}`);
+  const payload = (await response.json()) as { messages?: ChatSessionMessage[] } | ChatSessionMessage[];
+  return Array.isArray(payload) ? payload : payload.messages ?? [];
+}
+
 const API_LEAD_ENDPOINT = "/api/lead";
 
 /** Request body of `POST /api/lead` (snake_case mirrors the FastAPI model). */
@@ -332,6 +648,11 @@ export interface LeadPayload {
   session_id?: string;
   /** Anonymous persistent device id (D7), sent alongside the lead. */
   device_id?: string;
+  /**
+   * Server-minted signed anon identity (secure wave §5.5/§6) so POST
+   * /api/lead can grant the one-time bonus to the chatting identity.
+   */
+  anon_token?: string;
   name?: string;
   phone: string;
   consent: boolean;
@@ -343,6 +664,11 @@ export interface LeadPayload {
 export interface LeadSubmitResult {
   lead_id: number;
   will_call_within_minutes: number;
+  /**
+   * Secure wave §5.5: bonus turns granted with this lead (0 when the identity
+   * already received its one-time grant, rule R3).
+   */
+  quota_bonus_granted?: number;
 }
 
 export type LeadSubmitErrorKind = "duplicate" | "validation" | "network";
@@ -370,7 +696,13 @@ export async function submitLead(payload: LeadPayload): Promise<LeadSubmitResult
   try {
     response = await fetch(API_LEAD_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // Guard sync: POST /api/lead matches session.device_id against this
+        // header (or the body) so the handed-off badge and CRM link bind to the
+        // same identity that chatted. Same device_id already rides in the body.
+        ...(payload.device_id ? { "X-Device-Id": payload.device_id } : {}),
+      },
       body: JSON.stringify(payload),
     });
   } catch {

@@ -1,0 +1,47 @@
+# Keep the build context minimal (fast Cloud Run uploads) and secrets out.
+# The image only COPYs requirements.txt, api/, ingest/ — everything below is
+# context hygiene. Verified: api/ingest runtime code imports neither tests/
+# nor eval/, and never reads data/, docs/ or db/ files at import time.
+
+# VCS / CI / local agent tooling
+.git
+.github
+.gitignore
+.dsh
+.claude
+.zcode
+.gitnexus
+.mimosa
+.playwright-mcp
+.mcp.json
+
+# Python local env / caches
+.venv
+__pycache__
+**/__pycache__
+.pytest_cache
+.ruff_cache
+
+# Secrets — never enter the build context
+.env
+.env.*
+
+# Node (FE Dockerfile builds with repo-root context, so FE sources and
+# root manifests must stay in the context — only dependencies are excluded)
+node_modules
+
+# Data, docs, tests, non-runtime Python
+data
+docs
+db/backups
+tests
+eval
+scripts
+tools
+_bmad
+ragre_mvp
+
+# Local artifacts (screenshots, logs, dumps)
+*.log
+*.png
+*.dump

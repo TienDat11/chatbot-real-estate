@@ -19,10 +19,33 @@ export_runtime_env(settings)
 
 logger = logging.getLogger(__name__)
 
-_lightrag: Any | None = None
+_lightrag_instances: dict[str, Any] = {}
 _lock = threading.Lock()
-_storages_initialized = False
 LIGHTRAG_READY = False  # read by api/rag_leg.py and /ready
+
+
+def project_workspace(project_key: str | None) -> str | None:
+    """Map a project to its LightRAG workspace (None = historical default instance).
+
+    WHY: the 2026-08-28 soleil-lightrag-scope-repair migration isolates Soleil's
+    LightRAG rows in the `ragre_mvp` workspace. Query AND ingest paths must both
+    honor the mapping or Soleil rows become unreachable/misscoped. Projects
+    without a dedicated workspace keep the pre-existing default instance.
+    """
+    if project_key == "soleil":
+        from api.infrastructure.config.config import get_settings  # noqa: PLC0415
+
+        ws = get_settings().lightrag_workspace_soleil
+        # Fail closed: the LightRAG ctor default is "" (lightrag/lightrag.py:413)
+        # and PG storage maps empty/falsy to "default" (postgres_impl.py:2700-2702).
+        # Either value would collapse Soleil into the shared default namespace.
+        if not ws.strip() or ws.strip().lower() == "default":
+            raise ValueError(
+                f"LIGHTRAG_WORKSPACE_SOLEIL resolved to {ws!r} which is the "
+                "shared default namespace -- Soleil must have an isolated workspace"
+            )
+        return ws
+    return None
 
 
 def _redact(exc: Exception) -> str:
@@ -53,34 +76,86 @@ def _make_embedding_func() -> Any:
     except ImportError as exc:  # pragma: no cover — environment-dependent
         raise LightRAGUnavailableError(f"Thiếu lightrag-hku==1.5.6: {exc}") from exc
 
-    if settings.embedding_binding in ("dashscope", "aibox") and settings.embedding_api_key:
+    binding = settings.embedding_binding
+    if binding == "openrouter":
+        # Revision-3 opt-in route: OpenAI-compatible /embeddings on the
+        # OpenRouter gateway. Credentials come from env/config only — the
+        # shared OpenRouter key first, then the plain embedding key; fail
+        # closed when neither is configured (never hardcode a key).
+        openrouter_key = settings.openrouter_api_key or settings.embedding_api_key
+        if not openrouter_key:
+            raise LightRAGUnavailableError(
+                f"EMBEDDING_BINDING={binding!r} cần OPENROUTER_API_KEY hoặc "
+                "EMBEDDING_API_KEY — fail closed (không có key trong env/config)"
+            )
+        base = settings.openrouter_base_url.strip()
+        model = settings.embedding_openrouter_model
+    elif binding in ("dashscope", "aibox", "gemini") and settings.embedding_api_key:
+        openrouter_key = settings.embedding_api_key
         # openai SDK 2.x turns a bare host into a plain-text response (no .data),
         # so the base URL must carry the /v1 path like llm_base_url_v1 does.
+        # Gemini's [OI]-compat host already serves /openai/embeddings under /v1.
         base = settings.embedding_base_url.strip()
-        embedding_http_base = base if base.rstrip("/").endswith("/v1") else base.rstrip("/") + "/v1"
-        client = openai.AsyncOpenAI(
-            api_key=settings.embedding_api_key,
-            base_url=embedding_http_base,
-        )
+        base = base if base.rstrip("/").endswith("/v1") else base.rstrip("/") + "/v1"
         model = settings.embedding_model
+    else:
+        openrouter_key = ""  # unreachable: fail-closed branch below raises
+        base = ""
+        model = ""
+
+    if openrouter_key:
+        client = openai.AsyncOpenAI(api_key=openrouter_key, base_url=base)
 
         async def embed(texts: list[str]) -> np.ndarray:
-            resp = await client.embeddings.create(model=model, input=texts)
-            # Sort by index for stability (the batch API may reorder responses).
-            ordered = sorted(resp.data, key=lambda d: d.index)
+            # LightRAG's batch pre-compute passes mixed items (a query string
+            # plus raw keyword GROUPS as nested lists); the [OI]-compat
+            # endpoint rejects nested input with 400, so flatten each group
+            # into one text while preserving one-output-per-item order.
+            flat: list[str] = [
+                t if isinstance(t, str) else " ".join(str(p) for p in t)
+                for t in texts
+            ]
+            # encoding_format=float explicitly: some gateways (Nvidia) reject
+            # the SDK default and some others default to base64. Gemini
+            # [OI]-compat embeddings honor an explicit dimensions request; the
+            # 1024 lock is passed for parity and is ignored to scale.
+            resp = await client.embeddings.create(
+                model=model, input=flat, encoding_format="float",
+                dimensions=settings.embedding_dim,
+            )
+            data = list(resp.data)
+            # Response-shape validation: some [OI]-compat gateways omit `index`
+            # (None) — sorting on None keys crashes, so fall back to response
+            # order ONLY after proving the shape is intact (one vector per
+            # input text, each at the locked dims). A silent short/misshaped
+            # response would associate vectors with the wrong rows.
+            if len(data) != len(flat):
+                raise ValueError(
+                    f"embedding endpoint returned {len(data)} vectors "
+                    f"for {len(flat)} inputs"
+                )
+            expected = settings.embedding_dim
+            for d in data:
+                if len(d.embedding) != expected:
+                    raise ValueError(
+                        f"embedding endpoint returned dim {len(d.embedding)}, "
+                        f"expected {expected} (dims LOCK)"
+                    )
+            if all(isinstance(d.index, int) for d in data):
+                data.sort(key=lambda d: d.index)
             # float32 ndarray: EmbeddingFunc.__call__ validates via .size and the
             # PG vector storage encodes float32 — a plain list would crash the
             # flush ('list' object has no attribute 'size').
-            return np.asarray([d.embedding for d in ordered], dtype=np.float32)
+            return np.asarray([d.embedding for d in data], dtype=np.float32)
 
         return EmbeddingFunc(embedding_dim=settings.embedding_dim, func=embed, model_name=model)
 
     # A real binding with no API key must fail closed — the stub writes garbage
     # vectors that silently corrupt the store. The stub is reachable ONLY through
     # an explicit EMBEDDING_BINDING=local.
-    if settings.embedding_binding != "local":
+    if binding != "local":
         raise LightRAGUnavailableError(
-            f"EMBEDDING_BINDING={settings.embedding_binding!r} cần embedding_api_key — "
+            f"EMBEDDING_BINDING={binding!r} cần embedding_api_key — "
             "fail closed (stub local chỉ dùng khi binding=local)"
         )
     logger.warning(
@@ -130,15 +205,25 @@ def _make_llm_func() -> Callable[..., Any]:
     return llm_func
 
 
-def get_lightrag() -> Any:
-    """Singleton LightRAG với PG storages. Init lần đầu (lazy) — thread-safe."""
-    global _lightrag, LIGHTRAG_READY
-    if _lightrag is not None:
-        return _lightrag
+def get_lightrag(workspace: str | None = None) -> Any:
+    """LightRAG per workspace (lazy init, thread-safe).
+
+    WHY per-workspace: the 2026-08-28 soleil-lightrag-scope-repair migration
+    deliberately isolates Soleil's LightRAG rows in the `ragre_mvp` workspace
+    while Camellia stays in the PG default workspace. One singleton can only
+    ever query one workspace, so Soleil queries returned no sources. Callers
+    that pass no workspace keep the exact historical instance (no `workspace`
+    ctor kwarg → PG storages use "default").
+    """
+    key = workspace or ""
+    cached = _lightrag_instances.get(key)
+    if cached is not None:
+        return cached
 
     with _lock:
-        if _lightrag is not None:
-            return _lightrag
+        cached = _lightrag_instances.get(key)
+        if cached is not None:
+            return cached
 
         try:
             from lightrag import LightRAG, QueryParam  # noqa: F401  (re-exported for shared use)
@@ -155,8 +240,11 @@ def get_lightrag() -> Any:
         #   extraction toggle is a TOP-LEVEL ctor field; `language` lives in
         #   addon_params. ainsert passthrough: sections are raw-splitted per
         #   chunk_token_size, so pre-chunked sections stay one chunk each.
+        ctor_kwargs: dict[str, Any] = {}
+        if workspace:
+            ctor_kwargs["workspace"] = workspace
         try:
-            _lightrag = LightRAG(
+            instance = LightRAG(
                 working_dir=settings.lightrag_workspace,
                 embedding_func=_make_embedding_func(),
                 llm_model_func=_make_llm_func(),
@@ -177,6 +265,7 @@ def get_lightrag() -> Any:
                 chunk_overlap_token_size=50,
                 enable_llm_cache=True,
                 max_parallel_insert=settings.max_parallel_workers,
+                **ctor_kwargs,
             )
         except Exception as exc:  # pragma: no cover — environment-dependent
             raise LightRAGUnavailableError(
@@ -185,23 +274,24 @@ def get_lightrag() -> Any:
 
         logger.info(
             "LightRAG sẵn sàng (workspace=%s, binding=%s)",
-            settings.lightrag_workspace,
+            workspace or "default(ctor)",
             settings.embedding_binding,
         )
+        _lightrag_instances[key] = instance
         LIGHTRAG_READY = True
-        return _lightrag
+        return instance
 
 
 async def _ensure_lightrag_ready(rag: Any) -> None:
-    """Initialize the 1.5.6 pipeline/storage DDL once per LightRAG lifetime.
+    """Initialize the 1.5.6 pipeline/storage DDL once per LightRAG instance.
 
     ainsert/adelete on the installed wheel raise PipelineNotInitializedError until
-    `await rag.initialize_storages()` has run; the flag keeps it to one call.
+    `await rag.initialize_storages()` has run; the per-instance flag keeps it to
+    one call each now that instances are keyed by workspace.
     """
-    global _storages_initialized
-    if not _storages_initialized:
+    if not getattr(rag, "_re_storages_ready", False):
         await rag.initialize_storages()
-        _storages_initialized = True
+        rag._re_storages_ready = True
 
 
 async def ainsert_document(rag: Any, doc_id: str, chunks: list[str], chunk_ids: list[str]) -> None:
@@ -226,10 +316,27 @@ async def ainsert_document(rag: Any, doc_id: str, chunks: list[str], chunk_ids: 
         raise RuntimeError(f"ainsert LightRAG lỗi (doc={doc_id}): {_redact(exc)}") from exc
 
 
-async def adelete_by_doc_id(rag: Any, lightrag_doc_id: str) -> None:
-    """Remove a document from LightRAG on doc invalidation (plan §3.6)."""
+async def adelete_by_doc_id(
+    rag: Any,
+    lightrag_doc_id: str,
+    *,
+    delete_llm_cache: bool = True,
+) -> None:
+    """Remove a document from LightRAG on doc invalidation (plan §3.6).
+
+    delete_llm_cache defaults to True because the re-ingest flow calls this on
+    the outgoing version's chunks: extraction responses are cached by prompt
+    content hash, so identical re-ingested text would otherwise replay a stale
+    (possibly empty/garbage) cached extraction instead of re-calling the LLM
+    and never repair a bad KG. Deletion is the only sanctioned cache invalidation
+    point — the cache rows are keyed by content hash, not by live doc ids, and
+    outlive their owning doc_status row once it is purged.
+    """
     try:
         await _ensure_lightrag_ready(rag)
-        await rag.adelete_by_doc_id(lightrag_doc_id)
+        await rag.adelete_by_doc_id(
+            lightrag_doc_id,
+            delete_llm_cache=delete_llm_cache,
+        )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"adelete LightRAG lỗi (id={lightrag_doc_id}): {_redact(exc)}") from exc

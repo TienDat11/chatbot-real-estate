@@ -11,16 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import unicodedata
+import urllib.parse
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any, AsyncIterator
+from typing import Any
 
 import asyncpg
 
-from api.infrastructure.config.config import settings
 from api import get_cfg
+from api.application.services.fact_display import policy_display, subject_display
 from api.domain.entities.price_calc import (
     affordability_rows,
     affordability_summary,
@@ -35,14 +38,31 @@ ALLOWED_SOURCES = ("facts", "v_unit_offers")
 
 ALLOWED_FIELDS: dict[str, tuple[str, ...]] = {
     "v_unit_offers": (
-        "subject_id", "policy_key", "price_vnd", "deposit_pct", "term_months",
-        "interest_rate_pct", "required_down_payment_vnd", "loan_amount_vnd",
-        "monthly_principal_vnd", "monthly_interest_estimate_vnd",
+        "subject_id",
+        "policy_key",
+        "price_vnd",
+        "deposit_pct",
+        "term_months",
+        "interest_rate_pct",
+        "required_down_payment_vnd",
+        "loan_amount_vnd",
+        "monthly_principal_vnd",
+        "monthly_interest_estimate_vnd",
     ),
     "facts": (
-        "price_vnd", "area_m2", "deposit_pct", "term_months", "interest_rate_pct",
-        "subject_key", "subject_type", "value_num", "value_text", "unit", "quality",
-        "policy_key", "campaign_key",
+        "price_vnd",
+        "area_m2",
+        "deposit_pct",
+        "term_months",
+        "interest_rate_pct",
+        "subject_key",
+        "subject_type",
+        "value_num",
+        "value_text",
+        "unit",
+        "quality",
+        "policy_key",
+        "campaign_key",
     ),
 }
 
@@ -51,12 +71,38 @@ SEMANTIC_FACT_FIELDS = {"price_vnd", "area_m2", "deposit_pct", "term_months", "i
 
 ALLOWED_OPS = ("=", "!=", "<", "<=", ">", ">=", "between", "in")
 ALLOWED_DIR = {"asc": "ASC", "desc": "DESC"}
-MIN_LIMIT, MAX_LIMIT, DEFAULT_LIMIT = 1, 20, 10
+# Structured catalogue/payment questions must not inherit the router's usual
+# top-k cap. 200 is bounded, parameter-free, and covers both seeded projects.
+MIN_LIMIT, MAX_LIMIT, DEFAULT_LIMIT = 1, 200, 10
+_EXHAUSTIVE_QUERY_TERMS = (
+    "tung loai",
+    "moi loai",
+    "cac loai",
+    "tat ca",
+    "toan bo",
+    "danh muc",
+    "phuong thuc thanh toan",
+    "phuong an thanh toan",
+    "payment method",
+    "unit catalog",
+)
+
+# Roles allowed for the transaction-local role GUC — checked fail-closed before
+# anything reaches the connection (Mimosa finding: latent injection surface).
+# All current callers rely on the default, so the set stays minimal by design.
+ALLOWED_RLS_ROLES = frozenset({"ro_query"})
 
 OFFER_COLUMNS = (
-    "subject_id", "policy_key", "price_vnd", "deposit_pct", "term_months",
-    "interest_rate_pct", "required_down_payment_vnd", "loan_amount_vnd",
-    "monthly_principal_vnd", "monthly_interest_estimate_vnd",
+    "subject_id",
+    "policy_key",
+    "price_vnd",
+    "deposit_pct",
+    "term_months",
+    "interest_rate_pct",
+    "required_down_payment_vnd",
+    "loan_amount_vnd",
+    "monthly_principal_vnd",
+    "monthly_interest_estimate_vnd",
 )
 
 
@@ -71,7 +117,7 @@ class SqlLegError(Exception):
 @dataclass
 class SqlLegResult:
     rows: list[dict] = field(default_factory=list)  # FACT_EVIDENCE blocks (fe-...)
-    meta: dict = field(default_factory=dict)        # {mode, source, sql, sql_query, row_count, error}
+    meta: dict = field(default_factory=dict)  # {mode, source, sql, sql_query, row_count, error}
     degraded: bool = False
 
 
@@ -84,9 +130,24 @@ def build_dsn() -> str:
     host = get_cfg("postgres_host", "localhost")
     port = get_cfg("postgres_port", 5432)
     user = get_cfg("postgres_user", "ragre")
-    password = get_cfg("postgres_password", "")
+    password = urllib.parse.quote(str(get_cfg("postgres_password", "")), safe="")
     db = get_cfg("postgres_database", "ragre")
     return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+
+
+def _pooler_safe_kwargs() -> dict[str, int]:
+    """Extra asyncpg connect kwargs that disable server-side prepared statements.
+
+    Supavisor (:6543 / pooler.supabase.com) does not support prepared statements
+    and will raise DuplicatePreparedStatementError if caching is enabled.
+    Passing these to direct-postgres connections (:5432) is harmless — the
+    client simply skips the prepare round-trips and inlines the SQL.
+    """
+    return {
+        "statement_cache_size": 0,
+        "max_cached_statement_lifetime": 0,
+        "max_cacheable_statement_size": 0,
+    }
 
 
 async def get_ro_pool() -> asyncpg.Pool:
@@ -94,7 +155,10 @@ async def get_ro_pool() -> asyncpg.Pool:
     global _ro_pool
     if _ro_pool is None or _ro_pool.is_closing():
         _ro_pool = await asyncpg.create_pool(
-            build_dsn(), min_size=1, max_size=int(get_cfg("postgres_max_connections", 5) or 5),
+            build_dsn(),
+            min_size=1,
+            max_size=int(get_cfg("postgres_max_connections", 5) or 5),
+            **_pooler_safe_kwargs(),
         )
     return _ro_pool
 
@@ -116,13 +180,23 @@ async def with_rls_identity(
 
     SET LOCAL ROLE, yield, COMMIT. Shares the SQL leg, hydrate, and post-filter paths.
     """
+    # Fail-closed before any pool/connection work: nothing outside the
+    # allowlist may reach the role GUC.
+    if role not in ALLOWED_RLS_ROLES:
+        raise SpecError(f"role không hợp lệ: {role!r} (cho phép {sorted(ALLOWED_RLS_ROLES)})")
     pool = pool or await get_ro_pool()
     conn: asyncpg.Connection = await pool.acquire()
     tr = conn.transaction()
     await tr.start()
     try:
-        await conn.execute(f"SET LOCAL statement_timeout = '{int(timeout_s * 1000)}ms'")
-        await conn.execute(f"SET LOCAL ROLE {role}")
+        # SET LOCAL has no bind-parameter form, so both settings go through
+        # set_config with is_local=true (transaction-scoped) and fully bound
+        # values; the role is additionally gated by the allowlist above.
+        await conn.execute(
+            "SELECT set_config('statement_timeout', $1, true)",
+            f"{int(timeout_s * 1000)}ms",
+        )
+        await conn.execute("SELECT set_config('role', $1, true)", role)
         yield conn
         await tr.commit()
     except BaseException:
@@ -271,16 +345,18 @@ def build_sql(
         # doc (defense-in-depth; RLS FORCE still guards if ever forgotten).
         sql = (
             "SELECT f.id AS fact_id, fs.subject_key, fs.subject_type, fs.display_name, "
-            "f.fact_key, f.policy_key, f.campaign_key, f.value_num, f.value_text, f.unit, f.quality, "
+            "f.fact_key, f.policy_key, f.campaign_key, f.value_num, f.value_text, f.unit, f.quality, "  # noqa: E501
             "f.range_min, f.range_max, f.effective_from, f.effective_to, "
             "f.source_doc_id, f.source_chunk_id, f.trust_level "
             "FROM facts f JOIN fact_subjects fs ON fs.id = f.subject_id"
         )
-        where = [f"f.effective_from <= ${_next(params, as_of)}",
-                 f"(f.effective_to IS NULL OR f.effective_to > ${_next(params, as_of)})",
-                 f"EXISTS (SELECT 1 FROM documents d WHERE d.doc_id = f.source_doc_id "
-                 f"AND d.status = 'published' AND d.effective_from <= ${_next(params, as_of)} "
-                 f"AND (d.effective_to IS NULL OR d.effective_to > ${_next(params, as_of)}))"]
+        where = [
+            f"f.effective_from <= ${_next(params, as_of)}",
+            f"(f.effective_to IS NULL OR f.effective_to > ${_next(params, as_of)})",
+            f"EXISTS (SELECT 1 FROM documents d WHERE d.doc_id = f.source_doc_id "
+            f"AND d.status = 'published' AND d.effective_from <= ${_next(params, as_of)} "
+            f"AND (d.effective_to IS NULL OR d.effective_to > ${_next(params, as_of)}))",
+        ]
         if project_key:
             # fact_subjects.project_key is the per-subject project tag; NULL-tagged
             # subjects are excluded so legacy data never leaks into a project answer.
@@ -306,6 +382,24 @@ def build_sql(
 def _next(params: list[Any], v: Any) -> int:
     params.append(v)
     return len(params)
+
+
+def _fold_query(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", (text or "").lower())
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+def _is_exhaustive_query(query: str) -> bool:
+    folded = _fold_query(query)
+    return any(term in folded for term in _EXHAUSTIVE_QUERY_TERMS)
+
+
+def _effective_limit(spec: dict, query: str) -> int:
+    """Raise only exhaustive catalogue requests to the bounded full-catalog cap."""
+    requested = int(spec.get("limit") or DEFAULT_LIMIT)
+    if _is_exhaustive_query(query):
+        return MAX_LIMIT
+    return min(requested, MAX_LIMIT)
 
 
 # match_semantics — range/approx semantics (plan §4.4 A8); pure, unit-testable.
@@ -383,32 +477,128 @@ def _jsonable(v: Any) -> Any:
     return v
 
 
-def _facts_note(row: dict) -> str:
+# fact_keys whose note must carry the unit explicitly — the LLM mixed "0đ" into a
+# percent field once the unit was left implicit (round-2 defect D2/D3c).
+_FACT_UNIT_NOTES: dict[str, tuple[str, str]] = {
+    "deposit_pct": ("tỷ lệ vốn tự có, đơn vị %", "tỷ lệ % (NULL = chưa có, không phải 0%)"),
+    "term_months": ("thời hạn, đơn vị tháng", "số tháng (NULL = chưa có, không phải 0)"),
+    "area_m2": ("diện tích, đơn vị m²", "m² (NULL = chưa có)"),
+    "price_vnd": ("số tiền, đơn vị đồng (VND)", "đồng (NULL = chưa có)"),
+}
+
+_INTEREST_NULL_NOTE = "lãi suất %/năm (NULL = chưa có, không phải 0%)"
+
+
+def _is_zero_number(v: Any) -> bool:
+    """True only for a genuine numeric zero (Decimal('0.0000') counts)."""
+    if isinstance(v, bool) or v is None:
+        return False
+    if isinstance(v, (int, float, Decimal)):
+        return v == 0
+    return False
+
+
+def _positive_int(v: Any) -> int | None:
+    """Coerce a duration fact to a positive whole-month count, else None."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float, Decimal)):
+        try:
+            iv = int(v)
+        except (ValueError, OverflowError):
+            return None
+        return iv if iv > 0 else None
+    return None
+
+
+def _facts_note(row: dict, term_months: Any = None) -> str:
+    """Provenance note for one fact row — value-aware (round-2 defect D2).
+
+    The "NULL = chưa có" caveat must appear ONLY when the value is genuinely
+    absent. HTLS and owner-funded support policies carry a real 0.0000 interest
+    rate (data/_processed/business_rules.json, db/seed/policy_vay.sql), and
+    labelling that as missing data made the facts panel read as machine garbage.
+    A non-zero rate is reported without inventing a bank figure: the bank rate is
+    decided per case, so the note only states the unit and the data source.
+
+    A real 0% is a TIME-BOUNDED subsidy: the note only states "0%/năm" when the
+    sibling term_months fact proves the duration, otherwise it defers to the
+    policy term — an unbounded 0% claim would mislead the customer.
+    """
     q = row.get("quality") or "exact"
     if q == "range":
         return f"khoảng {row.get('range_min')}–{row.get('range_max')} (dữ liệu range)"
     if q == "approx":
         return f"ước lượng ~{row.get('value_num')} (dữ liệu approx)"
-    if row.get("fact_key") == "interest_rate_pct":
-        return "lãi suất %/năm (NULL = chưa có, không phải 0%)"
+
+    fact_key = row.get("fact_key")
+    value = row.get("value_num")
+    if value is None:
+        value = row.get("value_text")
+
+    if fact_key == "interest_rate_pct":
+        if value is None:
+            return _INTEREST_NULL_NOTE
+        if _is_zero_number(value):
+            label = policy_display(row.get("policy_key"))
+            source = f"theo {label} của chủ đầu tư" if label else "theo chính sách của chủ đầu tư"
+            term = _positive_int(term_months if term_months is not None else row.get("term_months"))
+            if term is not None:
+                return (
+                    f"lãi suất ưu đãi 0%/năm trong {term} tháng đầu {source} "
+                    "- mức hỗ trợ thật, không phải thiếu dữ liệu"
+                )
+            # No duration evidence on this row — a bare 0%/năm would read as
+            # unlimited, so the note defers to the term written in the policy.
+            return f"mức hỗ trợ lãi suất {source}, áp dụng theo thời hạn ghi trong chính sách"
+        return (
+            "lãi suất %/năm theo chính sách trong dữ liệu"
+            " (lãi vay thực tế do ngân hàng quyết định từng case)"
+        )
+
+    unit_note = _FACT_UNIT_NOTES.get(str(fact_key))
+    if unit_note:
+        present_note, null_note = unit_note
+        return present_note if value is not None else null_note
     return "số liệu gốc từ dữ liệu cấu trúc"
 
 
 def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> list[dict]:
-    """Convert raw rows into FACT_EVIDENCE blocks (fe-001..) — the sole numeric source for generation."""
+    """Convert raw rows into FACT_EVIDENCE blocks (fe-001..) — the sole numeric source for generation."""  # noqa: E501
+    # A 0% HTLS rate is time-bounded, but the duration lives in a SIBLING
+    # term_months fact row for the same subject+policy, so index it up front
+    # for the note builder instead of shipping an unbounded "0%/năm".
+    term_by_scope: dict[tuple, Any] = {}
+    if source != "v_unit_offers":
+        for row in rows:
+            if row.get("fact_key") == "term_months" and row.get("value_num") is not None:
+                term_by_scope.setdefault(
+                    (row.get("subject_key"), row.get("policy_key")), row.get("value_num")
+                )
     fe: list[dict] = []
     for i, row in enumerate(rows, start=1):
         if source == "v_unit_offers":
-            fields = {k: _jsonable(row.get(k)) for k in OFFER_COLUMNS if k not in ("subject_id",) and row.get(k) is not None}
+            fields = {
+                k: _jsonable(row.get(k))
+                for k in OFFER_COLUMNS
+                if k not in ("subject_id",) and row.get(k) is not None
+            }
             note = (
                 "derived: required_down_payment_vnd = CEIL(giá × deposit_pct/100); "
-                "loan_amount_vnd = giá × (100 − deposit_pct)/100; monthly_principal_vnd = loan/term; "
-                "monthly_interest_estimate_vnd = ước tính dư nợ gốc ban đầu (không phải lịch trả nợ)"
+                "loan_amount_vnd = giá × (100 − deposit_pct)/100; monthly_principal_vnd = loan/term; "  # noqa: E501
+                "monthly_interest_estimate_vnd = ước tính dư nợ gốc ban đầu (không phải lịch trả nợ)"  # noqa: E501
             )
             entry = {
                 "fe_id": f"fe-{i:03d}",
                 "subject": row.get("subject_key") or f"unit:{row.get('subject_id')}",
+                # Additive legend (D4): machine keys stay byte-identical for
+                # guard_output, the *_display fields give the LLM prose to quote.
+                "subject_display": subject_display(
+                    row.get("subject_key") or f"unit:{row.get('subject_id')}",
+                    row.get("display_name"),
+                ),
                 "policy_key": row.get("policy_key"),
+                "policy_display": policy_display(row.get("policy_key")),
                 "fields": fields,
                 "note": note,
                 "quality": "exact",
@@ -426,13 +616,22 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
             entry = {
                 "fe_id": f"fe-{i:03d}",
                 "subject": row.get("subject_key"),
+                "subject_display": subject_display(row.get("subject_key"), row.get("display_name")),
                 "policy_key": row.get("policy_key"),
+                "policy_display": policy_display(row.get("policy_key")),
                 "fields": fields,
-                "note": _facts_note(row),
+                "note": _facts_note(
+                    row,
+                    term_by_scope.get((row.get("subject_key"), row.get("policy_key"))),
+                ),
                 "quality": row.get("quality") or "exact",
                 "trust_level": row.get("trust_level") or "confirmed",
-                "range": {"min": _jsonable(row.get("range_min")), "max": _jsonable(row.get("range_max"))}
-                if row.get("quality") in ("range", "approx") else None,
+                "range": {
+                    "min": _jsonable(row.get("range_min")),
+                    "max": _jsonable(row.get("range_max")),
+                }
+                if row.get("quality") in ("range", "approx")
+                else None,
                 "effective_from": _jsonable(row.get("effective_from")),
                 "effective_to": _jsonable(row.get("effective_to")),
                 "source_doc_id": row.get("source_doc_id"),
@@ -445,9 +644,17 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
 
 # Affordability leg (story 3.2) — deterministic numbers from v_unit_estimates only.
 ESTIMATE_COLUMNS = (
-    "subject_key", "display_name", "project_key", "attrs", "policy_key",
-    "price_min_vnd", "price_max_vnd", "price_quality", "deposit_pct",
-    "term_months", "interest_rate_pct",
+    "subject_key",
+    "display_name",
+    "project_key",
+    "attrs",
+    "policy_key",
+    "price_min_vnd",
+    "price_max_vnd",
+    "price_quality",
+    "deposit_pct",
+    "term_months",
+    "interest_rate_pct",
 )
 
 
@@ -573,6 +780,13 @@ async def run_sql_leg(
     if spec is None:
         return SqlLegResult([], {"mode": "none", "error": "no spec"}, degraded=False)
 
+    # The router's default limit is intentionally small for ordinary answers,
+    # but exhaustive catalogue/payment questions need every valid row. Keep the
+    # override bounded and only activate it for explicit all-types wording.
+    effective_spec = dict(spec)
+    effective_spec["limit"] = _effective_limit(effective_spec, query)
+    spec = effective_spec
+
     if spec.get("structured_path") == "nl2sql":
         try:
             from api.domain.services.nl2sql_guard import run_nl2sql  # noqa: PLC0415
@@ -594,7 +808,11 @@ async def run_sql_leg(
     try:
         validate_spec(spec)
     except SpecError as exc:
-        return SqlLegResult([], {"mode": "spec", "error": f"spec invalid: {exc}", "degraded_reason": "spec_invalid"}, degraded=True)
+        return SqlLegResult(
+            [],
+            {"mode": "spec", "error": f"spec invalid: {exc}", "degraded_reason": "spec_invalid"},
+            degraded=True,
+        )
 
     try:
         sql, params = build_sql(spec, as_of, project_key)
@@ -612,7 +830,8 @@ async def run_sql_leg(
             ids = [r["subject_id"] for r in rows]
             async with with_rls_identity(timeout_s=1.5) as conn:
                 recs = await conn.fetch(
-                    "SELECT id, subject_key, display_name FROM fact_subjects WHERE id = ANY($1)", ids
+                    "SELECT id, subject_key, display_name FROM fact_subjects WHERE id = ANY($1)",
+                    ids,
                 )
             keymap = {r["id"]: (r["subject_key"], r["display_name"]) for r in recs}
             for r in rows:

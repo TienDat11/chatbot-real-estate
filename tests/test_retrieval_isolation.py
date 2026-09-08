@@ -29,6 +29,7 @@ from api.application.services.sql_leg import build_sql, run_affordability
 
 # --- build_sql: facts path must carry fs.project_key -------------------------
 
+
 def test_build_sql_facts_adds_project_key_predicate() -> None:
     spec = {"source": "facts", "filters": [], "limit": 10}
     sql, params = build_sql(spec, date(2026, 8, 1), project_key="soleil")
@@ -51,6 +52,7 @@ def test_build_sql_offers_scopes_to_project_subjects() -> None:
 
 
 # --- run_affordability: estimates filtered by project_key --------------------
+
 
 def _est_row(project_key: str = "camellia") -> dict:
     return {
@@ -106,6 +108,7 @@ async def test_run_affordability_other_project_rows_are_not_counted() -> None:
 
 # --- rag_leg._post_filter: chunks scoped by documents.project_key -------------
 
+
 @pytest.mark.asyncio
 async def test_post_filter_drops_chunks_of_other_project() -> None:
     from api.application.services import rag_leg
@@ -115,10 +118,22 @@ async def test_post_filter_drops_chunks_of_other_project() -> None:
         {"id": "c-soleil", "score": 0.8, "content": "Soleil price", "file_path": "c-soleil"},
     ]
     recs = [
-        {"chunk_id": "c-camellia", "doc_id": "d1", "status": "published",
-         "effective_from": date(2026, 1, 1), "effective_to": None, "project_key": "camellia"},
-        {"chunk_id": "c-soleil", "doc_id": "d2", "status": "published",
-         "effective_from": date(2026, 1, 1), "effective_to": None, "project_key": "soleil"},
+        {
+            "chunk_id": "c-camellia",
+            "doc_id": "d1",
+            "status": "published",
+            "effective_from": date(2026, 1, 1),
+            "effective_to": None,
+            "project_key": "camellia",
+        },
+        {
+            "chunk_id": "c-soleil",
+            "doc_id": "d2",
+            "status": "published",
+            "effective_from": date(2026, 1, 1),
+            "effective_to": None,
+            "project_key": "soleil",
+        },
     ]
 
     class _FakePool:
@@ -154,8 +169,14 @@ async def test_post_filter_without_project_key_keeps_all_valid() -> None:
 
     chunks = [{"id": "c-1", "score": 0.9, "content": "x", "file_path": "c-1"}]
     recs = [
-        {"chunk_id": "c-1", "doc_id": "d1", "status": "published",
-         "effective_from": date(2026, 1, 1), "effective_to": None, "project_key": "camellia"},
+        {
+            "chunk_id": "c-1",
+            "doc_id": "d1",
+            "status": "published",
+            "effective_from": date(2026, 1, 1),
+            "effective_to": None,
+            "project_key": "camellia",
+        },
     ]
 
     class _FakePool:
@@ -181,6 +202,7 @@ async def test_post_filter_without_project_key_keeps_all_valid() -> None:
 
 
 # --- image search: project predicate rides in the SQL (M6) --------------------
+
 
 def _capture_conn(rows, captured):
     class _CaptureConn:
@@ -212,29 +234,31 @@ async def test_search_images_scopes_project_in_sql(monkeypatch) -> None:
     monkeypatch.setattr(img, "with_rls_identity", _capture_conn([], captured))
     await img.search_images("view biển", top_k=4, project_key="soleil")
 
-    query, vec_literal, pool, project_key = captured["args"]
+    query, vec_literal, pool, project_key, emb_model, emb_dims = captured["args"]
     assert query == img.IMAGE_QUERY_PROJECT_SCOPED
     assert "i.project_key = $3" in query
     assert vec_literal == "[0.5]"
     assert pool == 8
     assert project_key == "soleil"
+    # The embedding identity rides along so foreign-embedding rows cannot score.
+    assert emb_dims == 1024
+    assert emb_model
 
 
 @pytest.mark.asyncio
-async def test_search_images_without_project_stays_unscoped(monkeypatch) -> None:
-    """No project bound -> the legacy unscoped query and args are unchanged."""
+async def test_search_images_without_project_returns_empty_without_cross_project_fallback(
+    monkeypatch,
+) -> None:
+    """Missing project identity must not query or expose another project corpus."""
     captured: dict = {}
 
-    async def fake_embed(text):
-        return [0.5]
+    async def fail_embed(text):
+        raise AssertionError("project-less image search must not embed")
 
-    monkeypatch.setattr(img, "_embed_query", fake_embed)
+    monkeypatch.setattr(img, "_embed_query", fail_embed)
     monkeypatch.setattr(img, "with_rls_identity", _capture_conn([], captured))
-    await img.search_images("view biển", top_k=4)
-
-    query, vec_literal, pool = captured["args"]
-    assert query == img.IMAGE_QUERY
-    assert "project_key" not in query
+    assert await img.search_images("view biển", top_k=4) == []
+    assert captured == {}
 
 
 @pytest.mark.asyncio

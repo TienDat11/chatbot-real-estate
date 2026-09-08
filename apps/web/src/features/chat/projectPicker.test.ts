@@ -5,6 +5,7 @@ import {
   FALLBACK_ACTIVE_PROJECTS,
   shouldForceProjectPicker,
   sortActiveProjects,
+  resetActiveProjectsCache,
 } from "@/features/chat/activeProjects";
 
 // Story 10.3: the backend answers 422 PROJECT_SCOPE when more than one project
@@ -26,6 +27,7 @@ const PROJECT_SCOPE_BODY = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  resetActiveProjectsCache();
 });
 
 describe("streamQuery PROJECT_SCOPE detection", () => {

@@ -1,6 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Typography } from "antd";
+import { normalizeMath } from "./math-format";
 
 export interface MarkdownViewProps {
   content: string;
@@ -10,14 +10,17 @@ export interface MarkdownViewProps {
 /**
  * Render markdown (GFM) with design-system styling: navy headings,
  * subtle table borders, gray code blocks. Used for answer content.
+ * The wrapper is a plain <div> (not antd Typography): Typography's own DOM
+ * and styling assumptions interfered with block-level children such as GFM
+ * tables, and a neutral div keeps SSR and client output identical.
  */
 export function MarkdownView({ content, className }: MarkdownViewProps) {
   return (
-    <Typography style={{ fontSize: "var(--fs-body, 14px)", lineHeight: "var(--fs-body-line, 24px)" }} className={className}>
+    <div style={{ fontSize: "var(--fs-body, 14px)", lineHeight: "var(--fs-body-line, 24px)" }} className={className}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-        {content}
+        {normalizeMath(content)}
       </ReactMarkdown>
-    </Typography>
+    </div>
   );
 }
 

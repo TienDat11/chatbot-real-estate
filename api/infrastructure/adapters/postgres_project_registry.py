@@ -11,14 +11,20 @@ path must survive losing.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from typing import Any
+
+import asyncpg
 
 from api.application.ports.project_registry import (
     ProjectRegistryPort,
     ProjectRegistryRecord,
 )
+from api.application.services.media_config import valid_media_url
 from api.infrastructure.config.config import get_settings
+from api.application.services.sql_leg import _pooler_safe_kwargs
 
 logger = logging.getLogger("api.postgres_project_registry")
 
@@ -52,38 +58,137 @@ LIMIT $2
 """
 
 _IMAGE_COLUMNS = (
-    "image_id", "kind", "title", "caption", "alt_text", "url_cdn", "width", "height",
+    "image_id",
+    "kind",
+    "title",
+    "caption",
+    "alt_text",
+    "url_cdn",
+    "width",
+    "height",
 )
 
 
 class PostgresProjectRegistry(ProjectRegistryPort):
-    """asyncpg-backed registry reads; one short-lived connection per call."""
+    """asyncpg-backed registry reads using one reusable pool per event loop.
 
-    async def _connect(self):
-        import asyncpg
+    asyncpg pools (and the transports underneath them) are bound to the event
+    loop that created them. The registry adapter is a process-wide singleton,
+    so it can be called from different loops over its lifetime — notably under
+    Starlette's ``TestClient`` when the fixture does not ``with``-enter the
+    client, which spins up and closes a fresh portal/event loop per request.
+    A single cached pool would then be force-terminated after its loop was
+    closed; on Windows the closed loop's proactor is ``None`` and the teardown
+    raises ``'NoneType' object has no attribute 'send'`` (a lifecycle bug, not
+    a DB failure, that the best-effort ``except`` used to hide as a degraded
+    read). Keeping one pool per loop means a pool is only ever used and
+    closed on its own loop; pools from already-closed loops are dropped by
+    reference — their loop teardown already released the sockets.
+    """
 
-        s = get_settings()
-        # kwargs (not a DSN string) so the password can never leak through an
-        # exception message that embeds the connection target (m8).
-        return await asyncpg.connect(
-            host=s.postgres_host,
-            port=s.postgres_port,
-            user=s.postgres_user,
-            password=s.postgres_password,
-            database=s.postgres_database,
-            timeout=_CONNECT_TIMEOUT_S,
-        )
+    def __init__(self) -> None:
+        self._pools: dict[int, tuple[asyncio.AbstractEventLoop, asyncpg.Pool]] = {}
+        self._pool_locks: dict[int, asyncio.Lock] = {}
+        # asyncio.Lock is loop-bound and cannot guard state shared across
+        # loops, so the pool map is protected by a short critical-section
+        # threading lock (dict reads/writes only — no blocking on IO).
+        self._pools_guard = threading.Lock()
+
+    def _cached_pool(self, running: asyncio.AbstractEventLoop) -> asyncpg.Pool | None:
+        """Return the running loop's pool when it is still usable."""
+        with self._pools_guard:
+            entry = self._pools.get(id(running))
+        if entry is None:
+            return None
+        loop, pool = entry
+        if loop is not running or pool.is_closing():
+            return None
+        return pool
+
+    def _drop_dead_pools(self) -> None:
+        """Forget pools whose event loop has been closed (best-effort sweep).
+
+        A closed loop has already released its transports, so the pool needs
+        no teardown — keeping the entry would only leak it in long-running
+        processes that see many short-lived loops (e.g. test clients).
+        """
+        with self._pools_guard:
+            dead = [key for key, (loop, _pool) in self._pools.items() if loop.is_closed()]
+            for key in dead:
+                self._pools.pop(key, None)
+                self._pool_locks.pop(key, None)
+
+    async def _get_pool(self) -> asyncpg.Pool:
+        running = asyncio.get_running_loop()
+        cached = self._cached_pool(running)
+        if cached is not None:
+            return cached
+        # One async lock per loop so concurrent tasks on the same loop do not
+        # create two pools; the lock is created on this loop and only ever
+        # awaited from it.
+        lock = self._pool_locks.get(id(running))
+        if lock is None:
+            lock = asyncio.Lock()
+            with self._pools_guard:
+                self._pool_locks[id(running)] = lock
+        async with lock:
+            cached = self._cached_pool(running)
+            if cached is not None:
+                return cached
+            self._drop_dead_pools()
+            s = get_settings()
+            pool = await asyncpg.create_pool(
+                host=s.postgres_host,
+                port=s.postgres_port,
+                user=s.postgres_user,
+                password=s.postgres_password,
+                database=s.postgres_database,
+                min_size=1,
+                max_size=max(1, min(int(s.postgres_max_connections), 10)),
+                timeout=_CONNECT_TIMEOUT_S,
+                command_timeout=_CONNECT_TIMEOUT_S,
+                **_pooler_safe_kwargs(),
+            )
+            with self._pools_guard:
+                self._pools[id(running)] = (running, pool)
+            return pool
+
+    async def close(self) -> None:
+        """Close the current loop's pool and forget pools from closed loops.
+
+        Shutdown-only, best-effort: a pool whose loop is already closed needs
+        no action (its sockets were released with the loop), and a live pool
+        belonging to a different loop is never touched from here.
+        """
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        with self._pools_guard:
+            entries = list(self._pools.items())
+        for key, (loop, pool) in entries:
+            if loop.is_closed():
+                with self._pools_guard:
+                    self._pools.pop(key, None)
+                    self._pool_locks.pop(key, None)
+            elif running is not None and loop is running and not pool.is_closing():
+                try:
+                    await pool.close()
+                except Exception:  # noqa: BLE001 — shutdown must never raise
+                    logger.warning("registry: pool close failed on shutdown", exc_info=True)
+                finally:
+                    with self._pools_guard:
+                        self._pools.pop(key, None)
+                        self._pool_locks.pop(key, None)
 
     async def fetch_project(self, project_key: str) -> ProjectRegistryRecord | None:
         """Return the registry row for one project; None on miss or failure."""
         if not project_key:
             return None
         try:
-            conn = await self._connect()
-            try:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
                 row = await conn.fetchrow(_PROJECT_ROW_QUERY, project_key)
-            finally:
-                await conn.close()
         except Exception as exc:  # noqa: BLE001 — registry read is best-effort
             logger.warning("registry: project row read failed for %s: %s", project_key, exc)
             return None
@@ -111,11 +216,9 @@ class PostgresProjectRegistry(ProjectRegistryPort):
     async def fetch_active_projects(self) -> list[ProjectRegistryRecord]:
         """Return every active registry row; [] on any failure (degraded)."""
         try:
-            conn = await self._connect()
-            try:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
                 rows = await conn.fetch(_ACTIVE_PROJECTS_QUERY)
-            finally:
-                await conn.close()
         except Exception as exc:  # noqa: BLE001 — scope resolution must degrade
             logger.warning("registry: active projects read failed: %s", exc)
             return []
@@ -144,15 +247,22 @@ class PostgresProjectRegistry(ProjectRegistryPort):
     ) -> list[dict[str, Any]]:
         """Return recently published gallery rows for a project; [] on failure."""
         try:
-            conn = await self._connect()
-            try:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
                 rows = await conn.fetch(_RECENT_IMAGES_QUERY, project_key, limit)
-            finally:
-                await conn.close()
         except Exception as exc:  # noqa: BLE001 — decoration must never 500 a greeting
             logger.warning("registry: recent images read failed for %s: %s", project_key, exc)
             return []
-        return [dict(zip(_IMAGE_COLUMNS, row)) for row in rows]
+        images: list[dict[str, Any]] = []
+        for row in rows:
+            image = dict(zip(_IMAGE_COLUMNS, row))
+            # "gallery" kind check matches media_config.fetch_recent_project_images:
+            # without the kind, only the origin is validated and a same-host URL
+            # outside the project's object-key namespace would pass.
+            image["url_cdn"] = valid_media_url(image.get("url_cdn"), project_key, "gallery")
+            if image["url_cdn"]:
+                images.append(image)
+        return images
 
 
 __all__ = ["PostgresProjectRegistry"]

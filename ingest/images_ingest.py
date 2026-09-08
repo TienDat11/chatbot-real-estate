@@ -25,7 +25,6 @@ from PIL import Image
 
 from ingest.config import settings
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = _REPO_ROOT / "ingest" / "image_captions_manifest.json"
 
@@ -80,17 +79,23 @@ async def ingest(conn: asyncpg.Connection) -> None:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     images = manifest["images"]
     r2_base = manifest["r2_public_base"].rstrip("/")
+    project_key = manifest.get("project_key") or "camellia"
 
     captions: list[str] = []
     for img in images:
         width, height, content_hash = _image_meta(img["source_file"])
-        url_cdn = f"{r2_base}/{img['r2_key']}"
+        raw_key = str(img["r2_key"]).lstrip("/")
+        prefix = f"images/{project_key}/"
+        object_key = (
+            raw_key if raw_key.startswith(prefix) else prefix + raw_key.split("images/", 1)[-1]
+        )
+        url_cdn = f"{r2_base}/{object_key}"
         await conn.execute(
             """
             INSERT INTO images
               (image_id, kind, title, caption, alt_text, url_cdn, width, height,
-               content_hash, status, source_file, linked_subject_key, metadata)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'published',$10,$11,$12)
+               content_hash, status, source_file, linked_subject_key, metadata, project_key)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'published',$10,$11,$12,$13)
             ON CONFLICT (image_id) DO UPDATE SET
               kind = EXCLUDED.kind,
               title = EXCLUDED.title,
@@ -104,6 +109,7 @@ async def ingest(conn: asyncpg.Connection) -> None:
               source_file = EXCLUDED.source_file,
               linked_subject_key = EXCLUDED.linked_subject_key,
               metadata = EXCLUDED.metadata,
+              project_key = EXCLUDED.project_key,
               updated_at = now()
             """,
             img["image_id"],
@@ -118,6 +124,7 @@ async def ingest(conn: asyncpg.Connection) -> None:
             img["source_file"],
             img["linked_subject_key"],
             json.dumps(img["metadata"], ensure_ascii=False),
+            project_key,
         )
         captions.append(img["caption"])
 

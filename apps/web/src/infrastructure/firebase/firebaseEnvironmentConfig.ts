@@ -27,11 +27,29 @@ export const FIREBASE_ENVIRONMENT_VARIABLE_NAMES = [
 ] as const;
 
 /**
+ * Static `process.env.NEXT_PUBLIC_*` member reads: bundlers (Turbopack/
+ * webpack) only inline NEXT_PUBLIC_* into the client bundle for literal
+ * member expressions, so dynamic `process.env[variableName]` lookups would
+ * always see an empty object in the browser.
+ */
+function readProcessFirebaseEnvironment(): Record<string, string | undefined> {
+  return {
+    NEXT_PUBLIC_FIREBASE_API_KEY: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+    NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+    NEXT_PUBLIC_FIREBASE_PROJECT_ID: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+    NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+    NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID:
+      process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+    NEXT_PUBLIC_FIREBASE_APP_ID: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+  };
+}
+
+/**
  * @param environment env record to read; injectable so unit tests can verify
  *   the missing-variable error without touching the real process env.
  */
 export function readFirebaseEnvironmentConfig(
-  environment: Record<string, string | undefined> = process.env
+  environment: Record<string, string | undefined> = readProcessFirebaseEnvironment()
 ): FirebaseEnvironmentConfig {
   const missingVariableNames = FIREBASE_ENVIRONMENT_VARIABLE_NAMES.filter(
     (variableName) => !environment[variableName]

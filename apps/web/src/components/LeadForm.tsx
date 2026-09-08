@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Checkbox, Form, Input, Modal } from "antd";
 import { CheckCircleFilled, InfoCircleFilled } from "@ant-design/icons";
 import { C, FS, RADIUS } from "@/lib/tokens";
@@ -9,8 +9,8 @@ import { LeadSubmitError, submitLead } from "@/lib/api";
 /** sessionStorage/localStorage key holding the accepted lead id (dup guard). */
 export const LEAD_ID_STORAGE_KEY = "ragre.lead_id";
 
-/** Vietnamese mobile number, after stripping separators (spaces , . -). */
-export const PHONE_PATTERN = /^(0|\+84)(3|5|7|8|9)\d{8}$/;
+/** Vietnamese mobile number, matching api/application/services/lead_service.py. */
+export const PHONE_PATTERN = /^(0|\+84)(3[2-9]|5[5-9]|7\d|8[1-9]|9\d)\d{7}$/;
 
 const PHONE_ERROR = "Số điện thoại chưa đúng. Ví dụ: 0905123456";
 const CONSENT_ERROR = "Anh/chị vui lòng đồng ý để chuyên viên gọi tư vấn.";
@@ -40,10 +40,18 @@ export interface LeadFormProps {
   projectName?: string;
   /** Best-effort context note (<= 200 chars) built from the latest answer facts. */
   notePrefill?: string;
+  /**
+   * Server-minted anon token (secure wave §5.6) so POST /api/lead can bind
+   * the one-time quota bonus to the same identity that chatted.
+   */
+  anonToken?: string;
   /** ESC / overlay / close button: never blocks the chat. */
   onClose: () => void;
-  /** Fired after the backend accepted the lead (parent hides the CTA chip). */
-  onSuccess: (leadId: number) => void;
+  /**
+   * Fired after the backend accepted the lead; carries quota_bonus_granted
+   * (§5.5, 0 when the identity already got its one-time bonus).
+   */
+  onSuccess: (leadId: number, quotaBonusGranted: number) => void;
 }
 
 /**
@@ -51,10 +59,14 @@ export interface LeadFormProps {
  * navy accent, explicit consent, no dead ends (every failure keeps the typed
  * values and offers a retry or a close).
  */
-export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, notePrefill, onClose, onSuccess }: LeadFormProps) {
+export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, notePrefill, anonToken, onClose, onSuccess }: LeadFormProps) {
   const [form] = Form.useForm<LeadFormValues>();
   const [status, setStatus] = useState<LeadFormStatus>("form");
   const [submitting, setSubmitting] = useState(false);
+  // Re-entrancy guard (ISSUE-7): a second activation racing the pending POST
+  // must never fire a second lead creation — the antd loading state is only
+  // cosmetic for synthetic/duplicate events.
+  const submittingRef = useRef(false);
   const [networkError, setNetworkError] = useState<string | null>(null);
   const [willCallMinutes, setWillCallMinutes] = useState(5);
 
@@ -62,11 +74,18 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
   useEffect(() => {
     if (!open) return;
     form.resetFields();
-    setStatus("form");
-    setNetworkError(null);
+    // Defer the local reset until after the modal-open commit. This avoids a
+    // synchronous cascading render while preserving the clean reopen state.
+    const resetId = window.setTimeout(() => {
+      setStatus("form");
+      setNetworkError(null);
+    }, 0);
+    return () => window.clearTimeout(resetId);
   }, [open, form]);
 
   const handleFinish = async (values: LeadFormValues) => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     setNetworkError(null);
     try {
@@ -74,6 +93,7 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
         project_key: projectKey,
         session_id: sessionId || undefined,
         device_id: deviceId || undefined,
+        anon_token: anonToken || undefined,
         name: values.name?.trim() || undefined,
         phone: normalizePhone(values.phone),
         consent: values.consent === true,
@@ -86,7 +106,7 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
       }
       setWillCallMinutes(result.will_call_within_minutes);
       setStatus("success");
-      onSuccess(result.lead_id);
+      onSuccess(result.lead_id, result.quota_bonus_granted ?? 0);
     } catch (err) {
       if (err instanceof LeadSubmitError && err.kind === "duplicate") {
         setStatus("duplicate");
@@ -96,6 +116,7 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
         setNetworkError("Không gửi được yêu cầu. Vui lòng thử lại.");
       }
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -257,21 +278,39 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
               )}
             </div>
 
-            <Button
-              type="primary"
-              htmlType="submit"
-              block
-              loading={submitting}
-              style={{
-                height: 52,
-                fontSize: 17,
-                fontWeight: 600,
-                borderRadius: RADIUS.btn,
-                background: C.primary,
-              }}
-            >
-              {submitting ? "Đang kết nối..." : networkError ? "Thử lại" : "Nhận tư vấn miễn phí"}
-            </Button>
+            {/* Residual issue (dismissal contract): every form state carries an
+                explicit Đóng control next to the primary action, so dismissal
+                never depends on spotting the small X or pressing ESC. */}
+            <div style={{ display: "flex", gap: 10 }}>
+              <Button
+                onClick={onClose}
+                disabled={submitting}
+                style={{
+                  height: 52,
+                  fontSize: 16,
+                  fontWeight: 600,
+                  borderRadius: RADIUS.btn,
+                  flexShrink: 0,
+                }}
+              >
+                Đóng
+              </Button>
+              <Button
+                type="primary"
+                htmlType="submit"
+                block
+                loading={submitting}
+                style={{
+                  height: 52,
+                  fontSize: 17,
+                  fontWeight: 600,
+                  borderRadius: RADIUS.btn,
+                  background: C.primary,
+                }}
+              >
+                {submitting ? "Đang kết nối..." : networkError ? "Thử lại" : "Nhận tư vấn miễn phí"}
+              </Button>
+            </div>
           </Form>
         </>
       )}

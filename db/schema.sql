@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS facts (
   campaign_key  TEXT REFERENCES campaigns(campaign_key),  -- price/policy MUST belong to a campaign (B7)
   value_num     NUMERIC,
   value_text    TEXT,
-  unit          TEXT NOT NULL CHECK (unit IN ('vnd', 'm2', 'pct', 'months', 'days', 'enum')),
+  unit          TEXT NOT NULL CHECK (unit IN ('vnd', 'm2', 'pct', 'months', 'days', 'enum', 'm', 'count')),
   quality       TEXT NOT NULL DEFAULT 'exact' CHECK (quality IN ('exact', 'range', 'approx')),
   range_min     NUMERIC,
   range_max     NUMERIC,
@@ -384,6 +384,49 @@ GRANT SELECT ON documents, document_chunks, campaigns, fact_subjects, facts,
   project_config TO ro_query;
 GRANT EXECUTE ON FUNCTION v_unit_offers_as_of(date) TO ro_query;
 GRANT USAGE ON SCHEMA public TO ro_query;
+
+-- 14. Anonymous quota and IP rate-limit registry.
+-- The 2026-08-24 migration expands legacy quota rows in place; these definitions
+-- describe the post-migration shape and must not be used to reset live data.
+CREATE TABLE IF NOT EXISTS anon_quota (
+  identity_key TEXT NOT NULL,
+  project_key TEXT NOT NULL DEFAULT '',
+  used_turns INTEGER NOT NULL DEFAULT 0,
+  bonus_turns INTEGER NOT NULL DEFAULT 0,
+  granted_turns INTEGER NOT NULL DEFAULT 0,
+  bonus_granted BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (identity_key, project_key)
+);
+CREATE INDEX IF NOT EXISTS idx_anon_quota_updated_at ON anon_quota (updated_at);
+
+CREATE TABLE IF NOT EXISTS quota_reservations (
+  reservation_id UUID PRIMARY KEY,
+  identity_key TEXT NOT NULL,
+  project_key TEXT NOT NULL,
+  allowance_class TEXT NOT NULL CHECK (allowance_class IN ('base', 'bonus', 'granted', 'unlimited')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_quota_reservations_identity_project
+  ON quota_reservations (identity_key, project_key, created_at);
+
+CREATE TABLE IF NOT EXISTS quota_grant_audit (
+  request_id TEXT PRIMARY KEY,
+  identity_key TEXT NOT NULL,
+  project_key TEXT NOT NULL DEFAULT '',
+  granted_turns INTEGER NOT NULL CHECK (granted_turns > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ip_rate_limit (
+  ip INET NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('query', 'mint', 'lead', 'fcm-register')),
+  window_start TIMESTAMPTZ NOT NULL,
+  counter INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (ip, kind, window_start)
+);
+CREATE INDEX IF NOT EXISTS idx_ip_rate_limit_window_start ON ip_rate_limit (window_start);
 
 -- Deploy notes:
 -- 1. Requires PostgreSQL 16.6+ (hard requirement for LightRAG 1.5.6).

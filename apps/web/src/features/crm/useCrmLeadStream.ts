@@ -11,7 +11,7 @@
  * Optimistic patches cover status PATCH latency and self-release once the
  * mirror catches up.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Lead } from "@/domain/crm/lead";
 import type {
   RealtimeChannelError,
@@ -46,7 +46,7 @@ export interface UseCrmLeadStreamResult {
   clearOptimisticLeadPatch: (leadId: string) => void;
 }
 
-export function useCrmLeadStream(
+function useCrmLeadStreamInternal(
   options: UseCrmLeadStreamOptions
 ): UseCrmLeadStreamResult {
   const { leadRealtimeService } = useRealtimeContainer();
@@ -54,7 +54,9 @@ export function useCrmLeadStream(
 
   // Keep the callback in a ref so changing it never resubscribes the stream.
   const onIncomingLeadRef = useRef(options.onIncomingLead);
-  onIncomingLeadRef.current = options.onIncomingLead;
+  useEffect(() => {
+    onIncomingLeadRef.current = options.onIncomingLead;
+  }, [options.onIncomingLead]);
 
   const [snapshotLeads, setSnapshotLeads] = useState<readonly Lead[]>([]);
   const [connectionState, setConnectionState] =
@@ -65,11 +67,7 @@ export function useCrmLeadStream(
   >(new Map());
 
   useEffect(() => {
-    setSnapshotLeads([]);
-    setError(null);
-    setConnectionState("connecting");
-
-    let seenLeadIds = new Set<string>();
+    const seenLeadIds = new Set<string>();
     let firstSnapshot = true;
     const handle = leadRealtimeService.streamLeadsForCrm(
       { assignedSalesFirebaseUid: assignedSalesFirebaseUidFilter },
@@ -81,12 +79,18 @@ export function useCrmLeadStream(
             // Only leads that appeared since the previous snapshot are "live
             // arrivals"; the first snapshot is the page-load baseline.
             const incomingIds = collectIncomingLeadIds(seenLeadIds, leads);
-            for (const lead of selectNotifiableIncomingLeads(leads, incomingIds)) {
+            for (const lead of selectNotifiableIncomingLeads(
+              leads,
+              incomingIds,
+              assignedSalesFirebaseUidFilter
+            )) {
               onIncomingLeadRef.current?.(lead);
             }
           }
           firstSnapshot = false;
-          seenLeadIds = new Set(leads.map((lead) => lead.id));
+          for (const lead of leads) {
+            seenLeadIds.add(lead.id);
+          }
           setSnapshotLeads(leads);
         },
         onConnectionStateChanged: setConnectionState,
@@ -121,13 +125,16 @@ export function useCrmLeadStream(
     if (projection.caughtUpLeadIds.length === 0) {
       return;
     }
-    setOptimisticPatches((previous) => {
-      const next = new Map(previous);
-      for (const leadId of projection.caughtUpLeadIds) {
-        next.delete(leadId);
-      }
-      return next;
-    });
+    const releaseId = window.setTimeout(() => {
+      setOptimisticPatches((previous) => {
+        const next = new Map(previous);
+        for (const leadId of projection.caughtUpLeadIds) {
+          next.delete(leadId);
+        }
+        return next;
+      });
+    }, 0);
+    return () => window.clearTimeout(releaseId);
   }, [projection.caughtUpLeadIds]);
 
   const applyOptimisticLeadPatch = useCallback(
@@ -159,4 +166,27 @@ export function useCrmLeadStream(
     applyOptimisticLeadPatch,
     clearOptimisticLeadPatch,
   };
+}
+
+const CrmLeadStreamContext = createContext<UseCrmLeadStreamResult | null>(null);
+
+export function CrmLeadStreamProvider({
+  options,
+  children,
+}: {
+  options: UseCrmLeadStreamOptions;
+  children: ReactNode;
+}) {
+  const stream = useCrmLeadStreamInternal(options);
+  return createElement(CrmLeadStreamContext.Provider, { value: stream }, children);
+}
+
+export function useCrmLeadStream(
+  options: UseCrmLeadStreamOptions
+): UseCrmLeadStreamResult {
+  return useCrmLeadStreamInternal(options);
+}
+
+export function useSharedCrmLeadStream(): UseCrmLeadStreamResult | null {
+  return useContext(CrmLeadStreamContext);
 }

@@ -9,6 +9,12 @@ export default defineConfig({
     environment: "node",
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     setupFiles: ["./vitest.setup.ts"],
+    // Heavy jsdom+antd component tests (ChatPage, LeadForm, TrainWorkspace,
+    // CRM) blow the 5s default when 70+ files compete for CPU workers: the
+    // same suite is green with --no-file-parallelism. Budget absorbs the
+    // scheduling jitter without touching any assertion.
+    testTimeout: 20000,
+    hookTimeout: 20000,
   },
   resolve: {
     alias: {

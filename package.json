@@ -14,7 +14,10 @@
     "build": "npm run build -w @rag-ragre/web",
     "build:packages": "npm run build:libs && npm run build -w @rag-ragre/web",
     "typecheck": "npm run typecheck -w @rag-ragre/web",
-    "lint": "npm run lint -w @rag-ragre/web"
+    "lint": "npm run lint -w @rag-ragre/web",
+    "deploy:be": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-be.ps1 -EnvName prod",
+    "deploy:be:staging": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-be.ps1 -EnvName staging",
+    "deploy:be:dry": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy-be.ps1 -EnvName prod -DryRun"
   },
   "engines": {
     "node": ">=20"

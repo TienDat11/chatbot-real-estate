@@ -46,6 +46,20 @@ export interface ConsentFlags {
 export interface Lead {
   /** Opaque document id (backend-computed HMAC of the phone); never parsed. */
   id: string;
+  /**
+   * Opaque backend customer identity (HMAC of the phone) mirrored as a FIELD
+   * since ADR-0004, when the mirror document id stopped being the customer
+   * digest. The reveal/consent routes key by it. Legacy documents predate the
+   * field — their document id WAS the customer digest, so consumers fall back
+   * to `id` when this is absent. Never parsed, never displayed.
+   */
+  customerId?: string;
+  /**
+   * Numeric Postgres leads.id mirrored by the backend when available. The
+   * conversation/status routes key by this int; mirror documents written
+   * before the field existed lack it, so it stays optional.
+   */
+  leadId?: number;
   /** Registry key of the project the lead belongs to (story 10.1, G1). */
   projectKey: string;
   /** Anonymous persistent device id (D7); PII once paired with a phone. */
