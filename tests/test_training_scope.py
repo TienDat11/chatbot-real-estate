@@ -409,6 +409,7 @@ def test_sse_training_grounding_and_cta_suppression(
     client, monkeypatch, local_rsa_jwk, offline_auth_seams
 ) -> None:
     """Grounded training turn: shared project-corpus sources ride through, zero CTA."""
+    install_training_seams(monkeypatch)
 
     async def ok_run(self, query, session_id, as_of, history, on_event=None, **kwargs):
         if on_event is not None:

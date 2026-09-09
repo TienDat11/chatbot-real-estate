@@ -12,6 +12,11 @@ import {
   splitBlocks,
   stripMarkdownMarkers,
 } from "./inline-format";
+import { normalizeMath } from "./math-format";
+
+// Colors mirror the app's premium proptech tokens (apps/web/src/lib/tokens.ts):
+// navy #0E2A47 primary, warm border neutral #E9E2D6. The ui package stays
+// dependency-free, so hex values are kept in sync by convention.
 
 // Colors mirror the app's premium proptech tokens (apps/web/src/lib/tokens.ts):
 // navy #0E2A47 primary, warm border neutral #E9E2D6. The ui package stays
@@ -257,8 +262,9 @@ function ParagraphBlock({ block }: { block: string }) {
 }
 
 function renderInline(text: string) {
-  // Preprocess with boldPrice so VND amounts get the navy <strong> treatment.
-  const processed = boldPrice(text);
+  // Normalize first (math → Unicode, stray HTML → markdown), THEN boldPrice,
+  // so price-bolding sees clean digits, never a `$…$`/`\text{}` span.
+  const processed = boldPrice(normalizeMath(text));
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}

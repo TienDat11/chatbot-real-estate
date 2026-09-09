@@ -9,7 +9,7 @@ QuotaRecordStore protocol, so an alternate backend swaps one adapter.
     Allowance rule (spec §4): a turn may be consumed iff
     used_turns < effective_cap + bonus_turns, i.e. remaining_turns always equals
     max(0, effective_cap - used_turns + bonus_turns). The base cap arrives from
-    config per call: anonymous=3, registered customer=5, sales=10; admin
+    config per call: anonymous=10, registered customer=5, sales=10; admin
     bypasses this service. The granted anonymous bonus lives in the row, which
     keeps the check self-contained inside one atomic statement (spec §4 R2).
 """

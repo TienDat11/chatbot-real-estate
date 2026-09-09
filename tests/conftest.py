@@ -6,6 +6,12 @@ plus a fake PG sales mapping. Tests opt in by naming the fixture; nothing is
 autouse, so DB-free tests that never touch staff auth pay zero setup cost.
 """
 
+collect_ignore_glob = ["e2e/*"]
+# ``tests/e2e`` runs against live FE+BE dev servers (``pytest -m e2e``) and
+# needs ``playwright`` from the repo venv; CI and the default local run use
+# ``-m "not e2e"``, so collection must skip the directory entirely — importing
+# those modules without playwright installed crashes collection.
+
 import asyncio
 
 import pytest
@@ -15,6 +21,34 @@ from tests._auth_seams import (
     local_rsa_jwk,  # noqa: F401
     offline_auth_seams,  # noqa: F401
 )
+
+# The document-registry suites build the production corpus from
+# ``data/_processed`` (510MB of derived PDF artifacts, gitignored — it never
+# ships in CI or the Cloud Run image). Skip those modules when the corpus is
+# absent instead of failing collection on missing JSON files; run them on a
+# machine that has the corpus built (the dev workstation).
+_CORPUS_GATED_MODULES = frozenset(
+    {
+        "test_camellia_docs.py",
+        "test_soleil_docs.py",
+        "test_sales_kit.py",
+        "test_ingest_wave_f.py",
+        "test_validate_project.py",
+    }
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    import os
+
+    corpus_root = os.path.join(os.path.dirname(__file__), os.pardir, "data", "_processed")
+    if os.path.isdir(corpus_root):
+        return
+    skip = pytest.mark.skip(reason="requires data/_processed corpus (not built here)")
+    for item in items:
+        if os.path.basename(item.fspath.strpath) in _CORPUS_GATED_MODULES:
+            item.add_marker(skip)
+
 
 
 @pytest.fixture(autouse=True, scope="module")

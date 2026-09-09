@@ -2,17 +2,62 @@
  * Inline + block formatting helpers for AnswerBlocks (Story 5.6).
  * Pure functions — unit-testable without a DOM.
  */
+import { mapOutsideCode } from "./math-format";
 
 /**
  * BoldPrice regex: wraps VND amounts like "2,1 tỷ", "500 triệu", "1.2 tỷ/m²".
  * [RV-18/08] The "tr" shorthand must NOT match "5 trường học" — a negative
  * lookahead guards against a following Vietnamese letter.
+ * [global] `g` so EVERY amount on a line is bolded, not just the first.
  */
 export const BOLD_PRICE_RE =
-  /(\d{1,3}(?:[.,]\d{1,3})*\s*(?:tỷ|triệu|trieu|tr(?=[^a-zà-ỹA-ZÀ-Ỹ]|$))(?:\s*\/\s*m²)?)/i;
+  /(\b\d{1,3}(?:[.,]\d{1,3})*\s*(?:tỷ|triệu|trieu|tr(?=[^a-zà-ỹA-ZÀ-Ỹ]|$))(?:\s*\/\s*m²)?)/gi;
 
+/**
+ * Wrap VND amounts in markdown `**bold**` so ReactMarkdown v9 (no rehype-raw)
+ * parses them into strong nodes. Guards:
+ * - code spans (`` `2 tỷ` ``) pass through verbatim via mapOutsideCode;
+ * - text already inside `**…**` is left alone (no double-bolding).
+ */
 export function boldPrice(text: string): string {
-  return text.replace(BOLD_PRICE_RE, (match) => `**${match}**`);
+  return mapOutsideCode(text, (plain) =>
+    plain
+      .split(/(\*\*[^*]+\*\*)/g)
+      .map((part) => (part.startsWith("**") && part.endsWith("**") ? part : part.replace(BOLD_PRICE_RE, (m) => `**${m}**`)))
+      .join(""),
+  );
+}
+
+/** A markdown thematic-break line: 3+ of -, * or _ with optional spaces. */
+export const THEMATIC_BREAK_LINE_RE = /^\s*(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/;
+
+/** Case-insensitive <br> tag variants: <br>, <br/>, <br />. */
+const BR_TAG_RE = /<br\s*\/?>/gi;
+
+/**
+ * [B2] Convert literal <br> tags the model emits into real line breaks.
+ * ReactMarkdown v9 without rehype-raw renders unknown HTML as inert raw
+ * text, so a `<br>` leaks visibly into the answer. Table lines (starting
+ * with `|`) must stay ONE line or the GFM row structure breaks, so inside
+ * them the break becomes a middle-dot bullet separator instead of `\n`.
+ * Pure string preprocessing — no HTML is injected, XSS surface unchanged.
+ */
+export function normalizeBrTags(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (!line.trimStart().startsWith("|")) return line.replace(BR_TAG_RE, "\n");
+      // Cells commonly hold bullet lists ("• A<br>• B"); the separator must
+      // not double up next to an existing bullet, so runs collapse to one.
+      return line.replace(BR_TAG_RE, " • ").replace(/(?:\s*•\s*){2,}/g, " • ");
+    })
+    .join("\n");
+}
+
+/** [B1] A block consisting only of thematic-break line(s) is a divider. */
+export function isDividerBlock(block: string): boolean {
+  const lines = block.trim().split("\n");
+  return lines.length > 0 && lines.every((l) => THEMATIC_BREAK_LINE_RE.test(l));
 }
 
 /** A markdown thematic-break line: 3+ of -, * or _ with optional spaces. */
@@ -168,7 +213,7 @@ export function hasEmbeddedTable(block: string): boolean {
 }
 
 export function isHeadingBlock(block: string): boolean {
-  return /^#{1,3}\s/.test(block.trim());
+  return /^#{1,6}\s/.test(block.trim());
 }
 
 export function isListBlock(block: string): boolean {

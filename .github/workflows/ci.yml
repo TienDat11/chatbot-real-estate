@@ -44,7 +44,14 @@ jobs:
       - name: Compile check (api, ingest)
         run: python -m compileall -q api ingest
 
+      # Unit tests (non-e2e) — media/CDN tests resolve URLs through the
+      # settings below. Synthetic placeholders (never real credentials): the
+      # real R2_PUBLIC_URL / IMAGE_CDN_PROJECT_MAP come from .env on the dev
+      # machine and from Secret Manager in production.
       - name: Unit tests (non-e2e)
+        env:
+          R2_PUBLIC_URL: https://pub-ci-dummy.r2.dev
+          IMAGE_CDN_PROJECT_MAP: '{"camellia":"https://cdn-ci-dummy.example"}'
         run: pytest -q -m "not e2e"
 
   web:

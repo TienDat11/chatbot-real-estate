@@ -28,6 +28,7 @@ from api.application.services.anon_identity import (
     verify_anonymous_identity_token,
 )
 from api.application.services.query_quota_gate import (
+    DEFAULT_ANONYMOUS_BASE_TURN_CAP,
     QUOTA_EXCEEDED_ERROR_CODE,
     QUOTA_STORE_UNAVAILABLE_ERROR_CODE,
     SALES_MAPPING_MISSING_ERROR_CODE,
@@ -42,6 +43,7 @@ from api.infrastructure import dependencies as dependency_injection
 from api.infrastructure.adapters import firebase_auth_jwks
 from api.infrastructure.ports.firebase_auth import VerifiedFirebaseUser
 from api.interfaces.api.main import create_app
+from tests._training_seams import install_training_seams
 
 PROJECT_ID = "sale-chat-bot-11e49"
 ISSUER = f"https://securetoken.google.com/{PROJECT_ID}"
@@ -212,6 +214,11 @@ def install_gate(monkeypatch, quota_store, gate_secret):
 
 @pytest_asyncio.fixture()
 async def client(monkeypatch, install_gate):
+    install_gate()
+    # Training-mode requests run the /query preflight, which resolves the
+    # project registry and chat history lazily — keep those offline so the
+    # suite never depends on a reachable PG.
+    install_training_seams(monkeypatch)
     install_gate()
     monkeypatch.setattr(
         "api.application.pipelines.conv_workflow.RagQueryPipelineConv",
@@ -652,7 +659,7 @@ async def test_invalid_firebase_token_remains_anonymous(monkeypatch, gate_secret
         project_key="camellia",
     )
     assert context.quota_payload()["is_authenticated"] is False
-    assert context.quota_payload()["cap"] == 3
+    assert context.quota_payload()["cap"] == DEFAULT_ANONYMOUS_BASE_TURN_CAP
 
 
 @pytest.mark.asyncio

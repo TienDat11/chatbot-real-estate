@@ -32,6 +32,7 @@ import {
 } from "@/lib/api";
 import type { DoneMeta } from "@/lib/api";
 import { firebaseQueryAuthToken } from "@/features/auth/queryAuthToken";
+import { linkAnonIdentityAfterLogin } from "@/features/auth/linkAnonAfterLogin";
 import { ASK_EVENT } from "@/lib/constants";
 import type { ChatMessage } from "@/components/MessageBubble";
 import { AccessibilityControls } from "@/components/AccessibilityControls";
@@ -1001,6 +1002,26 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
       return undefined;
     }
   }, [rememberAnonToken]);
+
+  // Multi-device identity (2026-09-09): whenever THIS device holds an anon
+  // token and a non-staff user is signed in, bind that anon identity to the
+  // account once per token (POST /api/auth/link-anon). Render-driven, like
+  // trainingAuthExpired: the auth?.user / anonToken deps make it fire for the
+  // mount-time storage restore AND for every self-heal mint through
+  // rememberAnonToken, in either arrival order (token first or sign-in
+  // first); the linkAnonTokenRef latch makes it once-per-token per mount.
+  // Backend outcome (idempotent 200, 409 rebind, 422, 503, network) is
+  // non-fatal: failures are logged inside the helper and the app continues
+  // exactly as before. Staff/training mounts never link (BE 403s staff).
+  const linkAnonTokenRef = useRef<string | null>(null);
+  useEffect(() => {
+    const user = auth?.user;
+    if (isStaff || isTraining || !user) return;
+    if (typeof anonToken !== "string" || anonToken.length === 0) return;
+    if (linkAnonTokenRef.current === anonToken) return;
+    linkAnonTokenRef.current = anonToken;
+    void linkAnonIdentityAfterLogin(user);
+  }, [auth?.user, anonToken, isStaff, isTraining]);
 
   const handleSend = useCallback(
     // `targetProjectKey`: explicit scope for a send issued DURING a project

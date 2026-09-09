@@ -127,3 +127,7 @@ def sales_bearer_headers(local_rsa_jwk: dict, uid: str = "uid-sales-mapped") -> 
     """Bearer header for a verified sales principal with an active mapping."""
     token = mint_id_token(local_rsa_jwk, base_claims(uid, "sales"))
     return {"Authorization": f"Bearer {token}"}
+
+def apply_offline_auth_seams(monkeypatch: pytest.MonkeyPatch, local_rsa_jwk: dict) -> None:
+    """Non-fixture twin of the offline_auth_seams fixture (direct-callable)."""
+    offline_auth_seams.__wrapped__(monkeypatch, local_rsa_jwk)

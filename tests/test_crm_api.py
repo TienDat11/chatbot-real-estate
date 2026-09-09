@@ -132,10 +132,14 @@ class FakeCrmLeadRepository(FakeLeadRepository):
         ):
             return []
         withdrawn: list[LeadRow] = []
+        # The PG adapter stamps every row of the UPDATE with one statement-time
+        # now(); the fake must share a single stamp per call or lead 92's
+        # timestamp drifts past lead 91's on millisecond boundaries.
+        stamp = datetime.now()
         for lead in customer_leads:
             lead = replace(
                 lead,
-                marketing_withdrawn_at=lead.marketing_withdrawn_at or datetime.now(),
+                marketing_withdrawn_at=lead.marketing_withdrawn_at or stamp,
                 consent_marketing=False,
                 reengage_at=None,
                 mirror_status="pending",

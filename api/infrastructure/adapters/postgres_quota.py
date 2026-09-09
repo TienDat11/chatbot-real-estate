@@ -169,20 +169,36 @@ class PostgresQuotaStore:
         return row is not None
 
     async def link_identity_atomically(self, anon_identity_key: str, firebase_uid: str) -> bool:
-        """Link once and merge quota usage/bonuses into the Firebase identity."""
+        """Link an anon device identity to its Firebase account, exactly once.
+
+        Multi-device model (2026-09-09): N anon keys map to one firebase_uid —
+        every device carries its own anon identity and links into the shared
+        account. Semantics:
+          * fresh (anon key, uid) pair -> insert, merge the device's quota
+            usage/history into the account identity exactly once, True;
+          * same pair already linked -> idempotent True (no re-merge, no
+            double-counted quota, no duplicate audit row);
+          * anon key already bound to a DIFFERENT uid -> False (the route
+            answers 409: rebinding a device to another account stays
+            fail-closed against quota farming).
+        """
         pool = await get_lead_pool()
         async with pool.acquire() as connection:
             async with connection.transaction():
-                row = await connection.fetchrow(
+                inserted = await connection.fetchval(
                     """INSERT INTO identity_links (anon_identity_key, firebase_uid)
                        VALUES ($1, $2)
-                       ON CONFLICT DO NOTHING
+                       ON CONFLICT (anon_identity_key) DO NOTHING
                        RETURNING anon_identity_key""",
                     anon_identity_key,
                     firebase_uid,
                 )
-                if row is None:
-                    return False
+                if inserted is None:
+                    linked = await connection.fetchval(
+                        "SELECT firebase_uid FROM identity_links WHERE anon_identity_key = $1",
+                        anon_identity_key,
+                    )
+                    return linked == firebase_uid
                 await connection.execute(
                     """INSERT INTO anon_quota
                        (identity_key, project_key, used_turns, bonus_turns,
