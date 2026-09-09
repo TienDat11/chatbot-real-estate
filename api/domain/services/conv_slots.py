@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
+from api import get_cfg
 from api.domain.entities.price_calc import extract_budget
 from api.infrastructure.dependencies import get_llm, model_for_role
 
@@ -32,6 +34,12 @@ def _clean_json(text: str) -> str:
     return t
 
 logger = logging.getLogger("api.conv_slots")
+
+# Slot-fill LLM budget (seconds). Env override wins even when the lru-cached
+# Settings are already warm — same precedence pattern as rag_leg.AQUERY_TIMEOUT_S.
+LLM_SLOT_FILL_TIMEOUT_S = float(
+    os.getenv("LLM_SLOT_FILL_TIMEOUT_S") or get_cfg("llm_slot_fill_timeout_s", 30.0)
+)
 
 # Plan §6.3 keyword sets (conv-specific; budget reuses price_calc).
 _BEDROOM_RE = re.compile(r"(\bstudio\b|\b[123]\s?pn\b|\b[123]\s?phòng ngủ\b)", re.IGNORECASE)
@@ -144,7 +152,12 @@ async def llm_slot_fill(query: str) -> "dict[str, Any]":
     model = model_for_role("extract")
     try:
         llm = get_llm()
-        text = await llm.complete(messages, json_mode=True, model=model, timeout=6.0)
+        text = await llm.complete(
+            messages,
+            json_mode=True,
+            model=model,
+            timeout=LLM_SLOT_FILL_TIMEOUT_S,
+        )
         data = json.loads(_clean_json(text))
         if not isinstance(data, dict):
             return {}

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, Modal, Typography } from "antd";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, Button, Modal, Typography } from "antd";
 import { CarOutlined, EnvironmentOutlined, UnorderedListOutlined } from "@ant-design/icons";
 import type { NearbyPlace } from "@rag-ragre/contracts";
 import {
@@ -10,6 +10,13 @@ import {
   type LineStringGeometry,
   type RouteDirections,
 } from "@/lib/routeDirections";
+import {
+  MAP_TILE_URL,
+  attributionForTileUrl,
+  createTileFailureTracker,
+  expandTileUrls,
+  isTileFetchError,
+} from "@/lib/mapTiles";
 // Required for maplibre markers (position: absolute, anchoring) and controls.
 // Without it markers render as static elements that stretch the canvas container.
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -45,7 +52,8 @@ function fmtDistance(m?: number): string {
 
 export interface MapPanelProps {
   places: NearbyPlace[];
-  project?: { lat: number; lng: number; name?: string };
+  /** Address text shown by the offline-tile fallback panel. */
+  project?: { lat: number; lng: number; name?: string; fullName?: string; address?: string };
   tileUrl?: string;
   placeZoom?: number;
   mode?: "map" | "list";
@@ -62,8 +70,8 @@ export const DEFAULT_PROJECT: { lat: number; lng: number; name: string } =
 /** Zoom used when the map opens and when the active project changes. */
 export const MAP_PROJECT_ZOOM = 13.5;
 
-const OSM_TILE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
-const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+// Tile URL + attribution live in src/lib/mapTiles.ts (env-overridable,
+// Vietnam-reachable default).
 
 // Stable ids for the client-side route overlay so a new route (or a project
 // change) can replace the previous polyline without leaking layers.
@@ -100,12 +108,12 @@ export function recenterForProject(
 }
 
 /* marker builders ------------------------------------------------------- */
-function projectMarkerElement(name: string): HTMLButtonElement {
+function projectMarkerElement(name: string, fullName = name): HTMLButtonElement {
   const el = document.createElement("button");
   el.type = "button";
   el.setAttribute("role", "button");
   el.setAttribute("aria-label", `Dự án ${name}`);
-  el.title = name;
+  el.title = fullName;
   el.style.cssText = `width:56px;height:56px;border-radius:50%;background:${NAVY};color:#fff;border:2px solid #fff;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 2px 6px rgba(31,70,168,.35);`;
   const star = document.createElement("span");
   star.style.cssText = "font-size:26px;line-height:1;display:inline-flex;pointer-events:none;";
@@ -125,9 +133,10 @@ function placeMarkerElement(p: NearbyPlace): HTMLButtonElement {
   return el;
 }
 
-function projectLabelElement(name: string): HTMLDivElement {
+export function projectLabelElement(name: string, fullName = name): HTMLDivElement {
   const el = document.createElement("div");
   el.textContent = name;
+  el.title = fullName;
   el.style.cssText = `font-size:14px;font-weight:700;color:#fff;background:${NAVY};border-radius:6px;padding:2px 8px;white-space:nowrap;pointer-events:none;box-shadow:0 1px 3px rgba(26,34,51,.3);`;
   return el;
 }
@@ -136,7 +145,7 @@ function projectLabelElement(name: string): HTMLDivElement {
 export function MapPanel({
   places,
   project = DEFAULT_PROJECT,
-  tileUrl = OSM_TILE,
+  tileUrl = MAP_TILE_URL,
   placeZoom = 16,
   mode: controlledMode,
   onModeChange,
@@ -178,6 +187,39 @@ export function MapPanel({
 
   // Bumped when the map style finishes loading so the marker effect re-runs.
   const [markerTick, setMarkerTick] = useState(0);
+  // Latched when repeated tile fetch failures prove the basemap CDN is
+  // unreachable; swaps the blank gray canvas for an address fallback panel.
+  const [tilesFailed, setTilesFailed] = useState(false);
+
+  const removeRouteOverlay = useCallback(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (map.getLayer(ROUTE_LAYER_ID)) map.removeLayer(ROUTE_LAYER_ID);
+    if (map.getSource(ROUTE_SOURCE_ID)) map.removeSource(ROUTE_SOURCE_ID);
+  }, []);
+
+  const drawRouteLine = useCallback(async (geometry: LineStringGeometry) => {
+    const map = mapRef.current;
+    if (!map) return;
+    const maplibre = await import("maplibre-gl");
+    removeRouteOverlay();
+    map.addSource(ROUTE_SOURCE_ID, {
+      type: "geojson",
+      data: geometry as unknown as GeoJSON.GeoJSON,
+    });
+    map.addLayer({
+      id: ROUTE_LAYER_ID,
+      type: "line",
+      source: ROUTE_SOURCE_ID,
+      layout: { "line-cap": "round", "line-join": "round" },
+      paint: { "line-color": NAVY, "line-width": 5, "line-opacity": 0.9 },
+    });
+    const [firstLng, firstLat] = geometry.coordinates[0];
+    const bounds = new maplibre.LngLatBounds([firstLng, firstLat], [firstLng, firstLat]);
+    geometry.coordinates.forEach(([lng, lat]) => bounds.extend([lng, lat]));
+    bounds.extend([project.lng, project.lat]);
+    map.fitBounds(bounds, { padding: 48, duration: 700 });
+  }, [project.lng, project.lat, removeRouteOverlay]);
 
   /* Build the Map once (client-only dynamic import). */
   useEffect(() => {
@@ -193,8 +235,12 @@ export function MapPanel({
       }
       return;
     }
+    // A rebuilt map (project change / mode switch) starts a fresh failure
+    // slate so the fallback never lingers over a healthy new instance.
+    setTilesFailed(false);
     if (mapRef.current) return;
     let disposed = false;
+    const tracker = createTileFailureTracker();
     (async () => {
       const maplibre = await import("maplibre-gl");
       if (disposed) return;
@@ -202,13 +248,27 @@ export function MapPanel({
         container: el,
         style: {
           version: 8,
-          sources: { osm: { type: "raster", tiles: [tileUrl], tileSize: 256, attribution: OSM_ATTR } },
+          sources: {
+            osm: {
+              type: "raster",
+              tiles: expandTileUrls(tileUrl),
+              tileSize: 256,
+              attribution: attributionForTileUrl(tileUrl),
+            },
+          },
           layers: [{ id: "osm", type: "raster", source: "osm" }],
         },
         center: [project.lng, project.lat],
         zoom: MAP_PROJECT_ZOOM,
       });
       mapRef.current = map;
+      // Offline / blocked tile CDN: every failed request surfaces as an
+      // "error" event; past the threshold the fallback panel replaces the
+      // permanently gray canvas.
+      map.on("error", (event: unknown) => {
+        if (!isTileFetchError(event)) return;
+        if (tracker.record()) setTilesFailed(true);
+      });
       // Wait for style so isStyleLoaded() is true for the marker effect.
       map.on("load", () => {
         setMarkerTick((t) => t + 1);
@@ -228,7 +288,7 @@ export function MapPanel({
         pendingRouteRef.current = null;
       }
     };
-  }, [tileUrl, project.lng, project.lat, mode]);
+  }, [tileUrl, project.lng, project.lat, mode, drawRouteLine]);
 
   /* Recenter when the active project changes. The map object is reused (not
      rebuilt), so the camera + route overlay must move explicitly: two active
@@ -242,7 +302,7 @@ export function MapPanel({
     markersRef.current = [];
     if (popupRef.current) { popupRef.current.remove(); popupRef.current = null; }
     recenterForProject(map as RecenterMapLike, project, MAP_PROJECT_ZOOM);
-  }, [project.lat, project.lng, mode]);
+  }, [project, mode]);
 
   /* Recreate markers when data/filter/map become ready. */
   useEffect(() => {
@@ -257,11 +317,11 @@ export function MapPanel({
       const mapRefHere = mapRef.current;
       if (!mapRefHere) return;
       markersRef.current.push(
-        new maplibre.Marker({ element: projectMarkerElement(project.name ?? "The Camellia") })
+        new maplibre.Marker({ element: projectMarkerElement(project.name ?? "The Camellia", project.fullName) })
           .setLngLat([project.lng, project.lat]).addTo(mapRefHere)
       );
       markersRef.current.push(
-        new maplibre.Marker({ element: projectLabelElement(project.name ?? "The Camellia") })
+        new maplibre.Marker({ element: projectLabelElement(project.name ?? "The Camellia", project.fullName) })
           .setLngLat([project.lng, project.lat + 0.0012]).addTo(mapRefHere)
       );
       filtered.forEach((p, i) => {
@@ -386,41 +446,9 @@ export function MapPanel({
     setDirectionsOpen(false);
   }
 
-  function removeRouteOverlay() {
-    const map = mapRef.current;
-    if (!map) return;
-    if (map.getLayer(ROUTE_LAYER_ID)) map.removeLayer(ROUTE_LAYER_ID);
-    if (map.getSource(ROUTE_SOURCE_ID)) map.removeSource(ROUTE_SOURCE_ID);
-  }
-
   function clearRoute() {
     removeRouteOverlay();
     setRouteBadge(null);
-  }
-
-  // Draws the OSRM polyline and fits the view to the whole route so the
-  // visitor can read the full path, not just the tail.
-  async function drawRouteLine(geometry: LineStringGeometry) {
-    const map = mapRef.current;
-    if (!map) return;
-    const maplibre = await import("maplibre-gl");
-    removeRouteOverlay();
-    map.addSource(ROUTE_SOURCE_ID, {
-      type: "geojson",
-      data: geometry as unknown as GeoJSON.GeoJSON,
-    });
-    map.addLayer({
-      id: ROUTE_LAYER_ID,
-      type: "line",
-      source: ROUTE_SOURCE_ID,
-      layout: { "line-cap": "round", "line-join": "round" },
-      paint: { "line-color": NAVY, "line-width": 5, "line-opacity": 0.9 },
-    });
-    const [firstLng, firstLat] = geometry.coordinates[0];
-    const bounds = new maplibre.LngLatBounds([firstLng, firstLat], [firstLng, firstLat]);
-    geometry.coordinates.forEach(([lng, lat]) => bounds.extend([lng, lat]));
-    bounds.extend([project.lng, project.lat]);
-    map.fitBounds(bounds, { padding: 48, duration: 700 });
   }
 
   return (
@@ -538,6 +566,51 @@ export function MapPanel({
         ) : (
           <>
             <div ref={containerRef} style={{ position: "absolute", inset: 0, filter: "saturate(0.85) contrast(1.02)" }} />
+            {tilesFailed && (
+              <div
+                role="status"
+                aria-live="polite"
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 2,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 16,
+                  background: "#F6F3EC",
+                }}
+              >
+                <div
+                  style={{
+                    maxWidth: 420,
+                    width: "100%",
+                    textAlign: "center",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <EnvironmentOutlined style={{ fontSize: 32, color: NAVY }} aria-hidden="true" />
+                  <Typography.Text strong style={{ fontSize: 17, color: INK }}>
+                    {project.name ?? "Dự án"}
+                  </Typography.Text>
+                  {project.address && (
+                    <Typography.Text style={{ fontSize: 14, color: MUTED }}>
+                      {project.address}
+                    </Typography.Text>
+                  )}
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="Bản đồ tạm thời không tải được"
+                    description="Không kết nối được máy chủ bản đồ từ thiết bị này. Vui lòng thử lại sau."
+                    style={{ width: "100%", textAlign: "left" }}
+                  />
+                </div>
+              </div>
+            )}
             {routeBadge && (
               <div
                 style={{

@@ -16,6 +16,7 @@ until that lands this route is the operator entry point.
 
 from __future__ import annotations
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -25,17 +26,23 @@ from api.application.pipelines.reengage_workflow import (
 )
 from api.application.ports.embedding import NeedProfileEmbeddingNotConfiguredError
 from api.application.ports.reengage_queue import ReengageQueueNotConfiguredError
+from api.application.ports.sales_provisioning import SalesProvisioner, SalesProvisioningError
 from api.application.ports.staff_audit import (
     STAFF_AUDIT_ACTION_REENGAGE_RUN_TRIGGERED,
+    STAFF_AUDIT_ACTION_SALES_CREATED,
+    STAFF_AUDIT_ACTION_SALES_RECONCILIATION,
+    STAFF_AUDIT_ACTION_SALES_STATUS_UPDATED,
     StaffAuditStore,
 )
 from api.application.services.staff_audit_service import record_staff_action
+from api.infrastructure.adapters.postgres_leads import get_lead_pool
 from api.infrastructure.dependencies import (
     get_need_profile_embedding,
     get_reengage_queue_store,
+    get_sales_provisioner,
     get_staff_audit_store,
 )
-from api.infrastructure.ports.leads import get_lead_repository
+from api.infrastructure.ports.leads import LeadRepository, SalesRow, get_lead_repository
 from api.interfaces.api.deps import AuthenticatedPrincipal, require_admin, require_sales
 
 
@@ -77,6 +84,287 @@ class ReengageRunResponse(BaseModel):
 
 admin_session_router = APIRouter(prefix="/api/admin", tags=["admin-session"])
 sales_session_router = APIRouter(prefix="/api/sales", tags=["sales-session"])
+
+
+class AdminSalesCreateRequest(BaseModel):
+    firebase_uid: str = Field(..., min_length=1, max_length=128)
+    full_name: str = Field(..., min_length=1, max_length=120)
+    phone: str | None = Field(default=None, max_length=20)
+    priority: int = Field(default=0, ge=0, le=100)
+
+
+class AdminSalesPatchRequest(BaseModel):
+    is_active: bool
+
+
+class AdminSalesBindRequest(BaseModel):
+    firebase_uuid: str = Field(..., min_length=1, max_length=128)
+
+
+class AdminSalesResponse(BaseModel):
+    id: int
+    firebase_uid: str | None
+    full_name: str
+    phone: str | None
+    is_active: bool
+    priority: int
+
+
+def _sales_response(row: SalesRow) -> AdminSalesResponse:
+    return AdminSalesResponse(
+        id=row.id,
+        firebase_uid=row.firebase_uid,
+        full_name=row.full_name,
+        phone=row.phone,
+        is_active=row.is_active,
+        priority=row.priority,
+    )
+
+
+@admin_session_router.get("/sales", response_model=list[AdminSalesResponse])
+async def list_admin_sales(
+    _: AuthenticatedPrincipal = Depends(require_admin),
+    repo: LeadRepository = Depends(get_lead_repository),
+) -> list[AdminSalesResponse]:
+    return [_sales_response(row) for row in await repo.list_sales()]
+
+
+@admin_session_router.post("/sales", response_model=AdminSalesResponse, status_code=201)
+async def create_admin_sales(
+    payload: AdminSalesCreateRequest,
+    principal: AuthenticatedPrincipal = Depends(require_admin),
+    repo: LeadRepository = Depends(get_lead_repository),
+    provisioner: SalesProvisioner = Depends(get_sales_provisioner),
+    audit_store: StaffAuditStore = Depends(get_staff_audit_store),
+) -> AdminSalesResponse:
+    existing = await repo.get_sales_for_admin(payload.firebase_uid)
+    if existing is not None and existing.is_active:
+        return _sales_response(existing)
+
+    provisioned = False
+    try:
+        provisioning_result = await provisioner.provision(
+            firebase_uid=payload.firebase_uid, full_name=payload.full_name
+        )
+        # Compensate whenever this request elevated Firebase access, including
+        # retries that repair an inactive existing PG mapping. Preserve access
+        # that was already legitimately active before this request.
+        provisioned = not bool(getattr(provisioning_result, "pre_existing_active", False))
+        row = await repo.create_sales_mapping(
+            firebase_uid=payload.firebase_uid,
+            full_name=payload.full_name,
+            phone=payload.phone,
+            priority=payload.priority,
+        )
+    except SalesProvisioningError as exc:
+        if exc.reconciliation_failed:
+            await record_staff_action(
+                audit_store,
+                principal=principal,
+                action=STAFF_AUDIT_ACTION_SALES_RECONCILIATION,
+                detail={
+                    "firebase_uid": payload.firebase_uid,
+                    "outcome": "failed",
+                    "stage": "firebase",
+                },
+            )
+        raise HTTPException(status_code=503, detail="Sales provisioning unavailable") from exc
+    except Exception as original:
+        if provisioned:
+            try:
+                await provisioner.revoke(firebase_uid=payload.firebase_uid)
+            except Exception:
+                await record_staff_action(
+                    audit_store,
+                    principal=principal,
+                    action=STAFF_AUDIT_ACTION_SALES_RECONCILIATION,
+                    detail={
+                        "firebase_uid": payload.firebase_uid,
+                        "outcome": "failed",
+                        "stage": "postgres",
+                    },
+                )
+                raise HTTPException(
+                    status_code=503, detail="Sales mapping unavailable"
+                ) from original
+            await record_staff_action(
+                audit_store,
+                principal=principal,
+                action=STAFF_AUDIT_ACTION_SALES_RECONCILIATION,
+                detail={
+                    "firebase_uid": payload.firebase_uid,
+                    "outcome": "compensated",
+                    "stage": "postgres",
+                },
+            )
+        raise HTTPException(status_code=503, detail="Sales mapping unavailable") from original
+    await record_staff_action(
+        audit_store,
+        principal=principal,
+        action=STAFF_AUDIT_ACTION_SALES_CREATED,
+        detail={"firebase_uid": payload.firebase_uid},
+    )
+    return _sales_response(row)
+
+
+@admin_session_router.post("/sales/{sales_id}/bind-firebase-uid", response_model=AdminSalesResponse)
+async def bind_admin_sales_firebase_uid(
+    sales_id: int,
+    payload: AdminSalesBindRequest,
+    principal: AuthenticatedPrincipal = Depends(require_admin),
+    audit_store: StaffAuditStore = Depends(get_staff_audit_store),
+) -> AdminSalesResponse:
+    """Bind a Firebase identity to an existing sales row by its numeric id."""
+    pool = await get_lead_pool()
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """UPDATE sales SET firebase_uid = $2, updated_at = now()
+                   WHERE id = $1 AND firebase_uid IS NULL
+                   RETURNING id, access_key, full_name, role, phone, is_active,
+                             priority, last_seen_at, firebase_uid,
+                             NULL::timestamptz AS last_assigned_at""",
+                sales_id,
+                payload.firebase_uuid,
+            )
+    except asyncpg.exceptions.UniqueViolationError as exc:
+        raise HTTPException(status_code=409, detail="Firebase UID already mapped") from exc
+    if row is None:
+        async with pool.acquire() as conn:
+            exists = await conn.fetchval("SELECT 1 FROM sales WHERE id = $1", sales_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Sales account not found")
+        raise HTTPException(status_code=409, detail="Sales account already has a Firebase UID")
+
+    sales_row = SalesRow(**dict(row))
+    await record_staff_action(
+        audit_store,
+        principal=principal,
+        action=STAFF_AUDIT_ACTION_SALES_RECONCILIATION,
+        detail={"sales_id": sales_id, "firebase_uid": payload.firebase_uuid, "outcome": "bound"},
+    )
+    return _sales_response(sales_row)
+
+
+@admin_session_router.patch("/sales/{firebase_uid}", response_model=AdminSalesResponse)
+async def patch_admin_sales(
+    firebase_uid: str,
+    payload: AdminSalesPatchRequest,
+    principal: AuthenticatedPrincipal = Depends(require_admin),
+    repo: LeadRepository = Depends(get_lead_repository),
+    provisioner: SalesProvisioner = Depends(get_sales_provisioner),
+    audit_store: StaffAuditStore = Depends(get_staff_audit_store),
+) -> AdminSalesResponse:
+    if not payload.is_active:
+        # Revoke the external access gate first. PG must never remain active
+        # when Firebase or Firestore still permits sales access.
+        existing = await repo.get_sales_for_admin(firebase_uid)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Sales account not found")
+        try:
+            await provisioner.revoke(firebase_uid=firebase_uid)
+            row = await repo.set_sales_active(firebase_uid, is_active=False)
+            if row is None:
+                raise RuntimeError("sales mapping disappeared")
+        except SalesProvisioningError as exc:
+            await record_staff_action(
+                audit_store,
+                principal=principal,
+                action=STAFF_AUDIT_ACTION_SALES_STATUS_UPDATED,
+                detail={
+                    "firebase_uid": firebase_uid,
+                    "is_active": False,
+                    "outcome": "failed",
+                    "stage": "firebase",
+                },
+            )
+            raise HTTPException(status_code=503, detail="Sales revocation unavailable") from exc
+        except Exception as exc:
+            # If PG could not be made inactive, restore the external gates so
+            # the account is not left in a split state.
+            try:
+                await provisioner.provision(firebase_uid=firebase_uid, full_name=existing.full_name)
+            except SalesProvisioningError:
+                pass
+            await record_staff_action(
+                audit_store,
+                principal=principal,
+                action=STAFF_AUDIT_ACTION_SALES_STATUS_UPDATED,
+                detail={
+                    "firebase_uid": firebase_uid,
+                    "is_active": False,
+                    "outcome": "failed",
+                    "stage": "postgres",
+                },
+            )
+            raise HTTPException(status_code=503, detail="Sales status update unavailable") from exc
+    else:
+        existing = await repo.get_sales_for_admin(firebase_uid)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Sales account not found")
+        try:
+            await provisioner.provision(firebase_uid=firebase_uid, full_name=existing.full_name)
+            row = await repo.set_sales_active(firebase_uid, is_active=True)
+            if row is None:
+                raise RuntimeError("sales mapping disappeared")
+        except SalesProvisioningError as exc:
+            try:
+                await repo.set_sales_active(firebase_uid, is_active=False)
+            except Exception:
+                pass
+            await record_staff_action(
+                audit_store,
+                principal=principal,
+                action=STAFF_AUDIT_ACTION_SALES_STATUS_UPDATED,
+                detail={
+                    "firebase_uid": firebase_uid,
+                    "is_active": True,
+                    "outcome": "failed",
+                    "stage": "firebase",
+                },
+            )
+            raise HTTPException(status_code=503, detail="Sales provisioning unavailable") from exc
+        except Exception as exc:
+            try:
+                await provisioner.revoke(firebase_uid=firebase_uid)
+            except SalesProvisioningError:
+                pass
+            try:
+                await repo.set_sales_active(firebase_uid, is_active=False)
+            except Exception:
+                pass
+            await record_staff_action(
+                audit_store,
+                principal=principal,
+                action=STAFF_AUDIT_ACTION_SALES_STATUS_UPDATED,
+                detail={
+                    "firebase_uid": firebase_uid,
+                    "is_active": True,
+                    "outcome": "failed",
+                    "stage": "postgres",
+                },
+            )
+            raise HTTPException(status_code=503, detail="Sales status update unavailable") from exc
+
+    await record_staff_action(
+        audit_store,
+        principal=principal,
+        action=STAFF_AUDIT_ACTION_SALES_STATUS_UPDATED,
+        detail={"firebase_uid": firebase_uid, "is_active": payload.is_active},
+    )
+    return _sales_response(row)
+
+
+@admin_session_router.post("/projects/{project_key}/publish", status_code=501)
+async def publish_project(_: AuthenticatedPrincipal = Depends(require_admin)) -> None:
+    raise HTTPException(status_code=501, detail="Project publishing orchestration is not available")
+
+
+@admin_session_router.post("/projects/{project_key}/unpublish", status_code=501)
+async def unpublish_project(_: AuthenticatedPrincipal = Depends(require_admin)) -> None:
+    raise HTTPException(
+        status_code=501, detail="Project unpublishing orchestration is not available"
+    )
 
 
 @admin_session_router.get("/session", response_model=AuthenticatedSessionResponse)

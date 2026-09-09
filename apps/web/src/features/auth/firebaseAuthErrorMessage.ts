@@ -20,6 +20,8 @@ const VIETNAMESE_AUTH_ERROR_MESSAGES: Record<string, string> = {
   "auth/network-request-failed": "Lỗi kết nối mạng. Vui lòng kiểm tra internet và thử lại.",
   "auth/operation-not-allowed":
     "Đăng nhập bằng email/mật khẩu chưa được bật. Vui lòng liên hệ quản trị viên.",
+  "auth/email-already-in-use": "Email này đã được sử dụng. Vui lòng dùng email khác hoặc đăng nhập.",
+  "auth/EMAIL_EXISTS": "Email này đã được sử dụng. Vui lòng dùng email khác hoặc đăng nhập.",
 };
 
 /** Fallback for unmapped codes so the user never sees a raw SDK message. */

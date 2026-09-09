@@ -59,14 +59,20 @@ export function collectIncomingLeadIds(
 
 /**
  * From a merged snapshot, picks the leads that should raise a toast: freshly
- * arrived (id in incomingIds) and still untouched (status "new").
+ * arrived (id in incomingIds) and assigned to the current sales user. Admins
+ * retain the existing "new"-status notification behavior.
  */
 export function selectNotifiableIncomingLeads(
   leads: readonly Lead[],
-  incomingLeadIds: readonly string[]
+  incomingLeadIds: readonly string[],
+  assignedSalesFirebaseUidFilter: string | null = null
 ): Lead[] {
   const incomingIdSet = new Set(incomingLeadIds);
   return leads.filter(
-    (lead) => incomingIdSet.has(lead.id) && lead.workflowStatus === "new"
+    (lead) =>
+      incomingIdSet.has(lead.id) &&
+      (assignedSalesFirebaseUidFilter === null
+        ? lead.workflowStatus === "new"
+        : lead.assignedSalesFirebaseUid === assignedSalesFirebaseUidFilter)
   );
 }

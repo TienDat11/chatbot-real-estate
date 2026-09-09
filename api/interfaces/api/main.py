@@ -31,8 +31,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from api import get_cfg
+from api.application.services.token_coalescer import TokenCoalescer
 from api.domain.value_objects.constants import (
     MAX_QUERY_LENGTH,
+    SSE_EVENT_TOKEN,
     SSE_STREAM_TIMEOUT_CODE,
     SSE_STREAM_TIMEOUT_MESSAGE,
     SSE_TOTAL_TIMEOUT_S,
@@ -185,6 +187,27 @@ _SSE_RESPONSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 def _frame(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+# Retryability of the terminal SSE `error` codes. A timeout or an internal
+# crash is transient and the FE can safely re-offer the turn; an L1 rejection
+# is a deterministic policy refusal where retrying the same text only repeats
+# the rejection. Unknown codes default to non-retryable (conservative).
+_ERROR_RETRYABLE: dict[str, bool] = {
+    SSE_STREAM_TIMEOUT_CODE: True,
+    "INTERNAL": True,
+    "REJECTED": False,
+}
+
+
+def _error_payload(code: str, message: str) -> dict:
+    """Build an SSE `error` frame body: code + message + additive retryable.
+
+    Additive only — the existing code/message fields are unchanged so current
+    FE consumers keep working; `retryable` lets them distinguish a re-sendable
+    timeout/crash from a hard rejection without string-matching the message.
+    """
+    return {"code": code, "message": message, "retryable": _ERROR_RETRYABLE.get(code, False)}
 
 
 def _normalize_history(history: list[HistoryTurn] | None) -> list[dict[str, str]]:
@@ -551,6 +574,11 @@ async def _sse_stream(
         req.answer_mode == "training",
     )
     yield _frame("ack", ack_data)
+    # Coalesce consecutive token frames at the transport seam. Sanitization has
+    # already run upstream (conv_workflow._emit_sanitized_stream), so buffering
+    # the released spans here merges frames without altering the concatenated
+    # text — the stream/done equivalence invariant is preserved.
+    coalescer = TokenCoalescer()
     started_at = asyncio.get_event_loop().time()
     deadline = started_at + total_timeout_s
     first_event_at: float | None = None
@@ -586,12 +614,17 @@ async def _sse_stream(
                 except asyncio.QueueEmpty:
                     event = "__timeout__"
                     data = {}
+                # Release any buffered token span before the terminal frame so a
+                # partial answer is never stranded behind the error/done.
+                _pending = coalescer.flush()
+                if _pending:
+                    yield _frame(SSE_EVENT_TOKEN, {"text": _pending})
                 if event in ("__done__", "__rejected__", "__crashed__"):
                     if event == "__rejected__":
-                        yield _frame("error", {"code": "REJECTED", "message": data["message"]})
+                        yield _frame("error", _error_payload("REJECTED", data["message"]))
                         yield _frame("done", {})
                     elif event == "__crashed__":
-                        yield _frame("error", {"code": "INTERNAL", "message": "internal error"})
+                        yield _frame("error", _error_payload("INTERNAL", "internal error"))
                         yield _frame("done", {})
                     else:
                         yield _frame("done", data)
@@ -606,7 +639,7 @@ async def _sse_stream(
                     )
                     yield _frame(
                         "error",
-                        {"code": SSE_STREAM_TIMEOUT_CODE, "message": SSE_STREAM_TIMEOUT_MESSAGE},
+                        _error_payload(SSE_STREAM_TIMEOUT_CODE, SSE_STREAM_TIMEOUT_MESSAGE),
                     )
                     yield _frame("done", {})
                 break
@@ -642,17 +675,35 @@ async def _sse_stream(
                     bool(data.get("answer_truncated")),
                 )
             if event in ("__done__", "__rejected__", "__crashed__"):
+                # Force-release buffered tokens before the terminal frame so the
+                # concatenated stream still equals done.answer.
+                _pending = coalescer.flush()
+                if _pending:
+                    yield _frame(SSE_EVENT_TOKEN, {"text": _pending})
                 if event == "__rejected__":
-                    yield _frame("error", {"code": "REJECTED", "message": data["message"]})
+                    yield _frame("error", _error_payload("REJECTED", data["message"]))
                     yield _frame("done", {})
                 elif event == "__crashed__":
                     # Stable, non-leaky error code (mirrors the JSON 500 path).
-                    yield _frame("error", {"code": "INTERNAL", "message": "internal error"})
+                    yield _frame("error", _error_payload("INTERNAL", "internal error"))
                     yield _frame("done", {})
                 else:
                     yield _frame("done", data)
                 break
-            yield _frame(event, data)
+            if event == SSE_EVENT_TOKEN and isinstance(data.get("text"), str):
+                # Buffer sanitized deltas; emit only when the coalescer says the
+                # span is due, collapsing many LLM deltas into one frame.
+                _span = coalescer.feed(data["text"])
+                if _span:
+                    yield _frame(SSE_EVENT_TOKEN, {"text": _span})
+            else:
+                # Non-token metadata frame (routing/places/sources/facts/images):
+                # flush pending tokens first so every preceding character reaches
+                # the client before this frame, preserving the event ordering.
+                _pending = coalescer.flush()
+                if _pending:
+                    yield _frame(SSE_EVENT_TOKEN, {"text": _pending})
+                yield _frame(event, data)
     finally:
         try:
             if request is not None and await request.is_disconnected():

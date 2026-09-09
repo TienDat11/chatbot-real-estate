@@ -1,0 +1,32 @@
+# Staging env template for ragre-api-staging (Cloud Run env-vars-file).
+# Copy to env-staging.yaml (repo root, UNTRACKED) and fill every placeholder.
+# Deploy gate: scripts/deploy-be.ps1 -Env staging fails fast while any __...__ placeholder remains.
+#
+# HARD RULE: staging MUST have its own database. The staging service runs the
+# same lead/audit write paths as prod; pointing POSTGRES_HOST at the production
+# Supabase pooler would mutate real data. Do not copy prod DB coordinates here.
+# CORS_ORIGINS staging: usually the firebaseapp/web.app origins plus a dev origin;
+# must be a single-line quoted JSON array (scalar string crashes pydantic list[str]).
+APP_ENV: staging
+POSTGRES_HOST: __STAGING_DB_HOST__
+POSTGRES_PORT: 5432
+POSTGRES_USER: __STAGING_DB_USER__
+POSTGRES_DATABASE: __STAGING_DB_NAME__
+POSTGRES_MAX_CONNECTIONS: 10
+LIGHTRAG_WORKSPACE: ragre_staging
+EMBEDDING_DIM: 1024
+RAG_PREWARM_ENABLED: true
+CORS_ORIGINS: '["https://sale-chat-bot-11e49.web.app","https://sale-chat-bot-11e49.firebaseapp.com","https://ragre-web-aj6vbt6m3q-as.a.run.app"]'
+EMBEDDING_BINDING: gemini
+EMBEDDING_MODEL: gemini-embedding-001
+RERANK_BINDING: aibox
+RERANK_BASE_URL: https://api.jina.ai
+RERANK_MODEL: jina-reranker-v3.5
+ENABLE_RERANK: true
+LLM_BASE_URL: https://generativelanguage.googleapis.com/v1beta/openai/
+LLM_MODEL_REWRITE: gemini-3.6-flash
+LLM_MODEL_EXTRACT: gemini-3.6-flash
+LLM_MODEL_ANSWER: gemini-3.6-flash
+LLM_MODEL_ANSWER_PRO: gemini-3.6-flash
+LLM_MODEL_GUARD: gemini-3.6-flash
+LLM_REASONING_EFFORT: low

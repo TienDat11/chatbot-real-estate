@@ -34,6 +34,14 @@ logger = logging.getLogger("api.adapters.firebase_auth_jwks")
 # JWKS cache freshness window; Google rotates keys, so re-fetch at least this often.
 _JWKS_CACHE_TTL_SECONDS = 3600
 
+# Local clock vs Google's signer clock can skew; without this grace window a
+# freshly minted ID token is rejected as "not yet valid (iat)" and every staff
+# route 401s. Live E2E measured 12.6 s of drift on a Windows host (local behind
+# Google), which the original 10 s window did not cover; 60 s absorbs realistic
+# NTP lag while still rejecting genuinely premature tokens, and it only ever
+# widens exp/nbf acceptance by the same bounded seconds.
+_TOKEN_CLOCK_LEEWAY_SECONDS = 60
+
 # Shared HTTP client only; the JWKS key cache is per-verifier-instance state.
 _jwks_http_client: httpx.AsyncClient | None = None
 
@@ -117,6 +125,7 @@ class FirebaseAuthJwksVerifier:
                 algorithms=["RS256"],
                 audience=self.audience,
                 issuer=self.issuer,
+                leeway=_TOKEN_CLOCK_LEEWAY_SECONDS,
             )
         except FirebaseAuthTokenInvalid:
             raise

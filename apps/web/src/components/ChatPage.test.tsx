@@ -15,7 +15,13 @@
  * structurally (no timers, no flakiness).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+
+// ChatCanvas reads useRouter for routed project switches; these tests mount
+// without a Next app context, so the router is a structural no-op double.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}));
 
 vi.mock("@/components/MapPanel", () => ({
   MapPanel: () => <div data-testid="map-stub" />,
@@ -30,6 +36,7 @@ vi.mock("@/components/LeadForm", () => ({
 
 import { ChatPage } from "@/components/ChatPage";
 import { PROJECT_KEY_STORAGE } from "@/features/chat/identity";
+import { ASK_EVENT } from "@/lib/constants";
 
 const PICKER_TITLE = "Chọn dự án để được tư vấn";
 
@@ -89,16 +96,19 @@ describe("ChatPage ProjectPicker open latency (change-project button)", () => {
     // projects fetch here, which left this query empty for seconds.
     fireEvent.click(screen.getByRole("button", { name: /Đổi dự án/i }));
     expect(screen.getByText(PICKER_TITLE)).toBeTruthy();
-    // Instant content from the static fallback catalogue (never an empty body).
-    expect(screen.getByText(/The Camellia Sơn Trà/i)).toBeTruthy();
-    expect(screen.getByText(/The Soleil Đà Nẵng/i)).toBeTruthy();
+    // Instant content from the static fallback catalogue (never an empty
+    // body). Scoped to the dialog: the header ALSO shows the active project
+    // name now, so a document-wide query would match several nodes.
+    const picker = within(screen.getByRole("dialog"));
+    expect(picker.getByText("The Camellia")).toBeTruthy();
+    expect(picker.getByText("The Soleil")).toBeTruthy();
 
     // The background refresh lands inside the ALREADY-open popup.
     await act(async () => {
       projectsDeferred.resolve(jsonResponse(ENDPOINT_PROJECTS));
     });
     await waitFor(() =>
-      expect(screen.getAllByText(/The Camellia Sơn Trà/i).length).toBeGreaterThan(0)
+      expect(screen.getAllByText(/The Camellia/).length).toBeGreaterThan(0)
     );
     // Popup was never closed/reopened across the refresh.
     expect(screen.getByText(PICKER_TITLE)).toBeTruthy();
@@ -127,5 +137,60 @@ describe("ChatPage ProjectPicker open latency (change-project button)", () => {
       const opts = screen.getAllByRole("option", { name: /The Soleil Đà Nẵng/i });
       expect(opts.some((o) => o.getAttribute("aria-selected") === "true")).toBe(true);
     });
+  });
+
+  it("re-sends a PROJECT_SCOPE-pending question against the NEWLY picked project", async () => {
+    // Regression (review MAJOR): applyProjectSwitch used to call
+    // handleSend(pending) right after setProjectKey, but the handleSend
+    // closure still captured the OLD projectKey — the resent query carried
+    // the old scope and its message pair landed in the old bucket, so the
+    // answer "disappeared" behind the newly shown project.
+    window.sessionStorage.setItem("ragre.hello_shown", "1"); // skip mount greeting
+    const queryBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/query")) {
+          queryBodies.push(JSON.parse(String(init?.body)));
+          if (queryBodies.length === 1) {
+            // First ask arrives with no chosen project: backend answers 422
+            // PROJECT_SCOPE and the UI parks the question for a re-send.
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  ok: false,
+                  error: { code: "PROJECT_SCOPE", message: "Chọn dự án." },
+                  projects: ENDPOINT_PROJECTS.projects,
+                },
+                422
+              )
+            );
+          }
+          return Promise.resolve(
+            new Response(
+              'event: ack\ndata: {}\n\nevent: done\ndata: {"answer":"OK","confidence":"HIGH"}\n\n'
+            )
+          );
+        }
+        if (url.includes("/api/anon/token")) return Promise.resolve(jsonResponse({}, 200));
+        return Promise.resolve(jsonResponse(ENDPOINT_PROJECTS));
+      })
+    );
+
+    render(<ChatPage />);
+    act(() => {
+      document.dispatchEvent(new CustomEvent(ASK_EVENT, { detail: "Giá bao nhiêu?" }));
+    });
+
+    // The 422 opens the picker instead of a dead-end error toast.
+    await screen.findByText(PICKER_TITLE);
+    fireEvent.click(screen.getByRole("option", { name: /The Soleil Đà Nẵng/i }));
+
+    await waitFor(() => expect(queryBodies.length).toBe(2));
+    expect(queryBodies[0].project_key).toBe("camellia");
+    // THE PIN: the resend carries the NEW key — the stale closure sent
+    // "camellia" here.
+    expect(queryBodies[1].project_key).toBe("soleil");
   });
 });

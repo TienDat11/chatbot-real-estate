@@ -4,21 +4,19 @@
  */
 import type { Lead, LeadWorkflowStatus } from "@/domain/crm/lead";
 
-/** Filter criteria for the rejected-leads toolbar (RejectedFilter.tsx). */
-export interface RejectedLeadsFilterCriteria {
-  /** Exact project key, or null for "every subscribed project". */
-  projectKey: string | null;
-  /** Case-insensitive substring on the stored rejection reason; null = any. */
-  rejectionReason: string | null;
+/**
+ * Date-window criteria for the leads toolbar (RejectedFilter.tsx). The window
+ * is always active and applies to every status; it filters on reengage_at
+ * (the re-contact schedule), never on created_at.
+ */
+export interface LeadToolbarFilterCriteria {
   /** Inclusive ISO calendar-date window on reengage_at; null = unbounded. */
   reengageWindowFromIsoDate: string | null;
   reengageWindowToIsoDate: string | null;
 }
 
-/** Criteria with nothing set — every rejected lead matches. */
-export const EMPTY_REJECTED_LEADS_FILTER: RejectedLeadsFilterCriteria = {
-  projectKey: null,
-  rejectionReason: null,
+/** Criteria with nothing set — every lead matches the window. */
+export const EMPTY_LEAD_TOOLBAR_FILTER: LeadToolbarFilterCriteria = {
   reengageWindowFromIsoDate: null,
   reengageWindowToIsoDate: null,
 };
@@ -29,9 +27,9 @@ function isoCalendarDateOf(isoInstant: string | null): string | null {
 }
 
 /** True when the lead's reengage_at day falls inside the window (inclusive). */
-function matchesReengageWindow(
+export function matchesReengageWindow(
   lead: Lead,
-  criteria: RejectedLeadsFilterCriteria
+  criteria: LeadToolbarFilterCriteria
 ): boolean {
   const windowUnbounded =
     criteria.reengageWindowFromIsoDate === null && criteria.reengageWindowToIsoDate === null;
@@ -58,34 +56,17 @@ function matchesReengageWindow(
   return true;
 }
 
-/** True when every non-null criterion matches the rejected lead. */
-export function matchesRejectedLeadsFilter(
-  lead: Lead,
-  criteria: RejectedLeadsFilterCriteria
-): boolean {
-  // "lost" is the domain's rejection state (PG CHECK vocabulary); a lost lead
-  // without a stored reason is still shown in the rejected view.
-  if (lead.workflowStatus !== "lost") {
-    return false;
-  }
-  if (criteria.projectKey !== null && lead.projectKey !== criteria.projectKey) {
-    return false;
-  }
-  if (criteria.rejectionReason !== null && criteria.rejectionReason.trim() !== "") {
-    const storedReason = (lead.rejectionReason ?? "").toLowerCase();
-    if (!storedReason.includes(criteria.rejectionReason.trim().toLowerCase())) {
-      return false;
-    }
-  }
-  return matchesReengageWindow(lead, criteria);
-}
-
-/** Leaves only rejected leads matching the toolbar criteria. */
-export function filterRejectedLeads(
+/**
+ * Leaves only leads whose reengage_at falls inside the toolbar window. An
+ * unbounded window keeps everything; a requested window drops leads without a
+ * re-contact schedule. Status-independent by design — compose with
+ * filterLeadsByWorkflowStatus for the full toolbar chain.
+ */
+export function filterLeadsByReengageWindow(
   leads: readonly Lead[],
-  criteria: RejectedLeadsFilterCriteria
+  criteria: LeadToolbarFilterCriteria
 ): Lead[] {
-  return leads.filter((lead) => matchesRejectedLeadsFilter(lead, criteria));
+  return leads.filter((lead) => matchesReengageWindow(lead, criteria));
 }
 
 /** Leaves only leads in the given workflow status; null keeps everything. */

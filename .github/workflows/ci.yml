@@ -113,8 +113,7 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      # NOTE: if CORS_ORIGINS contains commas it must be escaped (\x2C)
-      # because comma is the --set-env-vars separator.
+      # Use gcloud's alternate delimiter because CORS_ORIGINS contains commas.
       - name: Deploy to Cloud Run
         run: >-
           gcloud run deploy ragre-api
@@ -125,5 +124,5 @@ jobs:
           --no-cpu-throttling
           --timeout=360
           --startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080
-          --set-secrets "POSTGRES_PASSWORD:latest,ANON_IDENTITY_SECRET:latest,LEAD_MIRROR_HMAC_SECRET:latest,LLM_API_KEY:latest,EMBEDDING_API_KEY:latest,RERANK_API_KEY:latest,FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY:latest,R2_SECRET_ACCESS_KEY:latest"
-          --set-env-vars "APP_ENV=prod,POSTGRES_HOST=aws-1-ap-southeast-1.pooler.supabase.com,POSTGRES_PORT=5432,POSTGRES_USER=postgres.wlvxhmzjyomtzwboehsd,POSTGRES_DATABASE=postgres,POSTGRES_MAX_CONNECTIONS=10,EMBEDDING_DIM=1024,RAG_PREWARM_ENABLED=true,CORS_ORIGINS=${{ vars.CORS_ORIGINS }},EMBEDDING_BINDING=gemini,RERANK_BINDING=aibox"
+          --set-secrets "POSTGRES_PASSWORD=POSTGRES_PASSWORD:latest,ANON_IDENTITY_SECRET=ANON_IDENTITY_SECRET:latest,LEAD_MIRROR_HMAC_SECRET=LEAD_MIRROR_HMAC_SECRET:latest,LLM_API_KEY=LLM_API_KEY:latest,EMBEDDING_API_KEY=EMBEDDING_API_KEY:latest,RERANK_API_KEY=RERANK_API_KEY:latest,FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY=FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest"
+          --set-env-vars '^@^APP_ENV=prod@POSTGRES_HOST=aws-1-ap-southeast-1.pooler.supabase.com@POSTGRES_PORT=5432@POSTGRES_USER=postgres.wlvxhmzjyomtzwboehsd@POSTGRES_DATABASE=postgres@POSTGRES_MAX_CONNECTIONS=10@LIGHTRAG_WORKSPACE=ragre_mvp@EMBEDDING_DIM=1024@RAG_PREWARM_ENABLED=true@EMBEDDING_BINDING=gemini@EMBEDDING_MODEL=gemini-embedding-001@RERANK_BINDING=aibox@RERANK_BASE_URL=https://api.jina.ai@RERANK_MODEL=jina-reranker-v3.5@ENABLE_RERANK=true@LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/@LLM_MODEL_REWRITE=gemini-3.6-flash@LLM_MODEL_EXTRACT=gemini-3.6-flash@LLM_MODEL_ANSWER=gemini-3.6-flash@LLM_MODEL_ANSWER_PRO=gemini-3.6-flash@LLM_MODEL_GUARD=gemini-3.6-flash@LLM_MODEL_NL2SQL=gemini-3.6-flash@LLM_REASONING_EFFORT=low@CORS_ORIGINS=["https://sale-chat-bot-11e49.web.app", "https://sale-chat-bot-11e49.firebaseapp.com"]'

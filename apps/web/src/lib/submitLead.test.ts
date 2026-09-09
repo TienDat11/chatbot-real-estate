@@ -38,6 +38,21 @@ describe("submitLead", () => {
     );
   });
 
+  it("sends X-Device-Id header from the payload device_id and keeps device_id in the body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ lead_id: 2, will_call_within_minutes: 5 }, 201));
+    vi.stubGlobal("fetch", fetchMock);
+    const payload = { ...PAYLOAD, device_id: "device-abc" };
+    await submitLead(payload);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/lead",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "Content-Type": "application/json", "X-Device-Id": "device-abc" }),
+        body: JSON.stringify(payload),
+      })
+    );
+  });
+
   it("throws LeadSubmitError kind=duplicate with status 409 on 409", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ detail: "duplicate" }, 409)));
     const promise = submitLead(PAYLOAD);

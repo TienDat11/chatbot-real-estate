@@ -9,8 +9,9 @@ enforcement stay in the workflow step where it is testable without Firestore.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -40,3 +41,12 @@ class ReengageQueueStore(Protocol):
     async def save_queue_entries(self, entries: Sequence[ReengageQueueEntry]) -> None: ...
 
     async def load_attempt_counts_by_customer_id(self) -> dict[str, int]: ...
+
+    async def cancel_queue_entries_for_customer(self, customer_id: str) -> None:
+        """Remove every queued re-approach suggestion for one customer.
+
+        Called when a customer withdraws marketing consent so the dashboard
+        never surfaces "gợi ý tiếp cận lại" for someone who opted out. The
+        store is a suggestion list only — a failure to cancel must not fail
+        the withdrawal itself (the PG consent gate already re-filters).
+        """

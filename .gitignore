@@ -69,6 +69,8 @@ __pycache__/
 _bmad/
 skills-lock.json
 .mcp.json
+.mimosa/
+.zcode/
 
 # --- deepseek-harness (DSH) orchestration config (custom layer, khong push) ---
 .dsh/
@@ -76,6 +78,39 @@ skills-lock.json
 
 # evidence / report artifacts (KHÔNG đẩy lên git)
 camellia-report-full.png
+
+# root QA evidence screenshots / diagnostics (KHÔNG đẩy lên git — root-only patterns, app assets untouched)
+/R*.png
+/_tmp_embed_soleil.py
+/ingest/_tmp_*
+_tmp_diag/
+/_tmp_diag/
+/_tmp_envcheck.py
+/_tmp_emails.txt
+/baseline-login.png
+/fix_popup_delay_*.png
+/qa_viewport_*.png
+/qa_final_*.png
+/qa_soleil_*.png
+/sales-chat-*.png
+/scenario*.png
+/query-response-body.txt
+/qc_gate_*
+/qa_audit_*
+/*.out
+/*.xml
+/.ruff-*.txt
+/build-fe2.out
+/fe_*.out
+/frontend-*.diff
+/git_status.txt
+/security-search.txt
+/_tmp_probe.py
+/_tmp_search.py
+_probe*
+/_tmp_ports_probe.py
+/apps/web/src/components/chatpage_hits.txt
+/evidence_issue8/*
 
 # --- internal planning / docs (KHÔNG đẩy lên git — chỉ code) ---
 .claude/
@@ -94,5 +129,23 @@ uploads/
 db/backups/
 *.dump
 
+# migration pre-snapshots (DB snapshot JSON — never commit; keeps migration SQL tracked)
+db/migrations/_snapshot_*.json
+
 # --- local tooling (ffmpeg static builds, etc.) ---
 tools/
+# --- local generated evidence and scratch files ---
+/*.tmp
+/*.diff
+/*.out
+/*.xml
+/*.log
+/*.png
+/ValueError
+/_debug_*.py
+/_search.py
+/focused-*.txt
+/firebase-*-audit.tmp
+# Keep local env files out of git; env-*.yaml files are passed to gcloud locally.
+/env-prod.yaml
+/env-staging.yaml

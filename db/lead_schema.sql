@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS sales (
   full_name     TEXT        NOT NULL,
   role          TEXT,
   phone         TEXT,
+  firebase_uid  TEXT,                 -- Identity Toolkit account mapped by provisioning (issue 4F); NULL for pre-Firebase rows
   is_active     BOOLEAN     NOT NULL DEFAULT true,
   priority      INT         NOT NULL DEFAULT 0,
   last_seen_at  TIMESTAMPTZ,
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS sales (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_sales_full_name ON sales (full_name);
 CREATE INDEX IF NOT EXISTS idx_sales_active ON sales (is_active) WHERE is_active;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sales_firebase_uid ON sales (firebase_uid) WHERE firebase_uid IS NOT NULL;
 
 -- 2. leads table — khách để lại SĐT
 CREATE TABLE IF NOT EXISTS leads (
@@ -35,7 +37,7 @@ CREATE TABLE IF NOT EXISTS leads (
   budget_vnd            NUMERIC(20,0),
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   status                TEXT        NOT NULL DEFAULT 'new'
-    CHECK (status IN ('new','assigned','called','callback','no_answer','booked','lost','expired')),
+    CHECK (status IN ('new','assigned','called','callback','callback_required','call_completed','booked','lost','no_answer','expired')),
   assigned_sales_id     BIGINT REFERENCES sales(id),
   lock_expires_at       TIMESTAMPTZ,
   escal_count           INT         NOT NULL DEFAULT 0,
@@ -78,6 +80,14 @@ CREATE TABLE IF NOT EXISTS sales_assignment_log (
 
 CREATE INDEX IF NOT EXISTS idx_sal_log_lead ON sales_assignment_log (lead_id);
 CREATE INDEX IF NOT EXISTS idx_sal_sales ON sales_assignment_log (sales_id);
+-- Atomic reassignment support (see 2026-08-26-atomic-lead-reassignment.sql):
+-- composite (lead_id, sales_id) for the tried-sales probe and a filtered
+-- per-sales recency index for LRU candidate ordering.
+CREATE INDEX IF NOT EXISTS idx_sal_log_lead_sales
+  ON sales_assignment_log (lead_id, sales_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_sal_sales_assign_recency
+  ON sales_assignment_log (sales_id, created_at DESC)
+  WHERE action IN ('assign', 'escalate');
 
 -- 3b. staff_audit_log — durable audit trail of staff mutations (story 9.5).
 -- Actor identity comes from the verified Firebase principal; detail JSONB

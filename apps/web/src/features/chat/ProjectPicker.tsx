@@ -10,6 +10,7 @@ import {
   sortActiveProjects,
   projectDisplayLocation,
   projectDisplayName,
+  projectShortName,
   type ActiveProject,
 } from "./activeProjects";
 
@@ -35,6 +36,8 @@ export interface ProjectPickerProps {
    * dismissal, so the customer always picks before any query runs.
    */
   force?: boolean;
+  /** Optional account action shown without changing or ending the session. */
+  loginHref?: string;
 }
 
 /**
@@ -55,6 +58,7 @@ export function ProjectPicker({
   onSelect,
   onClose,
   force = false,
+  loginHref,
 }: ProjectPickerProps) {
   const sorted = useMemo(() => sortActiveProjects(projects), [projects]);
 
@@ -90,6 +94,11 @@ export function ProjectPicker({
           />
         ))}
       </div>
+      {loginHref ? (
+        <Button type="link" block href={loginHref} style={{ marginTop: 12, minHeight: 44 }}>
+          Đăng nhập lại
+        </Button>
+      ) : null}
       {!force && (
         <Button
           block
@@ -124,7 +133,8 @@ function ProjectCard({
   onSelect: (key: string) => void;
 }) {
   const hot = project.is_hot === true;
-  const name = projectDisplayName(project);
+  const name = projectShortName(project);
+  const fullName = projectDisplayName(project);
   const location = projectDisplayLocation(project) ?? project.ten_phap_ly;
   const cover = useProjectCover(project.project_key);
 
@@ -133,6 +143,7 @@ function ProjectCard({
       type="button"
       role="option"
       aria-selected={selected}
+      aria-label={fullName}
       onClick={() => onSelect(project.project_key)}
       className="project-card card-in"
       style={{
@@ -178,7 +189,7 @@ function ProjectCard({
           }}
         >
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {name}
+              <span title={fullName}>{name}</span>
           </span>
           {hot && (
             <span

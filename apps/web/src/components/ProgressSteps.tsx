@@ -1,5 +1,6 @@
 "use client";
 
+import { CheckOutlined } from "@ant-design/icons";
 import { C } from "@/lib/tokens";
 
 /**
@@ -55,7 +56,7 @@ export function ProgressSteps({ activeStep }: ProgressStepsProps) {
                 border: running ? "2px solid " + C.primary : "1px solid " + C.border,
               }}
             >
-              {done ? "✓" : running ? <span className="step-spinner" /> : i + 1}
+              {done ? <CheckOutlined /> : running ? <span className="step-spinner" /> : i + 1}
             </span>
             <span
               style={{

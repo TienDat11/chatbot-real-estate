@@ -207,7 +207,7 @@ describe("createDirectionsFlow — OSRM success and failure", () => {
   });
 
   it("calls OSRM with the resolved user position as the source", async () => {
-    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => OSRM_OK })) as unknown as typeof fetch;
+    const fetchImpl = fetchResolving(OSRM_OK);
     const flow = createDirectionsFlow(PROJECT, {
       geolocation: geolocationGrant(),
       fetchImpl,

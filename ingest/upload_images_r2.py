@@ -92,9 +92,10 @@ def _kind_for(filename: str) -> str | None:
     return None
 
 
-def _public_url(key: str) -> str:
-    """Compose the public URL for an object key from the configured base host."""
-    return f"{settings.r2_public_base}/{key}"
+def _public_url(key: str, project_key: str | None = None) -> str:
+    """Compose a public URL from the project's explicit CDN configuration."""
+    base = settings.image_cdn_base(project_key) if project_key else settings.r2_public_base
+    return f"{base}/{key}"
 
 
 def _collect(
@@ -108,11 +109,9 @@ def _collect(
             continue
         # A forced-kind corpus folder may mix documents with images; only
         # image extensions are in scope for this uploader.
-        if not forced_kind or path.suffix.lower() in _CONTENT_TYPES:
+        if path.suffix.lower() in _CONTENT_TYPES:
             name = path.name
-            if not forced_kind and any(
-                name.startswith(prefix) for prefix in _EXCLUDED_PREFIXES
-            ):
+            if not forced_kind and any(name.startswith(prefix) for prefix in _EXCLUDED_PREFIXES):
                 excluded.append(name)
                 continue
             kind = forced_kind or _kind_for(name)
@@ -121,18 +120,19 @@ def _collect(
     return in_scope, excluded
 
 
-def _upload(client, path: pathlib.Path, kind: str, slugify: bool) -> str:
-    """Upload one image and return its object key."""
+def _upload(
+    client, path: pathlib.Path, kind: str, slugify: bool, project_key: str = "camellia"
+) -> str:
+    """Upload one image and return its project-namespaced object key."""
     name = _slugify(path.name) if slugify else path.name
-    key = f"images/{kind}/{name}"
+    namespace = project_key.strip()
+    if not namespace:
+        raise ValueError("project_key must be non-empty")
+    key = f"images/{namespace}/{kind}/{name}"
     content_type = _CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
     # S3 object metadata must be ASCII; Vietnamese source names get folded so
     # the traceability hint survives without breaking the put.
-    ascii_name = (
-        unicodedata.normalize("NFKD", path.name)
-        .encode("ascii", "ignore")
-        .decode("ascii")
-    )
+    ascii_name = unicodedata.normalize("NFKD", path.name).encode("ascii", "ignore").decode("ascii")
     client.put_object(
         Bucket=settings.r2_bucket_name,
         Key=key,
@@ -165,6 +165,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Slugify object-key filenames (needed for names with spaces).",
     )
+    parser.add_argument(
+        "--project-key",
+        default="camellia",
+        help="Namespace objects under images/<project_key>/<kind>/ (default: camellia).",
+    )
     args = parser.parse_args(argv)
 
     if not args.src_dir.is_dir():
@@ -193,16 +198,15 @@ def main(argv: list[str] | None = None) -> int:
     failed: list[str] = []
     for path, kind in in_scope:
         try:
-            key = _upload(client, path, kind, args.slugify)
+            key = _upload(client, path, kind, args.slugify, args.project_key)
         except ClientError as exc:
             failed.append(path.name)
             print(f"FAIL: {path.name} -> {exc}")
             continue
         ok.append(path.name)
-        print(f"{path.name} -> {key} -> {_public_url(key)}")
+        print(f"{path.name} -> {key} -> {_public_url(key, args.project_key)}")
 
-    print(f"\nUPLOAD SUMMARY: {len(ok)} succeeded, {len(failed)} failed, "
-          f"{len(excluded)} excluded.")
+    print(f"\nUPLOAD SUMMARY: {len(ok)} succeeded, {len(failed)} failed, {len(excluded)} excluded.")
     return 0 if not failed else 1
 
 

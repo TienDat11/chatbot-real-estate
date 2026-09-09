@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from typing import Any
 
 import httpx
 import jwt
@@ -130,7 +131,9 @@ class FirestoreReengageQueueStore:
         token_payload = token_response.json()
         global _cached_access_token, _cached_access_token_expires_at
         _cached_access_token = token_payload["access_token"]
-        _cached_access_token_expires_at = time.monotonic() + int(token_payload.get("expires_in", 3600))
+        _cached_access_token_expires_at = time.monotonic() + int(
+            token_payload.get("expires_in", 3600)
+        )
         return _cached_access_token
 
     async def _access_token(self) -> str:
@@ -173,3 +176,27 @@ class FirestoreReengageQueueStore:
             if customer_id:
                 counts[customer_id] = counts.get(customer_id, 0) + 1
         return counts
+
+    async def cancel_queue_entries_for_customer(self, customer_id: str) -> None:
+        # List the collection and delete every document whose customer_id
+        # matches — document ids are {customer_id}_{project_key}, so the
+        # project keys are unknowable here. Same list-and-filter shape as
+        # load_attempt_counts_by_customer_id.
+        access_token = await self._access_token()
+        client = await get_client()
+        response = await client.get(
+            self._collection_url(),
+            params={"pageSize": 300},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        response.raise_for_status()
+        for document in response.json().get("documents", []):
+            fields = document.get("fields", {})
+            if fields.get("customer_id", {}).get("stringValue") != customer_id:
+                continue
+            document_id = document.get("name", "").rsplit("/", 1)[-1]
+            delete_response = await client.delete(
+                self._document_url(document_id),
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            delete_response.raise_for_status()

@@ -5,8 +5,14 @@ rules_version = '2';
 // ===============================================================
 //
 // leads/{leadId}
-//   Document ID: opaque (HMAC-SHA256 of the customer phone, computed backend-only)
+//   Document ID: opaque per-lead key (ADR-0004 — HMAC-SHA256 of the PG lead
+//   id with the backend mirror secret, domain-separated by a "lead-doc-id:"
+//   message prefix). NEVER the phone or its raw hash: two leads of the same
+//   customer are two distinct documents. The customer identity travels as
+//   the `customer_id` FIELD instead.
 //   Fields (snake_case mirror of the Postgres LeadRow):
+//     - lead_id:          number  (required; numeric PG leads.id used by the
+//       integer-only CRM routes — the document id itself is opaque)
 //     - project_key:      string  (required)
 //     - device_id:        string  (optional, anonymous device id)
 //     - name:             string  (optional)
@@ -20,14 +26,23 @@ rules_version = '2';
 //     - assigned_sales_firebase_uid: string (optional — isolation key; sales
 //       may only read leads whose value equals their own auth uid)
 //     - escal_count:      number  (required)
-//     - created_at:       timestamp (required)
-//     - updated_at:       timestamp (required)
+//     - created_at:       timestamp (required; PG lead creation time)
+//     - updated_at:       timestamp (required; mirror write time)
+//     - customer_id:      string (required; customer-scoped HMAC of the
+//       phone grouping one person's leads — never the raw phone itself)
+//     - lead_status:      string (required)
+//     - assigned_sales_firebase_uid: string (optional owner uid)
 //     - closed_at:        timestamp (optional)
 //   Read: admin sees all; a sales sees only leads assigned to them. Write:
 //   server-only (see IAM note).
 //
 // notes/{noteId}
-//   One staff-authored CRM note per lead; the document id IS the lead id.
+//   One staff-authored CRM note per lead. The note document id IS the lead's
+//   opaque Firestore document id (ADR-0004) — the same key the client carries
+//   as Lead.id — NEVER the numeric lead_id field. Ownership resolves by
+//   dereferencing the lead document with that opaque key (canAccessLead
+//   below); a wrong key (e.g. a numeric id, which matches no lead document)
+//   fails closed.
 //   Fields: content (string), updated_by_uid (string), updated_at (timestamp).
 //   Read: sales/admin. Write: FIRESTORE-NATIVE — the staff client writes it
 //   directly (validated below); never mirrored from PG.
@@ -63,18 +78,53 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/sales/$(request.auth.uid));
     }
 
-    // Role gate used by every sales-facing collection. The profile is the
-    // role source (document data), never a client-supplied field on the
-    // document being accessed — prevents self-escalation.
-    function isSalesOrAdmin() {
-      return isAuthenticated()
-        && callerSalesProfile().data != null
-        && callerSalesProfile().data.role in ['sales', 'admin'];
+    // Admin authorization comes only from the verified Firebase custom claim.
+    // Admins do not need a sales profile, and a client cannot self-assign this
+    // role because request.auth.token is server-signed.
+    function isVerifiedAdmin() {
+      return isAuthenticated() && request.auth.token.role == 'admin';
     }
 
-    // Owner check for a sales profile: uid must match the stored firebase_uid.
+    // Active sales authorization requires the server-provisioned profile. The
+    // active flag is deliberately checked here, rather than trusting a role
+    // claim or the document being accessed, so disabled sales fail closed.
+    function isActiveSales() {
+      return isAuthenticated()
+        && callerSalesProfile().data != null
+        // The path key and the stored mapping must both identify the caller.
+        // This prevents a malformed server profile from authorizing the wrong UID.
+        && callerSalesProfile().data.firebase_uid == request.auth.uid
+        && callerSalesProfile().data.role == 'sales'
+        && callerSalesProfile().data.is_active == true;
+    }
+
+    // Role gate used by every sales-facing collection. Admins use the
+    // verified claim; sales require an active profile keyed by their uid.
+    function isSalesOrAdmin() {
+      return isVerifiedAdmin() || isActiveSales();
+    }
+
+    // Notes key by the lead's opaque Firestore document id (ADR-0004), so the
+    // ownership check dereferences that authoritative lead document — not a
+    // numeric field. Admins retain global access; active sales must match the
+    // lead's assigned Firebase uid. A missing lead (any wrong-key id, such as
+    // a numeric lead_id, matches no document), missing assignment, or
+    // different assignment is denied.
+    function canAccessLead(leadId) {
+      return isVerifiedAdmin()
+        || (isActiveSales()
+            && exists(/databases/$(database)/documents/leads/$(leadId))
+            && get(/databases/$(database)/documents/leads/$(leadId)).data.assigned_sales_firebase_uid
+                == request.auth.uid);
+    }
+
+    // Owner reads are also fail-closed for disabled sales. Admins may inspect
+    // profiles through their verified claim, but ownership never grants access
+    // to an inactive profile.
     function isSalesProfileOwner() {
-      return isAuthenticated() && request.auth.uid == resource.data.firebase_uid;
+      return isVerifiedAdmin()
+        || (isActiveSales()
+            && request.auth.uid == resource.data.firebase_uid);
     }
 
     // ---------------- leads ----------------
@@ -87,9 +137,9 @@ service cloud.firestore {
       // backend routes them. List queries must include
       // where('assigned_sales_firebase_uid', '==', request.auth.uid) to
       // match this rule.
-      allow read: if isSalesOrAdmin()
-        && (callerSalesProfile().data.role == 'admin'
-            || resource.data.assigned_sales_firebase_uid == request.auth.uid);
+      allow read: if isVerifiedAdmin()
+        || (isActiveSales()
+            && resource.data.assigned_sales_firebase_uid == request.auth.uid);
 
       // Server-only writes: the BE REST mirror writes leads with a
       // service-account OAuth2 token, which is authorized by IAM
@@ -101,21 +151,39 @@ service cloud.firestore {
     // ---------------- notes ----------------
 
     match /notes/{noteId} {
-      allow read: if isSalesOrAdmin();
+      // Notes inherit lead ownership: admins may access every note, while
+      // sales may access only notes whose matching lead is assigned to them.
+      // Missing and unassigned leads fail closed because the ownership lookup
+      // cannot match the caller's uid.
+      allow read: if canAccessLead(noteId);
 
       // FIRESTORE-NATIVE (story 9.3): notes are the one CRM write authored
       // directly by the signed-in staff client, never mirrored from PG. The
-      // document id is the lead id; setDoc(merge) lands as create or update,
+      // note id is the lead's opaque Firestore document id (ADR-0004);
+      // setDoc(merge) lands as create or update,
       // both validated identically — the author uid must be the caller's own,
       // so a sales can never forge someone else's note. Deleting is refused
       // to keep the note trail intact.
-      allow create, update: if isSalesOrAdmin()
-        && request.resource.data.keys().hasAll(
+      allow create, update: if canAccessLead(noteId)
+        // Whitelist the complete document shape; unknown fields (including raw
+        // phone values) must never be persisted by a staff client.
+        && request.resource.data.keys().hasOnly(
           ["content", "updated_by_uid", "updated_at"]
         )
-        && request.resource.data.updated_by_uid == request.auth.uid
         && request.resource.data.content is string
-        && request.resource.data.content.size() <= 2000;
+        && request.resource.data.content.size() <= 2000
+        && request.resource.data.updated_by_uid is string
+        && request.resource.data.updated_by_uid == request.auth.uid
+        && request.resource.data.updated_at is timestamp
+        // The document id is the immutable lead ownership key. On update, the
+        // author ownership key is immutable as well: another staff member may
+        // not take over an existing note by changing updated_by_uid.
+        && (!exists(/databases/$(database)/documents/notes/$(noteId))
+            || request.resource.data.updated_by_uid
+                == resource.data.updated_by_uid);
+
+      // Admin access remains explicit through canAccessLead; no client may
+      // delete notes because the note trail is intentionally append/overwrite-only.
 
       allow delete: if false;
     }

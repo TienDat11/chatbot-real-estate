@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AuthenticatedUser } from "@/infrastructure/firebase/firebaseAuthenticationService";
 
 // Router doubles: navigation is asserted against the replace mock, and the
@@ -53,29 +53,45 @@ describe("LoginScreen redirect logic", () => {
     cleanup();
   });
 
-  it("redirects an admin to /admin by default", async () => {
+  it("does not silently redirect an existing admin session away from login", async () => {
     renderLoginScreen(null);
     capturedAuthChangeCallback!(authenticatedUser("admin"));
-    await waitFor(() => expect(replaceMock).toHaveBeenCalledTimes(1));
-    expect(replaceMock).toHaveBeenCalledWith("/admin");
+    await screen.findByText("Bạn đang đăng nhập. Nhập lại thông tin để xác thực tài khoản hiện tại.");
+    expect(replaceMock).not.toHaveBeenCalled();
   });
 
-  it("redirects to the safe `next` param for admin/sales", async () => {
+  it("keeps an existing staff session on login with its requested return path", async () => {
     renderLoginScreen("/admin/leads?project=soleil");
     capturedAuthChangeCallback!(authenticatedUser("sales"));
-    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/admin/leads?project=soleil"));
+    await screen.findByText("Bạn đang đăng nhập. Nhập lại thông tin để xác thực tài khoản hiện tại.");
+    expect(replaceMock).not.toHaveBeenCalled();
   });
 
-  it("redirects viewer to the public chat even with an admin next param", async () => {
+  it("does not silently redirect an existing viewer session", async () => {
     renderLoginScreen("/admin");
     capturedAuthChangeCallback!(authenticatedUser("viewer"));
-    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/"));
+    await screen.findByText("Bạn đang đăng nhập. Nhập lại thông tin để xác thực tài khoản hiện tại.");
+    expect(replaceMock).not.toHaveBeenCalled();
   });
 
   it("does not navigate while nobody is signed in", () => {
     renderLoginScreen(null);
     capturedAuthChangeCallback!(null);
     expect(replaceMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps an existing session on the login screen until the user intentionally submits", async () => {
+    renderLoginScreen("/project/soleil?session=s1");
+    capturedAuthChangeCallback!(authenticatedUser("admin"));
+
+    expect(await screen.findByText("Bạn đang đăng nhập. Nhập lại thông tin để xác thực tài khoản hiện tại.")).toBeTruthy();
+    expect(replaceMock).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "a@b.vn" } });
+    fireEvent.change(screen.getByLabelText("Mật khẩu"), { target: { value: "password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Đăng nhập" }));
+
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/project/soleil?session=s1"));
   });
 
   it("renders the login form heading for not-yet-authenticated visitors", () => {

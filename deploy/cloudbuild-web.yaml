@@ -1,0 +1,59 @@
+# Cloud Build config — builds the FE image (ragre-web) from the MONOREPO ROOT.
+#
+# `gcloud run deploy --source apps/web` cannot work here: Cloud Run only uses a
+# Dockerfile located IN the source dir, but npm workspaces require the root
+# manifests and packages/* that live above apps/web. So the build goes through
+# Cloud Build with an explicit -f apps/web/Dockerfile and root context.
+#
+# substitutions (pass with --substitutions):
+#   _FE_API_KEY          NEXT_PUBLIC_FIREBASE_API_KEY
+#   _FE_AUTH_DOMAIN      NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+#   _FE_PROJECT_ID       NEXT_PUBLIC_FIREBASE_PROJECT_ID
+#   _FE_STORAGE_BUCKET   NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+#   _FE_SENDER_ID        NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+#   _FE_APP_ID           NEXT_PUBLIC_FIREBASE_APP_ID
+#   _FE_VAPID_KEY        NEXT_PUBLIC_FIREBASE_VAPID_KEY (FCM web push)
+#   _FE_MEDIA_ORIGINS_JSON NEXT_PUBLIC_MEDIA_ORIGINS_JSON (R2 image allowlist)
+#   _FE_PROXY_TARGET     NEXT_PUBLIC_API_PROXY_TARGET (Cloud Run URL of ragre-api)
+#   _PROJECT_ID          GCP project id (only needed if the two lines marked
+#                        TODO-PROJECT are not pre-filled)
+#
+# These are public values (they ship to the browser), but keep them out of git.
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - apps/web/Dockerfile
+      - --build-arg
+      - NEXT_PUBLIC_FIREBASE_API_KEY=$_FE_API_KEY
+      - --build-arg
+      - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=$_FE_AUTH_DOMAIN
+      - --build-arg
+      - NEXT_PUBLIC_FIREBASE_PROJECT_ID=$_FE_PROJECT_ID
+      - --build-arg
+      - NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=$_FE_STORAGE_BUCKET
+      - --build-arg
+      - NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=$_FE_SENDER_ID
+      - --build-arg
+      - NEXT_PUBLIC_FIREBASE_APP_ID=$_FE_APP_ID
+      - --build-arg
+      - NEXT_PUBLIC_FIREBASE_VAPID_KEY=$_FE_VAPID_KEY
+      - --build-arg
+      - NEXT_PUBLIC_MEDIA_ORIGINS_JSON=$_FE_MEDIA_ORIGINS_JSON
+      - --build-arg
+      - NEXT_PUBLIC_API_PROXY_TARGET=$_FE_PROXY_TARGET
+      - -t
+      # TODO-PROJECT: replace $PROJECT_ID if you prefer a literal; the default
+      # substitution resolves to the Cloud Build project automatically.
+      - asia-southeast1-docker.pkg.dev/$PROJECT_ID/ragre/ragre-web:latest
+      - .
+
+images:
+  - asia-southeast1-docker.pkg.dev/$PROJECT_ID/ragre/ragre-web:latest
+
+# Fee note: Cloud Build free tier = 2,500 build-minutes/month (e2-standard-2);
+# one FE build ≈ 5–8 minutes → effectively $0 at this cadence.
+options:
+  logging: CLOUD_LOGGING_ONLY

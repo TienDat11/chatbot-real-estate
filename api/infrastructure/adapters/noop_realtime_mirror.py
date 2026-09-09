@@ -8,10 +8,10 @@ from api.infrastructure.ports.realtime_mirror import LeadMirrorDocument, Realtim
 class NoopRealtimeLeadMirror(RealtimeLeadMirror):
     """Swallows mirror writes so callers need no binding awareness; health stays True."""
 
-    async def upsert_lead_mirror(self, *, customer_id: str, document: LeadMirrorDocument) -> None:
+    async def upsert_lead_mirror(self, *, document_id: str, document: LeadMirrorDocument) -> None:
         return None
 
-    async def remove_lead_mirror(self, customer_id: str) -> None:
+    async def remove_lead_mirror(self, document_id: str) -> None:
         return None
 
     async def health_check(self) -> bool:

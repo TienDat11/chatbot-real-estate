@@ -25,12 +25,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator
+from typing import Any
 
 from api.application.ports.project_registry import ProjectRegistryRecord
+from api.domain.services.project_redirect import short_display_name, strip_city_suffix
 from api.infrastructure.config.config import settings
 
 logger = logging.getLogger("api.project_config")
@@ -53,6 +57,15 @@ _CAMELLIA_IDENTITY: dict[str, str] = {
 # time. {project} is the project_key itself (short stable namespace).
 _PLACEHOLDERS = ("ten_thuong_mai", "ten_phap_ly", "vi_tri", "hotline", "project")
 
+# Seed-mirror of the active rows in db/seed/project_config.sql (same pattern as
+# _CAMELLIA_IDENTITY): zero-I/O detection vocabulary for the cross-project
+# guardrail when the registry read degrades, and the default for direct
+# workflow callers/tests that never touch the DB.
+_SEED_ACTIVE_PROJECTS: tuple[tuple[str, str], ...] = (
+    ("camellia", "The Camellia Son Tra - Da Nang"),
+    ("soleil", "The Soleil Đà Nẵng"),
+)
+
 
 # --- per-request registry snapshot (B2: one async read, zero sync reads) -----
 
@@ -65,8 +78,15 @@ _REQUEST_PROJECT_SNAPSHOT: ContextVar = ContextVar(
     "ragre_request_project_snapshot", default=_SNAPSHOT_UNBOUND
 )
 
+# Registry rows change rarely, while this lookup sits on every query and greeting
+# hot path. A tiny process-local TTL cache removes duplicate reads without changing
+# authorization or project isolation; failures are deliberately not cached.
+_PROJECT_CACHE_TTL_S = max(float(os.getenv("PROJECT_REGISTRY_CACHE_TTL_S", "5")), 0.0)
+_PROJECT_CACHE: dict[str, tuple[float, ProjectRegistryRecord | None]] = {}
+_PROJECT_CACHE_LOCK: asyncio.Lock | None = None
 
-def request_project_snapshot() -> "ProjectRegistryRecord | None":
+
+def request_project_snapshot() -> ProjectRegistryRecord | None:
     """Return the per-request registry record; None when unbound or degraded."""
     value = _REQUEST_PROJECT_SNAPSHOT.get()
     return None if value is _SNAPSHOT_UNBOUND else value
@@ -78,8 +98,8 @@ def request_project_snapshot_bound() -> bool:
 
 
 async def load_project_registry_record(
-    project_key: "str | None",
-) -> "ProjectRegistryRecord | None":
+    project_key: str | None,
+) -> ProjectRegistryRecord | None:
     """Read the registry row for one project through the async port.
 
     Returns None immediately for an empty key (no DB round trip); the adapter
@@ -87,15 +107,32 @@ async def load_project_registry_record(
     """
     if not project_key:
         return None
-    from api.infrastructure.dependencies import get_project_registry  # noqa: PLC0415
+    global _PROJECT_CACHE_LOCK
+    now = time.monotonic()
+    cached = _PROJECT_CACHE.get(project_key)
+    if cached is not None and now - cached[0] < _PROJECT_CACHE_TTL_S:
+        return cached[1]
+    if _PROJECT_CACHE_LOCK is None:
+        _PROJECT_CACHE_LOCK = asyncio.Lock()
+    async with _PROJECT_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _PROJECT_CACHE.get(project_key)
+        if cached is not None and now - cached[0] < _PROJECT_CACHE_TTL_S:
+            return cached[1]
+        from api.infrastructure.dependencies import get_project_registry  # noqa: PLC0415
 
-    return await get_project_registry().fetch_project(project_key)
+        record = await get_project_registry().fetch_project(project_key)
+        # Cache successful rows only: a transient outage must not persist beyond
+        # this request and silently hide a project after the database recovers.
+        if record is not None:
+            _PROJECT_CACHE[project_key] = (time.monotonic(), record)
+        return record
 
 
 @contextmanager
 def bound_request_project(
-    record: "ProjectRegistryRecord | None",
-) -> "Iterator[ProjectRegistryRecord | None]":
+    record: ProjectRegistryRecord | None,
+) -> Iterator[ProjectRegistryRecord | None]:
     """Bind the per-request registry record for the legacy sync helpers.
 
     Binding None is meaningful: it tells the helpers the async read already
@@ -204,6 +241,24 @@ def brand_token(project_key: str | None = None) -> str:
     return token or (project_key or DEFAULT_PROJECT_KEY)
 
 
+def _catalogue_order(projects: list[dict[str, Any]]) -> None:
+    """Sort the catalogue in place into the GET /api/projects contract order.
+
+    Contract (project-awareness wave): the DEFAULT project (camellia) is always
+    item one — the FE treats it as the default — every other active project
+    follows by (case-insensitive) name, so today's list reads
+    camellia -> soleil -> others. The hot flag deliberately does NOT reorder
+    here (the picker applies its own hot-first sort client-side); pinning the
+    default ahead of everything else keeps row one stable however flags change.
+    """
+    projects.sort(
+        key=lambda p: (
+            p["project_key"] != DEFAULT_PROJECT_KEY,
+            (p["name"] or "").lower(),
+        )
+    )
+
+
 def fetch_projects() -> list[dict[str, Any]]:
     """Return the active project catalogue for GET /api/projects (story 10.3).
 
@@ -211,8 +266,10 @@ def fetch_projects() -> list[dict[str, Any]]:
     (short sync psycopg2 read, degrade instead of crash): a dead DB yields an
     empty list so the endpoint returns ``projects: []`` (200) and the FE picker
     falls back to its static catalogue. ``location`` falls back to vi_tri for
-    rows seeded before the location column existed. Ordering is HOT-first then
-    name so Camellia always leads the picker.
+    rows seeded before the location column existed; ``display_name`` is the
+    short human label (parenthetical qualifier stripped) the new FE contract
+    renders, while ``name`` keeps the full ten_thuong_mai for legacy consumers;
+    ``short_name`` additionally drops the trailing city token ('The Soleil').
     """
     try:
         import psycopg2
@@ -237,6 +294,8 @@ def fetch_projects() -> list[dict[str, Any]]:
         {
             "project_key": row[0],
             "name": row[1],
+            "display_name": (display := short_display_name(row[1])),
+            "short_name": strip_city_suffix(display),
             "location": row[2],
             "lat": float(row[3]) if row[3] is not None else None,
             "lng": float(row[4]) if row[4] is not None else None,
@@ -244,9 +303,7 @@ def fetch_projects() -> list[dict[str, Any]]:
         }
         for row in rows
     ]
-    # Deterministic contract order regardless of DB collation: HOT first, then by
-    # (case-insensitive) name.
-    projects.sort(key=lambda p: (not p["is_hot"], (p["name"] or "").lower()))
+    _catalogue_order(projects)
     return projects
 
 
@@ -255,13 +312,17 @@ def project_catalogue_from_records(
 ) -> list[dict[str, Any]]:
     """Shape registry records into the GET /api/projects contract dicts.
 
-    Single mapping for every catalogue consumer so the contract (keys, float
-    coords, HOT-first ordering) cannot drift between call sites.
+    Single mapping for every catalogue consumer so the contract (keys, display
+    label, city-stripped short name, float coords, default-first ordering)
+    cannot drift between call sites. ``fetch_projects`` produces the identical
+    shape from raw rows.
     """
     projects = [
         {
             "project_key": r.project_key,
             "name": r.ten_thuong_mai,
+            "display_name": (display := short_display_name(r.ten_thuong_mai)),
+            "short_name": strip_city_suffix(display),
             "location": r.location,
             "lat": r.geo_center_lat,
             "lng": r.geo_center_lng,
@@ -269,8 +330,37 @@ def project_catalogue_from_records(
         }
         for r in records
     ]
-    projects.sort(key=lambda p: (not p["is_hot"], (p["name"] or "").lower()))
+    _catalogue_order(projects)
     return projects
+
+
+def default_known_projects() -> list[tuple[str, str]]:
+    """Copy of the static seed-mirror (key, name) pairs — zero-I/O vocabulary.
+
+    Used by direct workflow callers (tests, scripts) that bypass the facade's
+    per-request ``load_known_projects`` registry read; production always passes
+    the live list through so this mirror only ever serves degraded turns.
+    """
+    return list(_SEED_ACTIVE_PROJECTS)
+
+
+async def load_known_projects() -> list[tuple[str, str]]:
+    """(project_key, ten_thuong_mai) pairs feeding the cross-project guardrail.
+
+    The live registry is the single source of truth (one async port read per
+    request, same adapter as every other registry consumer); an empty or
+    failed read degrades to the static seed mirror so the guardrail never
+    silently disables when the DB blips mid-session.
+    """
+    active: list[Any] = []
+    try:
+        from api.application.services.project_scope import fetch_active_projects  # noqa: PLC0415
+
+        active = await fetch_active_projects()
+    except Exception:  # noqa: BLE001 — best-effort like every registry read
+        logger.warning("known-projects read failed; using static seed mirror", exc_info=True)
+    pairs = [(p.project_key, p.ten_thuong_mai) for p in active]
+    return pairs or list(_SEED_ACTIVE_PROJECTS)
 
 
 async def load_project_catalogue() -> list[dict[str, Any]]:
@@ -294,6 +384,8 @@ __all__ = [
     "fetch_projects",
     "project_catalogue_from_records",
     "load_project_catalogue",
+    "default_known_projects",
+    "load_known_projects",
     "load_project_registry_record",
     "bound_request_project",
     "request_project_snapshot",

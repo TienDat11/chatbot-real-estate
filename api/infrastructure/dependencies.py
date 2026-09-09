@@ -1,4 +1,4 @@
-﻿"""Dependency factories — cached singletons behind lazy proxies.
+"""Dependency factories — cached singletons behind lazy proxies.
 
 Factories read Settings on first use so the api package imports cleanly before
 configuration is ready (parallel scaffolding / smoke imports). Call sites should
@@ -9,6 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from api.application.ports.project_registry import ProjectRegistryPort
+from api.domain.value_objects.constants import (
+    DEFAULT_MODEL_ANSWER,
+    DEFAULT_RERANK_MODEL,
+    MODEL_ROLE_FIELD,
+    RERANK_BINDINGS,
+    RERANK_MODEL_OPENROUTER,
+)
 from api.infrastructure.adapters.google_places import GooglePlaces
 from api.infrastructure.adapters.http_rerank import HttpRerank
 from api.infrastructure.adapters.lightrag import LightRag
@@ -17,20 +25,13 @@ from api.infrastructure.adapters.openai_compatible_llm import OpenAICompatibleLL
 from api.infrastructure.adapters.postgres_sql import PostgresSql
 from api.infrastructure.adapters.static_places import StaticPlaces
 from api.infrastructure.config.config import get_settings
-from api.domain.value_objects.constants import (
-    DEFAULT_MODEL_ANSWER,
-    DEFAULT_RERANK_MODEL,
-    MODEL_ROLE_FIELD,
-    RERANK_BINDINGS,
-)
 from api.infrastructure.ports.firebase_auth import FirebaseAuthTokenVerifier
 from api.infrastructure.ports.geo import GeoPort
 from api.infrastructure.ports.llm import LLMChatPort
 from api.infrastructure.ports.rag import RagPort
-from api.infrastructure.ports.rerank import RerankPort
 from api.infrastructure.ports.realtime_mirror import RealtimeLeadMirror
+from api.infrastructure.ports.rerank import RerankPort
 from api.infrastructure.ports.sql import SqlPort
-from api.application.ports.project_registry import ProjectRegistryPort
 
 _llm: OpenAICompatibleLLM | None = None
 _reranker: RerankPort | None = None
@@ -43,6 +44,11 @@ _project_registry: ProjectRegistryPort | None = None
 _need_profile_embedding: Any | None = None
 _reengage_queue_store: Any | None = None
 _staff_audit_store: Any | None = None
+_sales_provisioner: Any | None = None
+_sales_notifications_store: Any | None = None
+_fcm_tokens: Any | None = None
+_fcm_sender: Any | None = None
+_chat_history_repository: Any | None = None
 
 
 def get_llm() -> LLMChatPort:
@@ -54,6 +60,8 @@ def get_llm() -> LLMChatPort:
             api_key=s.llm_api_key or "",
             base_url=s.llm_base_url_v1 or "",
             default_model=s.llm_model_answer or DEFAULT_MODEL_ANSWER,
+            enforce_approved_provider=s.enforce_approved_llm_provider,
+            reasoning_effort=s.llm_reasoning_effort,
         )
     return _llm
 
@@ -67,11 +75,20 @@ def get_reranker() -> RerankPort:
         if not s.enable_rerank or binding not in RERANK_BINDINGS:
             _reranker = NoopRerank()
         else:
+            if binding == "openrouter":
+                api_key = s.openrouter_api_key or s.rerank_api_key or ""
+                base_url = s.openrouter_base_url or s.rerank_base_url or ""
+                model = s.rerank_openrouter_model or RERANK_MODEL_OPENROUTER
+            else:
+                api_key = s.rerank_api_key or ""
+                base_url = s.rerank_base_url or ""
+                model = s.rerank_model or DEFAULT_RERANK_MODEL
+
             _reranker = HttpRerank(
-                api_key=s.rerank_api_key or "",
-                base_url=s.rerank_base_url or "",
+                api_key=api_key,
+                base_url=base_url,
                 binding=binding,
-                model=s.rerank_model or DEFAULT_RERANK_MODEL,
+                model=model,
             )
     return _reranker
 
@@ -224,6 +241,75 @@ def get_staff_audit_store():
     return _staff_audit_store
 
 
+def get_chat_history_repository():
+    """Build the durable chat-history repository for staff transcript reads."""
+    global _chat_history_repository
+    if _chat_history_repository is None:
+        from api.infrastructure.adapters.postgres_chat_history import repository
+
+        _chat_history_repository = repository
+    return _chat_history_repository
+
+
+def get_sales_notifications_store():
+    """Build (once) the PG sales-notification read-model adapter (G3-r6).
+
+    The adapter implements both the notifications repository and the narrow
+    assigned-lead seam the CRM transcript route re-checks; the DDL itself is
+    owned by the 2026-08-28 migration (no runtime CREATE TABLE fallback).
+    """
+    global _sales_notifications_store
+    if _sales_notifications_store is None:
+        from api.infrastructure.adapters.postgres_sales_notifications import (
+            PostgresSalesNotificationsRepository,
+        )
+
+        _sales_notifications_store = PostgresSalesNotificationsRepository()
+    return _sales_notifications_store
+
+
+def get_fcm_tokens():
+    global _fcm_tokens
+    if _fcm_tokens is None:
+        from api.infrastructure.adapters.postgres_fcm_tokens import PostgresFcmTokenRepository
+        _fcm_tokens = PostgresFcmTokenRepository()
+    return _fcm_tokens
+
+
+def get_fcm_sender():
+    global _fcm_sender
+    if _fcm_sender is None:
+        from api.infrastructure.adapters.firebase_fcm import FirebaseFcmSender
+        s = get_settings()
+        _fcm_sender = FirebaseFcmSender(
+            project_id=s.firebase_project_id,
+            client_email=s.firebase_service_account_client_email,
+            private_key=s.firebase_service_account_private_key,
+        )
+    return _fcm_sender
+
+
+def get_fcm_notification_service():
+    from api.application.services.fcm_notification_service import FcmNotificationService
+    return FcmNotificationService(get_fcm_tokens(), get_fcm_sender())
+
+
+def get_sales_provisioner():
+    """Build the Firebase REST sales provisioner lazily."""
+    global _sales_provisioner
+    if _sales_provisioner is None:
+        from api.infrastructure.adapters.firebase_sales_provisioner import FirebaseSalesProvisioner
+
+        s = get_settings()
+        _sales_provisioner = FirebaseSalesProvisioner(
+            project_id=s.firebase_project_id,
+            client_email=s.firebase_service_account_client_email,
+            private_key=s.firebase_service_account_private_key,
+            rest_base_url=s.firebase_firestore_rest_base_url,
+        )
+    return _sales_provisioner
+
+
 class LazyLLMProxy:
     """Forwards attribute access to the real adapter, built on first use.
 
@@ -235,4 +321,3 @@ class LazyLLMProxy:
 
 
 llm: LLMChatPort = LazyLLMProxy()  # type: ignore[assignment]
-

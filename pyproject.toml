@@ -8,6 +8,9 @@ exclude = [".venv", "node_modules", "docs", "_bmad"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+"api/interfaces/api/admin_routes.py" = ["B008"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

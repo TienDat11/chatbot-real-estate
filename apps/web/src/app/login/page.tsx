@@ -9,8 +9,8 @@ import { LoginScreen } from "@/features/auth/LoginScreen";
 export default function LoginPage() {
   return (
     <main
+      className="app-viewport-min-height"
       style={{
-        minHeight: "100vh",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

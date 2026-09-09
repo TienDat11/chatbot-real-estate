@@ -13,10 +13,23 @@ export type { MarkdownViewProps } from "./MarkdownView";
 export { AnswerBlocks } from "./AnswerBlocks";
 export type { AnswerBlocksProps } from "./AnswerBlocks";
 export {
+  humanizeSubject,
+  humanizeFieldKey,
+  humanizePolicyKey,
+  policyLabel,
+  fieldLabel,
+  formatFactFieldValue,
+  dedupeFacts,
+} from "./fact-humanize";
+export {
   BOLD_PRICE_RE,
   boldPrice,
   classifyBlock,
   splitBlocks,
   parseTable,
+  partitionStreamedBlocks,
+  isDividerBlock,
+  normalizeBrTags,
+  THEMATIC_BREAK_LINE_RE,
 } from "./inline-format";
 export type { BlockKind } from "./inline-format";

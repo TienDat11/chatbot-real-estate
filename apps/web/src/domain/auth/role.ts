@@ -5,11 +5,10 @@
  * guards) depend on this module, never on each other.
  */
 
-/** Roles assigned via Firebase custom claims; unknown claims degrade to viewer. */
-export type Role = "admin" | "sales" | "viewer";
-
 /** Every role literal, in descending privilege order. */
-export const ALL_ROLES: readonly Role[] = ["admin", "sales", "viewer"];
+export const ALL_ROLES = ['admin', 'sales', 'viewer'] as const;
+/** Roles assigned via Firebase custom claims; unknown claims degrade to viewer. */
+export type Role = (typeof ALL_ROLES)[number];
 
 /**
  * Safely narrows an arbitrary custom-claim value into a Role. Anything the

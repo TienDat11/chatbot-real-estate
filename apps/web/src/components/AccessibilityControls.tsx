@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
-import { C, RADIUS } from "@/lib/tokens";
+import { C, CONTROL_BORDER, HEADER, RADIUS } from "@/lib/tokens";
 
 /**
  * AccessibilityControls — global A/A+/A++ font-size toggle in the header.
@@ -68,12 +68,20 @@ export function AccessibilityControls({ dark = false }: { dark?: boolean }) {
     window.dispatchEvent(new Event("ragre:font-scale"));
   }, []);
 
+  // Surface-aware chrome (FR-23 / R8): the ChatPage header renders on the
+  // LIGHT app-header surface, so the default (dark=false) palette resolves
+  // every pairing via HEADER tokens that clear WCAG 4.5:1 text / 3:1
+  // non-text against C.surface. The dark variant stays opt-in for genuinely
+  // dark parents (SalesChatShell), where white ink is correct.
+  const ink = dark ? C.onDark : HEADER.title;
+  const idleBorder = dark ? "rgba(245,241,232,0.35)" : CONTROL_BORDER.hover;
   return (
     <div role="group" aria-label="Cỡ chữ" style={{ display: "flex", gap: 4, alignItems: "center" }}>
       {LEVELS.map((l, i) => (
         <button
           key={l.key}
           type="button"
+          className={dark ? undefined : "font-scale-btn"}
           aria-pressed={level === i}
           aria-label={"Cỡ chữ " + l.label}
           onClick={() => apply(i)}
@@ -82,12 +90,12 @@ export function AccessibilityControls({ dark = false }: { dark?: boolean }) {
             height: 40,
             borderRadius: RADIUS.small,
             border: level === i
-              ? "2px solid " + (dark ? C.gold : C.primary)
-              : "1px solid " + (dark ? "rgba(245,241,232,0.30)" : C.borderStrong),
+              ? "2px solid " + (dark ? C.goldBorder : C.primary)
+              : "1px solid " + idleBorder,
             background: level === i
-              ? dark ? "rgba(201,162,75,0.18)" : C.primarySoft
+              ? dark ? "rgba(201,162,75,0.18)" : HEADER.chipFill
               : dark ? "rgba(255,255,255,0.06)" : C.surface,
-            color: dark ? C.onDark : C.text,
+            color: ink,
             fontSize: l.size === 17 ? 14 : l.size === 19 ? 15 : 16,
             fontWeight: 600,
             cursor: "pointer",

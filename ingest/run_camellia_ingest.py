@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 # future seed for another document keeps the default true-replace behavior.
 PRESERVE_SEED_FACTS = {"price-camellia-2026q3"}
 
+# Project registry key for this corpus — every document row is tagged with it
+# so project-scoped retrieval (rag_leg._post_filter, sql_leg facts/estimates)
+# never mixes Soleil and Camellia chunks (story 10.4 isolation).
+PROJECT_KEY = "camellia"
+
 
 def plan_doc_ingest(doc_id: str) -> tuple[bool, bool]:
     """Return (extract_facts?, preserve_seed_facts?) for a registry doc_id."""
@@ -58,15 +63,28 @@ async def _ingest_one(doc) -> str:
     """Extract + load a single document; returns a one-line report."""
     extract, preserve = plan_doc_ingest(doc.doc_id)
     facts = None
+    ingest_status = "facts_loaded" if preserve else "extract_failed"
     if extract:
         try:
             facts = await extract_facts(doc.full_text, doc.doc_id, doc.kind)
+            ingest_status = (
+                "review_required"
+                if any((f.extract_conf is not None and f.extract_conf < 0.6) for f in facts)
+                else ("facts_loaded" if facts else "chunks_only")
+            )
         except Exception as exc:  # noqa: BLE001 — chunks stay indexable without facts
             logger.warning(
                 "fact extraction failed (doc=%s) — loading chunks only: %s",
-                doc.doc_id, exc,
+                doc.doc_id,
+                exc,
             )
-    result = await load_document(doc, facts, preserve_seed_facts=preserve)
+    result = await load_document(
+        doc,
+        facts,
+        preserve_seed_facts=preserve,
+        project_key=PROJECT_KEY,
+        ingest_status=ingest_status,
+    )
     if result.lightrag_doc_id is None:
         # load_document swallows ainsert/adelete errors and returns None here, so
         # the registry would be committed while the vector store stays empty and
@@ -109,7 +127,9 @@ def main() -> int:
         description="Run the Story 2.3 ingest pipeline over the Camellia registry."
     )
     ap.add_argument(
-        "-v", "--verbose", action="store_true",
+        "-v",
+        "--verbose",
+        action="store_true",
         help="Print the per-doc plan (extract/preserve) before loading.",
     )
     args = ap.parse_args()

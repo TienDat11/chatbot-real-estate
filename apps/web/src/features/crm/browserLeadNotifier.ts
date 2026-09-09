@@ -11,6 +11,10 @@ export type BrowserNotificationPermission =
   | NotificationPermission
   | "unsupported";
 
+export type BrowserNotificationPreference = "unset" | "enabled" | "denied";
+
+const NOTIFICATION_PREFERENCE_KEY = "crm.browser-notifications.preference";
+
 export function browserNotificationsSupported(): boolean {
   return typeof window !== "undefined" && typeof window.Notification === "function";
 }
@@ -21,6 +25,27 @@ export function browserLeadNotificationPermission(): BrowserNotificationPermissi
     return "unsupported";
   }
   return window.Notification.permission;
+}
+
+export function browserLeadNotificationPreference(): BrowserNotificationPreference {
+  if (typeof window === "undefined") return "unset";
+  try {
+    const value = window.localStorage.getItem(NOTIFICATION_PREFERENCE_KEY);
+    return value === "enabled" || value === "denied" ? value : "unset";
+  } catch {
+    return "unset";
+  }
+}
+
+export function persistBrowserLeadNotificationPreference(
+  preference: Exclude<BrowserNotificationPreference, "unset">
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(NOTIFICATION_PREFERENCE_KEY, preference);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browsing contexts.
+  }
 }
 
 /**

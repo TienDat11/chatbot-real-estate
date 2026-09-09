@@ -14,6 +14,8 @@ stays green on machines without Postgres.
 
 from __future__ import annotations
 
+import asyncio
+import os
 import uuid
 
 import psycopg2
@@ -39,8 +41,19 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def client() -> TestClient:
-    return TestClient(create_app())
+def client():
+    # The 3s greeting deadline assumes a warm LLM; against a real (cold) model
+    # the LLM call alone can exceed it and the timeout fallback serves no
+    # media, so the media-scoping assertions would hit the deadline instead of
+    # the registry. Raising the deadline leaves the inner LLM timeout (6s) as
+    # the hard bound and lets the assertions target project-scoped media.
+    prior = os.environ.get("HELLO_DEADLINE_S")
+    os.environ["HELLO_DEADLINE_S"] = "12"
+    yield TestClient(create_app())
+    if prior is None:
+        os.environ.pop("HELLO_DEADLINE_S", None)
+    else:
+        os.environ["HELLO_DEADLINE_S"] = prior
 
 
 class TestProjectsEndpoint:
@@ -133,6 +146,34 @@ class TestHelloMediaScoping:
         assert response.status_code == 200
         images = response.json()["images"]
         assert images
-        assert all(
-            not img["image_id"].startswith("soleil-") for img in images
-        )
+        assert all(not img["image_id"].startswith("soleil-") for img in images)
+
+
+class TestRegistryClosedLoopSafety:
+    def test_registry_serves_fresh_pool_after_prior_loop_closed(self):
+        """A registry reuse across closed event loops must not degrade reads.
+
+        Regression for the 'NoneType' object has no attribute 'send' crash:
+        the old adapter kept one pool and force-terminated it from a later
+        request loop after the creating loop was closed (as TestClient does
+        per request), and the lifecycle crash was silently degraded to empty
+        active projects -> empty greeting media. Each event loop now owns its
+        own pool; a closed loop's pool is dropped by reference, never
+        terminated. ``asyncio.run`` per read recreates the exact scenario.
+        """
+        from api.infrastructure.dependencies import get_project_registry
+
+        registry = get_project_registry()
+
+        async def read_active() -> list:
+            return await registry.fetch_active_projects()
+
+        first = asyncio.run(read_active())
+        assert first, "first loop must read the active registry rows"
+
+        # Second asyncio.run uses a brand-new (previously closed) loop.
+        second = asyncio.run(read_active())
+        assert second, "a closed prior loop must not degrade the registry read"
+        keys = [r.project_key for r in second]
+        assert keys[:2] == ["camellia", "soleil"]
+        assert keys[0] == "camellia"  # HOT project still leads

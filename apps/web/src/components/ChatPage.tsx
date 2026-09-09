@@ -26,6 +26,7 @@ import {
   fetchGreeting,
   fetchChatSessionMessages,
   fetchTrainingSession,
+  isInferRetryableStreamError,
   setQueryAuthTokenProvider,
   streamQuery,
 } from "@/lib/api";
@@ -1303,10 +1304,24 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
               // when the stream died before producing anything does the error
               // copy become the bubble text (no silent empty state).
               const hasPartial = m.content.trim().length > 0;
+              // Error-frame contract (additive): an EXPLICIT retryable=true
+              // frame takes the new non-interrupted retry path; legacy frames
+              // (no flag) fall back to code-based inference but KEEP the
+              // interrupted-stream semantics — the pinned "Kết nối bị gián
+              // đoạn" Alert contract stays intact for STREAM_TIMEOUT cuts.
+              const explicitRetryable = err instanceof QueryStreamError && err.retryable === true;
+              const explicitNotRetryable = err instanceof QueryStreamError && err.retryable === false;
+              const inferredRetryable =
+                !explicitRetryable &&
+                !explicitNotRetryable &&
+                err instanceof QueryStreamError &&
+                err.retryable === null &&
+                isInferRetryableStreamError(err.code);
               return {
                 streaming: false,
                 error: true,
-                interrupted: true,
+                interrupted: !(explicitRetryable || explicitNotRetryable),
+                retryable: explicitRetryable || inferredRetryable,
                 retryQuery: query,
                 content: hasPartial ? m.content : err.message,
               };

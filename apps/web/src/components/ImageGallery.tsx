@@ -2,9 +2,11 @@
 
 import { Image as AntImage, Tag, Typography } from "antd";
 import { CheckCircleFilled, PictureOutlined } from "@ant-design/icons";
+import { useState } from "react";
 import type { ReactNode } from "react";
 import type { Image as ImageContract, ImageMatch } from "@rag-ragre/contracts";
 import { C, RADIUS, SHADOW } from "@/lib/tokens";
+import { isAllowedPublicMediaUrl } from "@/lib/mediaPolicy";
 
 interface ImageGalleryProps {
   images: ImageContract[];
@@ -31,14 +33,14 @@ const KIND_META: Record<string, { label: string; soft: string; text: string; int
   },
   toroi: {
     label: "Tờ rơi",
-    soft: "#FDF3E3",
-    text: C.warning,
+    soft: C.terracottaSoft,
+    text: C.terracotta,
     intro: "Tổng quan dự án trong một cái nhìn, từ tiện ích đến vị trí.",
   },
   "thanh-toan": {
     label: "Thanh toán",
-    soft: "#F4EFFF",
-    text: "#6F42C1",
+    soft: C.goldSoft,
+    text: C.charcoal,
     intro: "Chính sách thanh toán linh hoạt, chủ động kế hoạch tài chính.",
   },
 };
@@ -83,25 +85,18 @@ function reasonText(image: ImageContract): string | null {
 
 /** Human-friendly grouping header for the whole gallery. */
 const GALLERY_TITLE = "Hình ảnh & tài liệu dự án";
-
-/** SVG placeholder shown when a CDN asset fails to load, keeping the layout
- *  intact instead of rendering a broken-image icon. */
-const FALLBACK_IMG =
-  "data:image/svg+xml;charset=utf-8," +
-  encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">' +
-      '<rect width="100%" height="100%" fill="#F4F6FA"/>' +
-      '<text x="50%" y="50%" fill="#ABB3C3" text-anchor="middle" ' +
-      'dominant-baseline="middle" font-family="sans-serif" font-size="26">🏠</text>' +
-      "</svg>"
-  );
-
 /**
  * Renders a responsive, lightbox-capable gallery of project illustration assets
  * inside an assistant answer. Cards lift on hover and open antd's PreviewGroup
  * so the reader can zoom / swipe between every sheet from the same chat turn.
  */
 export function ImageGallery({ images }: ImageGalleryProps) {
+  const [failedIds, setFailedIds] = useState<Set<string>>(() => new Set());
+  const publicImages = images.filter(
+    (image) => isAllowedPublicMediaUrl(image.url_cdn) && !failedIds.has(image.image_id),
+  );
+  if (publicImages.length === 0) return null;
+
   // Posterize on small screens, a tidy 5-up on desktops. The inner antd Image
   // keeps default preview so PreviewGroup collects every thumbnail; clicking
   // any card opens the lightbox anchored at that image.
@@ -157,7 +152,7 @@ export function ImageGallery({ images }: ImageGalleryProps) {
             gap: 10,
           }}
         >
-          {images.map((im) => {
+          {publicImages.map((im) => {
             const kind = KIND_META[im.kind] ?? DEFAULT_KIND;
             return (
               <figure
@@ -193,7 +188,7 @@ export function ImageGallery({ images }: ImageGalleryProps) {
                       height: "100%",
                       display: "block",
                     }}
-                    fallback={FALLBACK_IMG}
+                    onError={() => setFailedIds((current) => new Set(current).add(im.image_id))}
                   />
                 </div>
                 <figcaption

@@ -149,3 +149,113 @@ def test_merge_empty_images_still_completes_pipeline(monkeypatch):
     assert image_events[0][1] == {"images": []}
     assert result["images"] == []
     assert result["answer"] == "câu trả lời"  # pipeline completed, answer intact
+
+
+# ==============================================================================
+# Full price-board branch: deterministic fetch vs semantic search
+# ==============================================================================
+
+# "bảng giá từng loại căn hộ" needs EVERY board page — the semantic top_k cap
+# truncates exactly when completeness matters, so a matching intent plus a known
+# project_key switches the merge step to the deterministic fetch seam.
+
+
+def _run_image_branch(
+    monkeypatch,
+    *,
+    rewritten: str,
+    project_key: str | None,
+    intent: bool,
+    board: list[dict],
+    semantic_images: list[dict],
+) -> tuple[dict, dict, list]:
+    """Run the real workflow with both image seams instrumented."""
+    calls = {"intent_query": None, "fetch_project": None, "search": None}
+    events = _patch_workflow(monkeypatch, rewritten=rewritten)
+
+    def fake_intent(text):
+        calls["intent_query"] = text
+        return intent
+
+    async def fake_fetch(key):
+        calls["fetch_project"] = key
+        return board
+
+    async def fake_search(*args, **kwargs):
+        calls["search"] = (args, kwargs)
+        return semantic_images
+
+    monkeypatch.setattr(workflow_module, "is_full_price_board_query", fake_intent)
+    monkeypatch.setattr(workflow_module, "fetch_price_board_images", fake_fetch)
+    monkeypatch.setattr(workflow_module, "search_images", fake_search)
+
+    async def go():
+        wf = RagQueryWorkflow(on_event=lambda e, d: events.append((e, d)))
+        return await wf.run(
+            query="bạn gửi tôi bảng giá của từng loại căn hộ được không?",
+            session_id=None,
+            history=[],
+            project_key=project_key,
+        )
+
+    result = asyncio.run(go())
+    return result, calls, events
+
+
+def test_full_board_intent_uses_deterministic_fetch(monkeypatch):
+    """Intent match + project_key -> ALL board pages via the deterministic seam;
+    the semantic search (top_k-capped) is never called."""
+    board = [{"image_id": f"bg-{p}", "match": "semantic"} for p in range(1, 7)]
+    result, calls, events = _run_image_branch(
+        monkeypatch,
+        rewritten="bảng giá từng loại căn hộ camellia",
+        project_key="camellia",
+        intent=True,
+        board=board,
+        semantic_images=[{"image_id": "should-not-appear"}],
+    )
+
+    assert calls["intent_query"] == "bảng giá từng loại căn hộ camellia"
+    assert calls["fetch_project"] == "camellia"
+    assert calls["search"] is None
+    assert result["images"] == board
+    name = workflow_module.SSE_EVENT_IMAGES
+    image_events = [(e, d) for e, d in events if e == name]
+    assert len(image_events) == 1
+    assert image_events[0][1] == {"images": board}
+
+
+def test_single_type_intent_keeps_semantic_path(monkeypatch):
+    """No full-board intent -> the existing semantic path is untouched (the
+    scoped call shape rides along), and the fetch seam stays idle."""
+    semantic_images = [{"image_id": "sem", "score": 0.9}]
+    result, calls, _ = _run_image_branch(
+        monkeypatch,
+        rewritten="giá bán căn hộ CH-03 hiện tại",
+        project_key="camellia",
+        intent=False,
+        board=[{"image_id": "should-not-appear"}],
+        semantic_images=semantic_images,
+    )
+
+    assert calls["search"] == (("giá bán căn hộ CH-03 hiện tại",), {"project_key": "camellia"})
+    assert calls["fetch_project"] is None
+    assert result["images"] == semantic_images
+
+
+def test_full_board_intent_without_project_key_falls_back_to_semantic(monkeypatch):
+    """The deterministic fetch needs a project scope: without one the pipeline
+    degrades to the legacy unscoped semantic call instead of failing."""
+    semantic_images = [{"image_id": "sem-unscoped"}]
+    result, calls, _ = _run_image_branch(
+        monkeypatch,
+        rewritten="bảng giá từng loại căn hộ",
+        project_key=None,
+        intent=True,
+        board=[{"image_id": "should-not-appear"}],
+        semantic_images=semantic_images,
+    )
+
+    assert calls["search"] == (("bảng giá từng loại căn hộ",), {})
+    assert calls["fetch_project"] is None
+    assert result["images"] == semantic_images

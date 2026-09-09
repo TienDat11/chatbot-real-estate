@@ -1,11 +1,14 @@
 import type { Confidence, FactEvidence, Image, Source, Video } from "@rag-ragre/contracts";
-import { ConfidenceBadge, ReviewBanner, SourcesList, FactsTable, AnswerBlocks } from "@rag-ragre/ui";
-import { Typography } from "antd";
+import { SourcesList, FactsTable, AnswerBlocks } from "@rag-ragre/ui";
+import { Alert, App as AntApp, Button, Tooltip, Typography } from "antd";
+import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
+import { useCallback, useState } from "react";
 import { cn, formatLatency } from "@/lib/utils";
+import type { ProjectRedirect } from "@/lib/projectRedirect";
 import { AckChip } from "./AckChip";
 import { ProgressSteps } from "./ProgressSteps";
-import { ImageGallery } from "./ImageGallery";
 import { GreetingMedia } from "./GreetingMedia";
+import { ProjectRedirectCard } from "./ProjectRedirectCard";
 import { C, SHADOW, FS } from "@/lib/tokens";
 
 export interface ChatMessage {
@@ -24,24 +27,80 @@ export interface ChatMessage {
   acknowledged?: boolean;
   progressStep?: number;
   error?: boolean;
+  /**
+   * Mid-stream failure (proxy/network cut before the `done` frame): the
+   * partial answer stays visible and the bubble offers a "Thử lại" retry
+   * instead of collapsing into a bare error line.
+   */
+  interrupted?: boolean;
+  /**
+   * Error-frame contract (additive): the backend marks timeouts/transient
+   * failures retryable. Absent = fall back to `interrupted` semantics.
+   */
+  retryable?: boolean;
+  /** Question to re-send when the user hits the interrupted-stream retry. */
+  retryQuery?: string;
+  /** Cross-project guardrail: set only when the backend suggests a switch. */
+  projectRedirect?: ProjectRedirect;
 }
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  /** Retry hook for interrupted/retryable streams: re-sends the original question. */
+  onRetry?: (message: ChatMessage) => void;
+}
+
+/**
+ * Staged label shown while the assistant works and no answer text has
+ * arrived yet. Rotates with progressStep so the wait reads as a pipeline,
+ * not a frozen spinner (blend with AckChip + ProgressSteps, no duplicates).
+ */
+const WAITING_STAGES = [
+  "Đang phân tích câu hỏi",
+  "Đang tra cứu tài liệu pháp lý",
+  "Đang đối chiếu số liệu dự án",
+  "Đang soạn câu trả lời",
+];
+
+function WaitingIndicator({ progressStep }: { progressStep?: number }) {
+  const stage = WAITING_STAGES[Math.min(progressStep ?? 0, WAITING_STAGES.length - 1)];
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 32 }}>
+      <span className="ack-dots" aria-hidden="true" style={{ display: "inline-flex", gap: 3 }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold }} />
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold }} />
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold }} />
+      </span>
+      <span className="streaming-stage-label">{stage}</span>
+    </div>
+  );
 }
 
 /**
  * Renders a single chat message bubble.
  * - User: right-aligned, navy background, white text.
  * - Assistant: left-aligned, white card with sources, facts, streamed markdown
- *   (typing caret while streaming), then confidence + review + trace footer.
+ *   (typing caret while streaming), then a compact trace footer.
  */
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
   const isUser = message.role === "user";
+  const { message: antdMessage } = AntApp.useApp();
   // The greeting is the only message that carries videos (RAG answers attach
   // images only), so use it to flip the welcome layout: the hero leads with the
   // film + gallery and the static chào text lands last, below the images.
   const isGreeting = !!message.videos?.length;
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      antdMessage.success("Đã sao chép");
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      antdMessage.error("Không thể sao chép nội dung này.");
+    }
+  }, [antdMessage, message.content]);
 
   if (isUser) {
     return (
@@ -80,9 +139,36 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         }}
       >
         {message.error ? (
-          <Typography.Text type="danger" style={{ display: "block" }}>
-            {message.content || "Có lỗi xảy ra khi xử lý câu hỏi."}
-          </Typography.Text>
+          message.interrupted || message.retryable ? (
+            <>
+              <AnswerBlocks
+                content={message.content || "Có lỗi xảy ra khi xử lý câu hỏi."}
+              />
+              <Alert
+                type="warning"
+                showIcon
+                message={message.retryable && !message.interrupted ? "Phản hồi chưa hoàn tất" : "Kết nối bị gián đoạn"}
+                style={{ marginTop: 12 }}
+                action={
+                  <Button
+                    size="small"
+                    onClick={() => onRetry?.(message)}
+                    aria-label="Thử lại câu hỏi"
+                  >
+                    Thử lại
+                  </Button>
+                }
+              />
+            </>
+          ) : (
+            <Alert
+              type="error"
+              showIcon
+              message="Có lỗi xảy ra"
+              description={message.content || "Có lỗi xảy ra khi xử lý câu hỏi."}
+              style={{ marginTop: 4 }}
+            />
+          )
         ) : (
           <>
             {message.sources && message.sources.length > 0 && (
@@ -91,19 +177,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             {message.facts && message.facts.length > 0 && (
               <FactSection facts={message.facts} />
             )}
-            {/* On the welcome message the media block opens the bubble (hero
-                film + gallery first), so the chào copy sits last under the
-                images instead of interrupting the cinematic opener. */}
-            {isGreeting && (
-              <GreetingMedia
-                videos={message.videos}
-                images={message.images}
-                ready={!message.streaming}
-              />
-            )}
             {message.streaming && !message.content ? (
-              <div className="streaming-placeholder">
+              <div className="streaming-placeholder" aria-live="polite">
                 <AckChip visible={!!message.acknowledged} />
+                <div style={{ marginTop: 12 }}>
+                  <WaitingIndicator progressStep={message.progressStep} />
+                </div>
                 {message.acknowledged && (
                   <div style={{ marginTop: 12 }}>
                     <ProgressSteps activeStep={message.progressStep ?? 0} />
@@ -113,20 +192,43 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             ) : (
               <AnswerBlocks
                 content={message.content}
+                streaming={message.streaming}
                 className={cn(message.streaming && "typing-caret")}
               />
             )}
-            {!isGreeting && (message.videos?.length || message.images?.length) ? (
+            {(isGreeting || message.videos?.length || message.images?.length) ? (
               <GreetingMedia
                 videos={message.videos}
                 images={message.images}
                 ready={!message.streaming}
               />
             ) : null}
-            {message.confidence && !message.streaming && (
-              <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <ConfidenceBadge confidence={message.confidence} />
-                {message.requires_review && <ReviewBanner />}
+            {/* Cross-project guardrail: prominent switch CTA below the answer
+                once the stream is finished; absent field renders nothing. */}
+            {message.projectRedirect && !message.streaming && (
+              <ProjectRedirectCard redirect={message.projectRedirect} />
+            )}
+            {!message.streaming && !message.error && message.content.trim().length > 0 && (
+              <div
+                style={{
+                  marginTop: 8,
+                  display: "flex",
+                  justifyContent: "flex-end",
+                }}
+                className="bubble-copy-row"
+              >
+                <Tooltip title={copied ? "Đã sao chép" : "Sao chép câu trả lời"}>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={copied ? <CheckOutlined style={{ color: C.success }} /> : <CopyOutlined />}
+                    onClick={handleCopy}
+                    aria-label="Sao chép câu trả lời"
+                    style={{ color: C.textGhost }}
+                  >
+                    {copied ? "Đã sao chép" : "Sao chép"}
+                  </Button>
+                </Tooltip>
               </div>
             )}
             {!message.streaming && (message.traceId || message.latencyMs !== undefined) && (

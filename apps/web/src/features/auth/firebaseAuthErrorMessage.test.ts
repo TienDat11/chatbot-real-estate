@@ -14,6 +14,14 @@ describe("mapFirebaseAuthErrorToVietnameseMessage", () => {
     }
   });
 
+  it("translates duplicate-email errors from sign-up and REST responses", () => {
+    for (const code of ["auth/email-already-in-use", "auth/EMAIL_EXISTS"]) {
+      expect(mapFirebaseAuthErrorToVietnameseMessage(firebaseAuthError(code))).toBe(
+        "Email này đã được sử dụng. Vui lòng dùng email khác hoặc đăng nhập."
+      );
+    }
+  });
+
   it("translates rate limiting and network failures", () => {
     expect(mapFirebaseAuthErrorToVietnameseMessage(firebaseAuthError("auth/too-many-requests"))).toBe(
       "Bạn đã thử đăng nhập quá nhiều lần. Vui lòng thử lại sau ít phút."

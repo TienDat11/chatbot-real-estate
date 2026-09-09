@@ -20,6 +20,14 @@ STAFF_AUDIT_ACTION_PHONE_REVEALED = "customer_phone_revealed"
 STAFF_AUDIT_ACTION_LEAD_STATUS_UPDATED = "lead_status_updated"
 STAFF_AUDIT_ACTION_MARKETING_CONSENT_WITHDRAWN = "marketing_consent_withdrawn"
 STAFF_AUDIT_ACTION_REENGAGE_RUN_TRIGGERED = "reengage_run_triggered"
+STAFF_AUDIT_ACTION_SALES_CREATED = "sales_created"
+STAFF_AUDIT_ACTION_SALES_RECONCILIATION = "sales_reconciliation"
+STAFF_AUDIT_ACTION_SALES_STATUS_UPDATED = "sales_status_updated"
+STAFF_AUDIT_ACTION_IDENTITY_LINKED = "anonymous_identity_linked"
+# G3-r6: admin reads of another owner's private training session are audited
+# (sales can only ever read their own; no audit needed for self-access).
+STAFF_AUDIT_ACTION_TRAINING_SESSION_READ = "training_session_read"
+STAFF_AUDIT_ACTION_CALL_STARTED = "call_started"
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { getConfiguredMediaPatterns } from "./src/lib/mediaPolicy";
 
 // Workspace packages ship unbundled source; let Next transpile them directly.
 const TRANSPILE_PACKAGES = [
@@ -52,7 +53,18 @@ const nextConfig: NextConfig = {
   // otherwise gzip-buffer the SSE stream proxied from FastAPI, which breaks
   // incremental token delivery (ERR_INCOMPLETE_CHUNKED_ENCODING). FastAPI
   // streams are already chunked; we only need them passed through verbatim.
+  images: {
+    remotePatterns: getConfiguredMediaPatterns(),
+  },
   compress: false,
+  experimental: {
+    // The dev proxy kills an idle proxied connection after 30s by default
+    // (dist/server/lib/router-utils/proxy-request.js). A cold LightRAG query
+    // can stay silent for 40s+ before the first SSE token, so the proxy was
+    // severing POST /api/query mid-stream (ERR_INCOMPLETE_CHUNKED_ENCODING)
+    // before the `done` frame. 300s keeps slow first queries alive.
+    proxyTimeout: 300000,
+  },
 };
 
 export default nextConfig;

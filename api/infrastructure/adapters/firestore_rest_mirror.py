@@ -19,11 +19,15 @@ denormalized lead snapshot consumed by realtime clients, and never reads back.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
+import random
+import threading
 import time
+import weakref
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import jwt
@@ -41,39 +45,142 @@ _ACCESS_TOKEN_EARLY_REFRESH_SECONDS = 60.0
 _OAUTH2_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _FIRESTORE_DATASTORE_SCOPE = "https://www.googleapis.com/auth/datastore"
 
-_mirror_http_client: httpx.AsyncClient | None = None
+# Loop-scoped AsyncClient cache. httpx.AsyncClient binds to the event loop that
+# runs it; a single module-global client would be handed across the fresh loops
+# that asyncio.run creates (scripts, tests, one-off jobs) and either schedule
+# I/O on a dead loop or raise "Event loop is closed" at teardown, orphaning the
+# mirror. Keying by the running loop gives every loop its own client; the weak
+# keys help but cannot collect finished-loop entries on their own — the client
+# value holds a strong reference back to its loop (httpx transport pool), so a
+# dead loop is never GC'd and its weak key never fires. Reaping is therefore
+# deterministic: every get_client/close_client sweeps entries whose loop reports
+# is_closed() and drops them (no await on a dead-loop client). Locked because
+# loop-scoped usage is not limited to one thread: two threads running their own
+# loops may call get_client concurrently.
+_loop_clients: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
+    weakref.WeakKeyDictionary()
+)
+_loop_clients_lock = threading.Lock()
+
+# Test seam: transport constructor for the per-loop client. None selects the
+# real network stack; tests swap in httpx.MockTransport to exercise the full
+# per-loop lifecycle (creation, close, reaping) without live I/O.
+_client_transport_factory: Callable[[], httpx.AsyncBaseTransport] | None = None
+
+_RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
 
 _cached_access_token: str | None = None
 _cached_access_token_expires_at: float = 0.0
 
 
+def _reap_closed_loop_clients() -> None:
+    """Drop cached clients whose owning event loop is already closed.
+
+    Weak cache keys alone cannot reclaim finished-loop entries: the client value
+    holds a strong reference back to its loop (httpx transport pool), so the weak
+    key never dies and the closed-loop client would be retained forever. Checking
+    loop.is_closed() — a plain synchronous flag read, safe from any thread — makes
+    reaping deterministic and order-independent. A closed loop's transports are
+    already dead, so dropping the client (never awaiting aclose on a dead-loop
+    client, which would raise "Event loop is closed") is the safe close.
+    """
+    with _loop_clients_lock:
+        dead_loops = [loop for loop in _loop_clients if loop.is_closed()]
+        for loop in dead_loops:
+            _loop_clients.pop(loop, None)
+
+
 async def get_client() -> httpx.AsyncClient:
-    """Return the shared AsyncClient, creating it on first use."""
-    global _mirror_http_client
-    if _mirror_http_client is None or _mirror_http_client.is_closed:
-        _mirror_http_client = httpx.AsyncClient(timeout=10.0)
-    return _mirror_http_client
+    """Return the AsyncClient owned by the *current* event loop, creating on first use.
+
+    Explicit bounded phase timeouts come from Settings. Loop-scoped so a client
+    is never shared across asyncio.run loops — the pre-fix module-global cache
+    bound to the first loop and broke every later loop's requests and teardown.
+    """
+    from api.infrastructure.config.config import get_settings
+
+    s = get_settings()
+    _reap_closed_loop_clients()
+    loop = asyncio.get_running_loop()
+    with _loop_clients_lock:
+        client = _loop_clients.get(loop)
+        if client is None or client.is_closed:
+            timeout = httpx.Timeout(
+                timeout=s.firestore_read_timeout_seconds,
+                connect=s.firestore_connect_timeout_seconds,
+            )
+            transport = (
+                _client_transport_factory() if _client_transport_factory is not None else None
+            )
+            client = httpx.AsyncClient(timeout=timeout, transport=transport)
+            _loop_clients[loop] = client
+    return client
+
+
+async def _request_with_retries(method: str, url: str, **kwargs: Any) -> httpx.Response:
+    """Retry only transport failures and 5xx responses for idempotent calls."""
+    from api.infrastructure.config.config import get_settings
+
+    attempts = max(1, min(get_settings().firestore_retry_attempts, 4))
+    client = await get_client()
+    for attempt in range(attempts):
+        try:
+            # Keep the transport seam compatible with lightweight test doubles that
+            # expose verb methods only, while using httpx's generic request path in
+            # production. Both paths receive the exact same retry policy.
+            request = getattr(client, method.lower(), None)
+            if request is None:
+                response = await client.request(method, url, **kwargs)
+            else:
+                response = await request(url, **kwargs)
+            if response.status_code < 500 or attempt == attempts - 1:
+                return response
+        except _RETRYABLE_EXCEPTIONS:
+            if attempt == attempts - 1:
+                raise
+        await asyncio.sleep(min(0.5, 0.05 * (2**attempt)) + random.uniform(0, 0.05))
+    raise RuntimeError("firestore request retry budget exhausted")
 
 
 async def close_client() -> None:
-    """Close the shared AsyncClient and drop the cached OAuth2 token."""
-    global _mirror_http_client, _cached_access_token
-    if _mirror_http_client is not None:
-        await _mirror_http_client.aclose()
-        _mirror_http_client = None
+    """Close this loop's AsyncClient and drop the cached OAuth2 token.
+
+    Loop-safe teardown: only the caller's own loop is touched (awaiting a client
+    whose loop is running elsewhere would corrupt that loop's I/O). Clients of
+    finished loops are reaped deterministically by _reap_closed_loop_clients —
+    dropping the reference to a dead-loop client is the safe equivalent of a
+    close, since awaiting it would raise "Event loop is closed".
+    """
+    global _cached_access_token
     _cached_access_token = None
+    _reap_closed_loop_clients()
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    client: httpx.AsyncClient | None = None
+    if running_loop is not None:
+        with _loop_clients_lock:
+            client = _loop_clients.pop(running_loop, None)
+    if client is not None and not client.is_closed:
+        await client.aclose()
 
 
 def _document_fields(document: LeadMirrorDocument) -> dict[str, dict[str, Any]]:
     """Map the mirror dataclass into Firestore REST Value payloads, omitting Nones."""
     fields: dict[str, dict[str, Any]] = {
         "customer_id": {"stringValue": document.customer_id},
+        # REST encodes int64 as a decimal string; the web SDK decodes safe
+        # integers back to JS numbers, matching the FE mapper's expectation.
+        "lead_id": {"integerValue": str(document.lead_id)},
         "project_key": {"stringValue": document.project_key},
         "lead_status": {"stringValue": document.lead_status},
         "consent_service": {"booleanValue": document.consent_service},
         "consent_marketing": {"booleanValue": document.consent_marketing},
         "updated_at": {"timestampValue": document.updated_at},
     }
+    if document.created_at is not None:
+        fields["created_at"] = {"timestampValue": document.created_at}
     optional_string_fields = {
         "display_name": document.display_name,
         "masked_phone": document.masked_phone,
@@ -114,10 +221,10 @@ class FirestoreRestLeadMirror:
         self.service_account_private_key = service_account_private_key.replace("\\n", "\n")
         self.rest_base_url = rest_base_url.rstrip("/")
 
-    def _document_url(self, customer_id: str) -> str:
+    def _document_url(self, document_id: str) -> str:
         return (
             f"{self.rest_base_url}/projects/{self.project_id}"
-            f"/databases/(default)/documents/leads/{customer_id}"
+            f"/databases/(default)/documents/leads/{document_id}"
         )
 
     async def _fetch_access_token(self) -> str:
@@ -146,7 +253,9 @@ class FirestoreRestLeadMirror:
         token_payload = token_response.json()
         global _cached_access_token, _cached_access_token_expires_at
         _cached_access_token = token_payload["access_token"]
-        _cached_access_token_expires_at = time.monotonic() + int(token_payload.get("expires_in", 3600))
+        _cached_access_token_expires_at = time.monotonic() + int(
+            token_payload.get("expires_in", 3600)
+        )
         return _cached_access_token
 
     async def _access_token(self) -> str:
@@ -156,26 +265,31 @@ class FirestoreRestLeadMirror:
             return await self._fetch_access_token()
         return _cached_access_token
 
-    async def upsert_lead_mirror(self, *, customer_id: str, document: LeadMirrorDocument) -> None:
+    async def upsert_lead_mirror(self, *, document_id: str, document: LeadMirrorDocument) -> None:
         stamped_document = dataclasses.replace(
             document, updated_at=datetime.now(timezone.utc).isoformat()
         )
         access_token = await self._access_token()
-        client = await get_client()
-        response = await client.patch(
-            self._document_url(customer_id),
+        response = await _request_with_retries(
+            "PATCH",
+            self._document_url(document_id),
             headers={"Authorization": f"Bearer {access_token}"},
             json={"fields": _document_fields(stamped_document)},
         )
         response.raise_for_status()
 
-    async def remove_lead_mirror(self, customer_id: str) -> None:
+    async def remove_lead_mirror(self, document_id: str) -> None:
         access_token = await self._access_token()
-        client = await get_client()
-        response = await client.delete(
-            self._document_url(customer_id),
+        response = await _request_with_retries(
+            "DELETE",
+            self._document_url(document_id),
             headers={"Authorization": f"Bearer {access_token}"},
         )
+        # Idempotent delete (ADR-0004): an already-gone document — the common
+        # case for legacy-key cleanup once the backfill has converged — is
+        # success, not a mirror failure.
+        if response.status_code == 404:
+            return
         response.raise_for_status()
 
     async def health_check(self) -> bool:

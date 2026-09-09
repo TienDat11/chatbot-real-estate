@@ -17,6 +17,7 @@ from api.application.services.project_scope import (
     validate_project_key,
 )
 from api.infrastructure.ports.leads import get_lead_repository
+from api.interfaces.api.lead import _session_device_claim_matches
 from api.interfaces.api.main import create_app
 from tests.test_sales_api import FakeLeadRepository
 
@@ -30,6 +31,7 @@ def make_client() -> tuple[TestClient, FakeLeadRepository]:
 
 
 # --- project_key validation (regex ^[a-z0-9_]{2,40}$ + reserved keys) -------
+
 
 def test_validate_project_key_accepts_legal_slugs() -> None:
     for key in ("camellia", "soleil", "my_project_2", "a1"):
@@ -55,6 +57,7 @@ def test_validate_project_key_rejects_reserved_keys() -> None:
 
 
 # --- default rule: >1 active -> 422-style error; exactly 1 -> that project -----
+
 
 @pytest.mark.asyncio
 async def test_resolve_project_key_defaults_when_single_active() -> None:
@@ -86,6 +89,7 @@ async def test_resolve_project_key_rejects_inactive_requested() -> None:
 
 
 # --- HTTP contract -----------------------------------------------------------
+
 
 def test_submit_lead_without_project_key_returns_422() -> None:
     client, repo = make_client()
@@ -132,6 +136,12 @@ def test_submit_lead_persists_project_key_and_device_id() -> None:
     assert response.status_code == 201
     assert repo.leads[1].project_key == "soleil"
     assert repo.leads[1].device_id == "6f2f9a1e-0c4b-4c1e-9b3a-2e1a4b5c6d7e"
+
+
+def test_handoff_ownership_accepts_body_device_id_but_rejects_mismatch() -> None:
+    assert _session_device_claim_matches("device-1", None, "device-1") is True
+    assert _session_device_claim_matches("device-1", None, "device-2") is False
+    assert _session_device_claim_matches("device-1", "device-2", "device-3") is False
 
 
 def test_submit_lead_handoff_marking_uses_device_prefixed_key() -> None:

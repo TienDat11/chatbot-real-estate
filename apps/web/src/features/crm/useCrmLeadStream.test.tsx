@@ -129,6 +129,38 @@ describe("useCrmLeadStream", () => {
     expect(result.current.leads[0].id).toBe("lead-3");
   });
 
+  it("notifies once when a newly added assigned lead belongs to the current sales stream", async () => {
+    const { container, subscriptions } = makeFakeContainer();
+    const onIncomingLead = vi.fn();
+    renderHook(
+      () => useCrmLeadStream({ assignedSalesFirebaseUidFilter: "uid-sales-7", onIncomingLead }),
+      { wrapper: wrapperWith(container) }
+    );
+
+    act(() => {
+      subscriptions[0].handlers.onLeadsChanged([
+        makeCrmLeadFixture({ id: "baseline", workflowStatus: "assigned", assignedSalesFirebaseUid: "uid-sales-7" }),
+      ]);
+    });
+    act(() => {
+      subscriptions[0].handlers.onLeadsChanged([
+        makeCrmLeadFixture({ id: "baseline", workflowStatus: "assigned", assignedSalesFirebaseUid: "uid-sales-7" }),
+        makeCrmLeadFixture({ id: "new-assigned", workflowStatus: "assigned", assignedSalesFirebaseUid: "uid-sales-7" }),
+      ]);
+    });
+
+    expect(onIncomingLead).toHaveBeenCalledTimes(1);
+    expect(onIncomingLead).toHaveBeenCalledWith(expect.objectContaining({ id: "new-assigned", workflowStatus: "assigned" }));
+
+    act(() => {
+      subscriptions[0].handlers.onLeadsChanged([
+        makeCrmLeadFixture({ id: "baseline", workflowStatus: "assigned", assignedSalesFirebaseUid: "uid-sales-7" }),
+        makeCrmLeadFixture({ id: "new-assigned", workflowStatus: "assigned", assignedSalesFirebaseUid: "uid-sales-7" }),
+      ]);
+    });
+    expect(onIncomingLead).toHaveBeenCalledTimes(1);
+  });
+
   it("applies optimistic patches and releases them once the snapshot catches up", async () => {
     const { container, subscriptions } = makeFakeContainer();
     const { result } = renderHook(

@@ -1,8 +1,5 @@
 "use client";
 
-// @ant-design/v5-patch-for-react-19 must load before any antd render; it is
-// already imported at the top of ChatPage.tsx, which mounts this tree.
-
 import { useEffect, useRef, useState } from "react";
 import { Tag, Typography, Segmented } from "antd";
 import { PlayCircleFilled, PauseCircleFilled, SoundOutlined, VideoCameraOutlined } from "@ant-design/icons";
@@ -10,6 +7,7 @@ import type { Image as ImageContract, Video } from "@rag-ragre/contracts";
 import { ImageGallery } from "./ImageGallery";
 import { GREETING_MID_TEXT } from "@/lib/greetingContent";
 import { C, RADIUS, SHADOW } from "@/lib/tokens";
+import { filterPublicImages, filterPublicVideos } from "@/lib/mediaPolicy";
 
 interface GreetingMediaProps {
   videos?: Video[];
@@ -26,18 +24,21 @@ interface GreetingMediaProps {
  *
  * Video behavior — autoplay muted playsInline (no loop: it freezes on the last
  * frame when ended) so the hero reads as a live brand film on open (mobile-safe),
- * the poster render bridges the loading gap, and a play/pause + sound toggle let
- * the reader take control. On any media error (brand MP4 not yet uploaded) we
- * swap to a muted static poster card so the layout never breaks.
+ * the Failed public media is never replaced with fabricated content; text remains the source of truth.
  */
 export function GreetingMedia({ videos, images, ready = true }: GreetingMediaProps) {
   // The backend may return several tapes sharing one kind (two `brand` films, a
   // web build plus the original). Dedupe to exactly one film per kind so the
   // segmented picker never shows duplicated labels.
-  const heroVideos = pickHeroVideos(videos);
+  const publicVideos = filterPublicVideos(videos);
+  const heroVideos = pickHeroVideos(publicVideos);
+  const publicImages = filterPublicImages(images);
   const showVideo = heroVideos.length > 0;
-  const showImages = Array.isArray(images) && images.length > 0;
-  if (!showVideo && !showImages) return null;
+  const showImages = publicImages.length > 0;
+  const hasRejectedMedia = (Array.isArray(videos) && videos.length > 0 && publicVideos.length === 0) ||
+    (Array.isArray(images) && images.length > 0 && publicImages.length === 0);
+  const [mediaUnavailable, setMediaUnavailable] = useState(hasRejectedMedia);
+  if (!showVideo && !showImages && !mediaUnavailable) return null;
 
   return (
     <div
@@ -50,7 +51,7 @@ export function GreetingMedia({ videos, images, ready = true }: GreetingMediaPro
         transition: `opacity 0.5s cubic-bezier(0.16,1,0.3,1), transform 0.5s cubic-bezier(0.16,1,0.3,1)`,
       }}
     >
-      {showVideo && <VideoHero videos={heroVideos} />}
+      {showVideo && <VideoHero videos={heroVideos} onMediaFailure={() => setMediaUnavailable(true)} />}
       {/* Bridge copy between the film and the sheets: a short sales line that
           keeps momentum while separating the two media blocks visually. */}
       {(showVideo || showImages) && (
@@ -67,7 +68,12 @@ export function GreetingMedia({ videos, images, ready = true }: GreetingMediaPro
         </Typography.Paragraph>
       )}
       {showVideo && showImages && <div style={{ height: 16 }} />}
-      {showImages && <ImageGallery images={images} />}
+      {showImages && <ImageGallery images={publicImages} />}
+      {mediaUnavailable && !showVideo && !showImages && (
+        <p role="status" style={{ margin: "12px 0 0", color: C.textMuted, fontSize: 13, lineHeight: "20px" }}>
+          Nội dung chữ vẫn hiển thị đầy đủ. Media công khai hiện không khả dụng.
+        </p>
+      )}
     </div>
   );
 }
@@ -149,12 +155,8 @@ const headerRowStyle: React.CSSProperties = {
  * and sound toggles mirror the live <video> state so icons can never drift from
  * reality. Degrades to a styled poster card if the MP4 is not ready.
  */
-function VideoHero({ videos }: { videos: Video[] }) {
+function VideoHero({ videos, onMediaFailure }: { videos: Video[]; onMediaFailure: () => void }) {
   const [activeIdx, setActiveIdx] = useState(0);
-  // Becomes true the first time the reader switches tapes. The first-ever mount
-  // (tab 0) autoplays muted; any remount after a switch must start paused.
-  const switchedRef = useRef(false);
-
   const multi = videos.length > 1;
 
   // A <video> is a replaced element that swallows the wheel target on some
@@ -181,7 +183,6 @@ function VideoHero({ videos }: { videos: Video[] }) {
             size="small"
             value={activeIdx}
             onChange={(v) => {
-              switchedRef.current = true;
               setActiveIdx(Number(v));
             }}
             options={videos.map((v, i) => ({
@@ -212,7 +213,8 @@ function VideoHero({ videos }: { videos: Video[] }) {
             video={v}
             label={(v.kind && KIND_META[v.kind]?.label) || v.title || `Video ${i + 1}`}
             active={i === activeIdx}
-            autoPlay={i === 0 && !switchedRef.current}
+            autoPlay={i === 0}
+            onMediaFailure={onMediaFailure}
           />
         ))}
       </div>
@@ -228,27 +230,28 @@ interface VideoPlayerProps {
   active: boolean;
   /** Attempt muted autoplay on this mount. tab 0 true only before any switch. */
   autoPlay: boolean;
+  onMediaFailure: () => void;
 }
 
 /**
  * A single self-contained film player (video + scrim + transport controls). It
  * stays mounted for the life of the hero; when it leaves the active tab it is
- * hidden with CSS and reset to a pristine state (paused, 00:00, muted, poster)
+ * hidden with CSS and reset to a paused, muted state
  * so returning to the tab looks exactly like a fresh mount without dropping the
  * element from the DOM.
  */
-function VideoPlayer({ video, label, active, autoPlay }: VideoPlayerProps) {
+function VideoPlayer({ video, label, active, autoPlay, onMediaFailure }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [canPlay, setCanPlay] = useState(false);
   // Fresh mount always defaults to muted (matches the element's `muted`
   // attribute), so each tab switch returns sound to its initial setting.
   const [muted, setMuted] = useState(true);
-  const [toRenderPoster, setToRenderPoster] = useState(false);
   // Mirrors the element's real play state (via onPlaying/onPause). Starts false
   // because a browser may block even muted autoplay; a reconcile effect below
   // fixes it from the live element once the first frame is ready so the icon
   // cannot lie.
   const [playing, setPlaying] = useState(false);
+  const [failed, setFailed] = useState(false);
   const poster = video.poster_url || undefined;
   // Tracks the previous active value so the reset only fires on a real leave or
   // return, not on the initial render.
@@ -291,7 +294,7 @@ function VideoPlayer({ video, label, active, autoPlay }: VideoPlayerProps) {
     const el = videoRef.current;
     if (!el) return;
     if (el.paused) {
-      void el.play().catch(() => setToRenderPoster(true));
+      void el.play().catch(() => undefined);
     } else {
       el.pause();
     }
@@ -307,30 +310,16 @@ function VideoPlayer({ video, label, active, autoPlay }: VideoPlayerProps) {
     el.muted = next;
     setMuted(next);
     // First unmute counts as a user gesture, so the browser lets us start audio.
-    if (!next) void el.play().catch(() => setToRenderPoster(true));
+    if (!next) void el.play().catch(() => undefined);
   };
 
   return (
     <div style={{ position: "absolute", inset: 0, display: active ? "block" : "none" }}>
-      {toRenderPoster ? (
-        // Fallback frame: the poster rendered as a static card. Uses a faint
-        // play glyph to keep the sales intent without calling a broken source.
-        <div
-          style={{
-            width: "100%",
-            height: "100%",
-            backgroundImage: `url(${poster})`,
-            backgroundSize: "cover",
-            backgroundPosition: "center",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <PlayCircleFilled style={{ fontSize: 60, color: "rgba(255,255,255,0.9)" }} />
+      {failed ? (
+        <div role="status" style={{ height: "100%", display: "grid", placeItems: "center", padding: 24, textAlign: "center", color: C.textMuted }}>
+          Video công khai hiện không khả dụng: {video.title}
         </div>
-      ) : (
-        <video
+      ) : <video
           ref={videoRef}
           src={video.url_cdn}
           poster={poster}
@@ -352,15 +341,15 @@ function VideoPlayer({ video, label, active, autoPlay }: VideoPlayerProps) {
             setPlaying(false);
           }}
           onError={() => {
-            setToRenderPoster(true);
             setPlaying(false);
+            setFailed(true);
+            onMediaFailure();
           }}
-        />
-      )}
+        />}
 
       {/* Navy gradient scrim bottom: anchors the title + kind tag so the film
           reads as a framed shot, not a raw rectangle. */}
-      <div
+      {!failed && <div
         style={{
           position: "absolute",
           left: 0,
@@ -405,11 +394,7 @@ function VideoPlayer({ video, label, active, autoPlay }: VideoPlayerProps) {
           </Typography.Text>
         </div>
 
-        {/* Play/pause + sound. Hidden while the poster fallback is showing
-            (there is nothing to control); the play button stays disabled until
-            the first frame is ready so the affordance never acts on a dead
-            source. */}
-        {!toRenderPoster && (
+        {/* Controls stay disabled until the browser confirms playable media. */}
           <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
             <button
               type="button"
@@ -434,11 +419,10 @@ function VideoPlayer({ video, label, active, autoPlay }: VideoPlayerProps) {
               <SoundOutlined style={{ fontSize: 18, opacity: muted ? 0.55 : 1 }} />
             </button>
           </div>
-        )}
-      </div>
+      </div>}
 
-      {/* Buffering shimmer over the loading frame (before first frame). */}
-      {!canPlay && !toRenderPoster && (
+      {/* Buffering state is honest: it only describes a source not ready yet. */}
+      {!failed && !canPlay && (
         <div
           style={{
             position: "absolute",
