@@ -28,6 +28,7 @@ from api.application.services.anon_identity import (
     verify_anonymous_identity_token,
 )
 from api.application.services.query_quota_gate import (
+    DEFAULT_ANONYMOUS_BASE_TURN_CAP,
     QUOTA_EXCEEDED_ERROR_CODE,
     QUOTA_STORE_UNAVAILABLE_ERROR_CODE,
     SALES_MAPPING_MISSING_ERROR_CODE,
@@ -658,7 +659,7 @@ async def test_invalid_firebase_token_remains_anonymous(monkeypatch, gate_secret
         project_key="camellia",
     )
     assert context.quota_payload()["is_authenticated"] is False
-    assert context.quota_payload()["cap"] == 3
+    assert context.quota_payload()["cap"] == DEFAULT_ANONYMOUS_BASE_TURN_CAP
 
 
 @pytest.mark.asyncio
