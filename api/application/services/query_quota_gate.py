@@ -50,10 +50,9 @@ from api.application.services.quota_service import refund_turn as refund_reserve
 
 logger = logging.getLogger("api.services.query_quota_gate")
 
-# Spec §4 pins the anonymous allowance at 3 base turns. The env override
-# arrives via Settings once the field lands there; getattr-with-default keeps
-# this module decoupled from that future config edit.
-DEFAULT_ANONYMOUS_BASE_TURN_CAP = 3
+# Anonymous allowance (env override: ANONYMOUS_BASE_TURN_CAP via Settings).
+# getattr-with-default keeps this module decoupled from the Settings field.
+DEFAULT_ANONYMOUS_BASE_TURN_CAP = 10
 DEFAULT_CUSTOMER_BASE_TURN_CAP = 5
 
 QUOTA_EXCEEDED_ERROR_CODE = "ANONYMOUS_QUOTA_EXCEEDED"
