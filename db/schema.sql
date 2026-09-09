@@ -428,6 +428,24 @@ CREATE TABLE IF NOT EXISTS ip_rate_limit (
 );
 CREATE INDEX IF NOT EXISTS idx_ip_rate_limit_window_start ON ip_rate_limit (window_start);
 
+-- 15. Anonymous identity -> Firebase account links (multi-device).
+-- The 2026-08-25 migration creates these tables; the 2026-09-09 migration then
+-- drops the firebase_uid UNIQUE so several devices' anon identities can link
+-- into one account. These definitions describe the post-migration shape and
+-- must not be used to reset live data.
+CREATE TABLE IF NOT EXISTS identity_links (
+    anon_identity_key TEXT PRIMARY KEY,
+    firebase_uid TEXT NOT NULL,
+    linked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS identity_link_audit (
+    id BIGSERIAL PRIMARY KEY,
+    anon_identity_key TEXT NOT NULL,
+    firebase_uid TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Deploy notes:
 -- 1. Requires PostgreSQL 16.6+ (hard requirement for LightRAG 1.5.6).
 -- 2. Run this schema BEFORE any ingest.

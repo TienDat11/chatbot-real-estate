@@ -30,7 +30,14 @@ async def link_anonymous_identity(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),  # noqa: B008
     audit_store: StaffAuditStore = Depends(get_staff_audit_store),  # noqa: B008
 ) -> dict[str, object]:
-    """Move an anonymous quota identity to the verified Firebase customer."""
+    """Link an anonymous device identity to the verified Firebase customer.
+
+    Multi-device (2026-09-09): each device carries its own anon identity, so N
+    anon keys may link to one account. A fresh (device, account) pair links and
+    merges that device's quota/history once; relinking the SAME pair is an
+    idempotent success (no double merge). 409 is reserved for rebinding an
+    already-linked device to a DIFFERENT account (fail-closed quota guard).
+    """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail="Bearer credentials required")
     try:
