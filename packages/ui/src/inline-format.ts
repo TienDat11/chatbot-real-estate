@@ -60,38 +60,6 @@ export function isDividerBlock(block: string): boolean {
   return lines.length > 0 && lines.every((l) => THEMATIC_BREAK_LINE_RE.test(l));
 }
 
-/** A markdown thematic-break line: 3+ of -, * or _ with optional spaces. */
-export const THEMATIC_BREAK_LINE_RE = /^\s*(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/;
-
-/** Case-insensitive <br> tag variants: <br>, <br/>, <br />. */
-const BR_TAG_RE = /<br\s*\/?>/gi;
-
-/**
- * [B2] Convert literal <br> tags the model emits into real line breaks.
- * ReactMarkdown v9 without rehype-raw renders unknown HTML as inert raw
- * text, so a `<br>` leaks visibly into the answer. Table lines (starting
- * with `|`) must stay ONE line or the GFM row structure breaks, so inside
- * them the break becomes a middle-dot bullet separator instead of `\n`.
- * Pure string preprocessing — no HTML is injected, XSS surface unchanged.
- */
-export function normalizeBrTags(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => {
-      if (!line.trimStart().startsWith("|")) return line.replace(BR_TAG_RE, "\n");
-      // Cells commonly hold bullet lists ("• A<br>• B"); the separator must
-      // not double up next to an existing bullet, so runs collapse to one.
-      return line.replace(BR_TAG_RE, " • ").replace(/(?:\s*•\s*){2,}/g, " • ");
-    })
-    .join("\n");
-}
-
-/** [B1] A block consisting only of thematic-break line(s) is a divider. */
-export function isDividerBlock(block: string): boolean {
-  const lines = block.trim().split("\n");
-  return lines.length > 0 && lines.every((l) => THEMATIC_BREAK_LINE_RE.test(l));
-}
-
 export const DISCLOSURE_KEYWORDS = [
   "lưu ý",
   "định hướng",
