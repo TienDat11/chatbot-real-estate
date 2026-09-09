@@ -19,7 +19,7 @@ export interface QuotaState {
   usedTurns: number | null;
   /** Turns left before the wall; null only for the unlimited admin shape. */
   remainingTurns: number | null;
-  /** Effective cap: anonymous 3 (+5 once), customer 5 (+5 once), sales 10, admin null. */
+  /** Effective cap: anonymous 10 (+5 once), customer 5 (+5 once), sales 10, admin null. */
   cap: number | null;
   /** True for registered customer, sales, and admin principals. */
   isAuthenticated: boolean;

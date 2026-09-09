@@ -11,11 +11,12 @@ import {
 } from "@/features/chat/quota";
 
 // Secure-wave spec §5 contract fixtures, byte-faithful to the documented
-// shapes so any backend drift fails here first.
+// shapes so any backend drift fails here first. The anonymous cap is 10
+// (ANONYMOUS_BASE_TURN_CAP, Sep 2026 policy).
 const ANON_QUOTA_OK = {
   used_turns: 2,
-  remaining_turns: 1,
-  cap: 3,
+  remaining_turns: 8,
+  cap: 10,
   is_authenticated: false,
   bonus_granted: 0,
 };
@@ -32,15 +33,15 @@ const BODY_429 = {
   ok: false,
   error: {
     code: "ANONYMOUS_QUOTA_EXCEEDED",
-    message: "Anh/chị đã dùng hết 3 lượt tư vấn miễn phí. Để lại số điện thoại để nhận tư vấn miễn phí nhé!",
-    quota: { used_turns: 3, remaining_turns: 0, cap: 3, is_authenticated: false, bonus_granted: 0 },
+    message: "Anh/chị đã dùng hết 10 lượt tư vấn miễn phí. Để lại số điện thoại để nhận tư vấn miễn phí nhé!",
+    quota: { used_turns: 10, remaining_turns: 0, cap: 10, is_authenticated: false, bonus_granted: 0 },
   },
   lead_cta: { required: true },
 };
 
 const SSE_ERROR_FRAME = {
   code: "ANONYMOUS_QUOTA_EXCEEDED",
-  quota: { used_turns: 3, remaining_turns: 0, cap: 3, is_authenticated: false, bonus_granted: 0 },
+  quota: { used_turns: 10, remaining_turns: 0, cap: 10, is_authenticated: false, bonus_granted: 0 },
   lead_cta: { required: true },
 };
 
@@ -48,8 +49,8 @@ describe("normalizeQuota", () => {
   it("parses the §5.1 anonymous snapshot", () => {
     expect(normalizeQuota(ANON_QUOTA_OK)).toEqual({
       usedTurns: 2,
-      remainingTurns: 1,
-      cap: 3,
+      remainingTurns: 8,
+      cap: 10,
       isAuthenticated: false,
       bonusGranted: 0,
     });
@@ -116,8 +117,8 @@ describe("normalizeQuota", () => {
   it("extracts the snapshot from a /query success payload", () => {
     expect(quotaFromQueryResponse({ answer: "…", quota: ANON_QUOTA_OK })).toEqual({
       usedTurns: 2,
-      remainingTurns: 1,
-      cap: 3,
+      remainingTurns: 8,
+      cap: 10,
       isAuthenticated: false,
       bonusGranted: 0,
     });
@@ -129,14 +130,14 @@ describe("parseQuotaErrorEnvelope", () => {
   it("parses the JSON 429 body nested under `error`", () => {
     const info = parseQuotaErrorEnvelope(BODY_429);
     expect(info?.code).toBe(QUOTA_EXCEEDED_CODE);
-    expect(info?.message).toContain("hết 3 lượt");
+    expect(info?.message).toContain("hết 10 lượt");
     expect(info?.quota?.remainingTurns).toBe(0);
   });
 
   it("parses the flat SSE error frame", () => {
     const info = parseQuotaErrorEnvelope(SSE_ERROR_FRAME);
     expect(info?.code).toBe(QUOTA_EXCEEDED_CODE);
-    expect(info?.quota?.usedTurns).toBe(3);
+    expect(info?.quota?.usedTurns).toBe(10);
   });
 
   it("returns null for malformed envelopes and keeps other codes intact", () => {
@@ -172,9 +173,9 @@ describe("applyLeadBonus (AC4 optimistic update)", () => {
   it("bumps cap, remaining and cumulative bonus by the granted amount", () => {
     const next = applyLeadBonus(normalizeQuota(BODY_429.error.quota), 5);
     expect(next).toEqual({
-      usedTurns: 3,
+      usedTurns: 10,
       remainingTurns: 5,
-      cap: 8,
+      cap: 15,
       isAuthenticated: false,
       bonusGranted: 5,
     });

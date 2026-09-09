@@ -17,7 +17,7 @@ whose ``role`` claim is sales backed by an active PG sales mapping (resolved
 before this branch, 403/503 when missing/unavailable) — also bypass quota in
 BOTH normal and ``answer_mode="training"`` chat: staff coaching must never hit
 a customer-facing turn wall, and no quota row is written for them. Registered
-customers receive 5 turns, and anonymous callers receive 3 turns plus one
+customers receive 5 turns, and anonymous callers receive 10 turns plus one
 5-turn lead bonus. Every other caller is keyed
 by the signed anonymous identity token; a missing or tampered token self-heals
 into a freshly minted (IP-rate-limited) identity instead of an error,
