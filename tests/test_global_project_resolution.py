@@ -30,7 +30,14 @@ CATALOGUE: list[tuple[str, str]] = [
 
 @pytest.mark.asyncio
 async def test_explicit_camellia_query_resolves_camellia() -> None:
-    """A query naming Camellia resolves to camellia via explicit_query."""
+    """A query naming Camellia resolves to camellia via explicit_query.
+
+    Also pins the P0 fix: the degenerate-prefix query
+    "Thế số điện thoại của Camellia là gì?" contains the truncated "the came"
+    needle plus the real "camellia" key needle — it must resolve to camellia
+    (not ambiguous), proving _safe_needles keeps genuine matches while dropping
+    the truncated garbage.
+    """
     res = await resolve_global_project(
         query="Bạn biết gì về Camellia không?",
         selected_project_key=None,
@@ -43,10 +50,38 @@ async def test_explicit_camellia_query_resolves_camellia() -> None:
     assert res.source == ProjectResolutionSource.EXPLICIT_QUERY
     assert res.candidates == ("camellia",)
 
+    res_degenerate = await resolve_global_project(
+        query="Thế số điện thoại của Camellia là gì?",
+        selected_project_key=None,
+        route_project_key=None,
+        session_project_key=None,
+        known_projects=CATALOGUE,
+    )
+    assert res_degenerate.status == ProjectResolutionStatus.RESOLVED
+    assert res_degenerate.project_key == "camellia"
+    assert res_degenerate.source == ProjectResolutionSource.EXPLICIT_QUERY
+    assert res_degenerate.candidates == ("camellia",)
+
+    res_lower = await resolve_global_project(
+        query="dự án camellia ở đâu",
+        selected_project_key=None,
+        route_project_key=None,
+        session_project_key=None,
+        known_projects=CATALOGUE,
+    )
+    assert res_lower.status == ProjectResolutionStatus.RESOLVED
+    assert res_lower.project_key == "camellia"
+
 
 @pytest.mark.asyncio
 async def test_explicit_soleil_query_resolves_soleil() -> None:
-    """A query naming Soleil resolves to soleil via explicit_query."""
+    """A query naming Soleil resolves to soleil via explicit_query.
+
+    Also pins the P0 fix does not over-prune: the full marketing label with
+    parenthetical ("Thông tin The Soleil Đà Nẅang") is a legitimate needle that
+    the mid-word filter must KEEP (its prefix ends on a word boundary), so the
+    turn still resolves to soleil.
+    """
     res = await resolve_global_project(
         query="giá The Soleil bao nhiêu?",
         selected_project_key="camellia",  # would otherwise win selection — query wins
@@ -58,6 +93,17 @@ async def test_explicit_soleil_query_resolves_soleil() -> None:
     assert res.project_key == "soleil"
     assert res.source == ProjectResolutionSource.EXPLICIT_QUERY
     assert res.candidates == ("soleil",)
+
+    res_full = await resolve_global_project(
+        query="Thông tin The Soleil Đà Nẵng",
+        selected_project_key=None,
+        route_project_key=None,
+        session_project_key=None,
+        known_projects=CATALOGUE,
+    )
+    assert res_full.status == ProjectResolutionStatus.RESOLVED
+    assert res_full.project_key == "soleil"
+    assert res_full.candidates == ("soleil",)
 
 
 @pytest.mark.asyncio
@@ -125,10 +171,31 @@ async def test_session_context_used_last() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_context_is_unresolved() -> None:
-    """No signal at all -> unresolved, never a default project."""
+@pytest.mark.parametrize(
+    "query",
+    [
+        # No signal at all -> unresolved.
+        "hỗ trợ thêm không?",
+        # --- P0 regression: degenerate truncated needle must not bind scope ---
+        # `project_match_variants` emits truncated prefix garbage ("the so" for
+        # Soleil, "the came" for Camellia) via a stem-relative offset bug; these
+        # project-less phrasings normalize to contain that garbage but never name
+        # a real project key, so they must stay unresolved (never a default).
+        "Thế số điện thoại của dự án là gì?",
+        "Thế số lượng căn hộ còn lại là bao nhiêu?",
+        "The source of this project data?",
+        "the camera is broken?",
+    ],
+)
+async def test_no_context_is_unresolved(query: str) -> None:
+    """No signal at all -> unresolved, never a default project.
+
+    Also pins the P0 regression: queries whose normalized text contains a
+    truncated prefix needle (e.g. "the so", "the came") emitted by the upstream
+    variant builder must NOT bind scope to a project the customer never named.
+    """
     res = await resolve_global_project(
-        query="hỗ trợ thêm không?",
+        query=query,
         selected_project_key=None,
         route_project_key=None,
         session_project_key=None,
@@ -155,8 +222,7 @@ async def test_multiple_explicit_projects_is_ambiguous() -> None:
     assert res.source == ProjectResolutionSource.EXPLICIT_QUERY
     # Both deterministic matches are reported as candidates; order follows the
     # catalogue (camellia first), never "first foreign project" promotion.
-    assert set(res.candidates) == {"camellia", "soleil"}
-    assert len(res.candidates) == 2
+    assert res.candidates == ("camellia", "soleil")
 
 
 @pytest.mark.asyncio

@@ -84,6 +84,65 @@ class ProjectResolution:
     candidates: tuple[str, ...]
 
 
+def _is_word_boundary(ch: str) -> bool:
+    """True when ``ch`` ends an alphanumeric run — i.e. not mid-word.
+
+    Uses the same ASCII ``[a-z0-9]`` word-run semantics as the upstream matcher
+    (``_WORD_RUN = re.compile(r"[a-z0-9]+")``): after ``normalize_project_text``
+    all needles are ASCII lowercase + spaces/dashes/parens, so an ASCII
+    predicate matches the matcher's notion of "same word" exactly. A Unicode
+    ``isalnum()`` would be broader and could wrongly treat a non-ASCII char as a
+    word char, so we avoid it here.
+    """
+    if ch == "" or ch in (" ", "-", "("):
+        return True
+    return not (ch.isascii() and (ch.isalpha() or ch.isdigit()))
+
+
+def _safe_needles(needles: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop degenerate truncated needles before they bind scope.
+
+    ``project_match_variants`` builds a prefix needle + bare token per project,
+    but slices the prefix from the WHOLE name using an offset computed on the
+    brand stem (``stem = normalized_name[4:] if startswith "the " else ...``).
+    That offset lives in a different coordinate space than ``normalized_name``,
+    so the prefix slice lands mid-word — e.g. for "The Soleil Đà Nẵng (…)" it
+    emits the 6-char garbage needle ``the so``, and for "The Camellia Son Tra -
+    Da Nang" it emits ``the came``.
+
+    Those truncated needles are false substring matches against arbitrary
+    queries ("Thế số điện thoại của dự án là gì?" normalizes to contain
+    "the so") and would silently bind an unresolved turn to a project the
+    customer never named — the exact forbidden behaviour the resolver exists to
+    prevent. We cannot fix the offset bug here (project_redirect.py behaviour
+    changes are forbidden by this ticket), so we filter degenerate needles at
+    the consumer boundary.
+
+    Rule: drop needle ``v`` only when another needle ``w`` (same project,
+    ``w != v``) starts with ``v`` AND the character immediately after ``v``
+    inside ``w`` is mid-word (not a word boundary). A blanket "drop any strict
+    prefix" filter is wrong: ``the soleil da nang`` is a legitimate strict
+    prefix of the parenthetical ``the soleil da nang (bo suu tap ...)`` and must
+    be kept — its next character is a space, so the mid-word rule preserves it
+    while discarding only the truncated garbage (``the so`` / ``the came``).
+    """
+    keep: list[str] = []
+    for v in needles:
+        degenerate = False
+        for w in needles:
+            if w == v or not w.startswith(v):
+                continue
+            # Character immediately after v inside the longer needle w.
+            boundary = w[len(v)] if len(v) < len(w) else ""
+            if not _is_word_boundary(boundary):
+                degenerate = True
+                break
+        if not degenerate:
+            if v and v not in keep:
+                keep.append(v)
+    return tuple(keep)
+
+
 def candidates_for(
     query: str | None,
     known_projects: list[tuple[str, str]],
@@ -97,6 +156,10 @@ def candidates_for(
     the guard — so user phrasing never breaks detection and unknown third-party
     names ("vinhomes") never match (absent from the catalogue).
 
+    Needles are passed through ``_safe_needles`` to neutralize the truncated
+    prefix garbage emitted by ``project_match_variants``'s upstream offset
+    bug, so only legitimate normalized needles can bind project scope.
+
     Returns keys in the catalogue's own order (the caller pins order); the
     resolver treats the returned ordering as a stable candidate set, never as a
     "pick first" signal.
@@ -106,7 +169,7 @@ def candidates_for(
         return ()
     matched: list[str] = []
     for project_key, display_name in known_projects:
-        variants = project_match_variants(project_key, display_name)
+        variants = _safe_needles(project_match_variants(project_key, display_name))
         if any(variant in normalized_query for variant in variants):
             matched.append(project_key)
     return tuple(matched)
