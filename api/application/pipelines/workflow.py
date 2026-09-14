@@ -45,7 +45,11 @@ from api.application.services.sql_leg import SqlLegResult, run_sql_leg
 from api.domain.services.guard_input import GuardResult as InputGuardResult
 from api.domain.services.guard_input import guard_input, rule_screen
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
-from api.domain.services.guard_output import guard_output, sanitize_output
+from api.domain.services.guard_output import (
+    guard_output,
+    normalize_answer_display,
+    sanitize_output,
+)
 from api.domain.services.rewrite import RoutedResult, fallback_route, rewrite_query
 from api.domain.services.utils import sha256_hex
 from api.domain.value_objects.constants import (
@@ -57,12 +61,6 @@ from api.domain.value_objects.constants import (
 )
 from api.infrastructure.config.config import project_geo_center
 from api.infrastructure.dependencies import get_geo, get_reranker
-from api.domain.services.guard_output import (
-    GuardResult as OutputGuardResult,
-    guard_output,
-    normalize_answer_display,
-    sanitize_output,
-)
 from api.infrastructure.ports.geo import GeoResult
 
 logger = logging.getLogger("api.workflow")
@@ -634,10 +632,26 @@ class RagQueryWorkflow(Workflow):
                 timeout=STEP_TIMEOUTS["output_guard"],
             )
         except asyncio.TimeoutError:
+            # Fail closed (W1-02): a guard that never ran means the answer is
+            # UNVERIFIED, so it must not ship as MEDIUM/no-review. LOW forces
+            # requires_review, which keeps the human-in-the-loop path for
+            # exactly the answers nobody checked.
             guard_res = OutputGuardResult(
-                confidence="MEDIUM", requires_review=False, verdicts={"timeout": True}
+                confidence="LOW",
+                requires_review=True,
+                verdicts={"timeout": True, "verification_unavailable": True},
             )
             await self._flag(ctx, "output_guard_timeout")
+        except Exception as exc:  # noqa: BLE001 — verification failure is never silent
+            # Only the exception CLASS is recorded: a verifier message can carry
+            # query/SQL fragments and must not reach the audit trail or flags.
+            error_type = type(exc).__name__
+            guard_res = OutputGuardResult(
+                confidence="LOW",
+                requires_review=True,
+                verdicts={"verification_unavailable": True, "error_type": error_type},
+            )
+            await self._flag(ctx, f"output_guard_error:{error_type}")
 
         audit = await ctx.store.get("audit")
         audit.update(confidence=guard_res.confidence, guard_verdicts=guard_res.verdicts)

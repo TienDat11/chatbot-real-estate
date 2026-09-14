@@ -152,6 +152,24 @@ def select_answer_tier(merged: Merged, high_stakes: bool) -> str:
     return "flash"
 
 
+class GenerationError(RuntimeError):
+    """Answer generation failed; callers must surface an error, never text.
+
+    The old contract yielded a fake apology string and still marked the answer
+    complete, so a provider outage looked like a finished, verifiable answer:
+    guard_output then ran on that text and the FE rendered it as content. A
+    typed failure keeps the two states distinguishable end to end.
+    """
+
+
+class GenerationTimeout(GenerationError):
+    """The LLM stream stalled past settings.llm_timeout_s."""
+
+
+class GenerationProviderError(GenerationError):
+    """The LLM provider raised while streaming."""
+
+
 async def stream_answer(
     merged: Merged, history: list[dict] | None, high_stakes: bool
 ) -> AsyncIterator[str]:
@@ -200,9 +218,13 @@ async def stream_answer(
             merged.meta["budget_exceeded"] = True
     except TimeoutError as exc:
         logger.warning("generate.stream timeout sau %ss: %s", settings.llm_timeout_s, exc)
-        yield "\n\n[Lỗi hạ tầng LLM — vui lòng thử lại.]"
-    except Exception as exc:  # noqa: BLE001 — LLM failure degrades in workflow
+        raise GenerationTimeout(
+            f"llm stream timeout sau {settings.llm_timeout_s}s"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — provider failure becomes a typed error
         logger.warning("generate.stream fail: %s", exc)
-        yield "\n\n[Lỗi hạ tầng LLM — vui lòng thử lại.]"
-    finally:
-        merged.meta["answer_complete"] = True
+        raise GenerationProviderError(str(exc)) from exc
+    # Only a stream that ended normally marks the answer complete. The failure
+    # paths above raise instead of falling through, so a partial or failed
+    # answer can never be reported to the pipeline as finished.
+    merged.meta["answer_complete"] = True
