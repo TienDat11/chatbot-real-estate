@@ -401,9 +401,21 @@ async def test_conv_workflow_facade_returns_conv_meta():
 
 
 @pytest.mark.asyncio
-async def test_rag_query_pipeline_conv_contract():
+async def test_rag_query_pipeline_conv_contract(monkeypatch):
     # The facade main.py uses must keep RagQueryPipeline's call contract.
+    # The facade builds its own RagRgreConvWorkflow, so the stub goes on the
+    # inner workflow at construction time: this asserts the facade wiring
+    # (kwargs + callback plumbing), not generation - and CI has no LLM
+    # credentials, so an unstubbed run would fail on the provider, not here.
+    from api.application.pipelines import conv_workflow as conv_module
     from api.application.pipelines.conv_workflow import RagQueryPipelineConv as Pipe
+
+    class _StubbedConvWorkflow(RagRgreConvWorkflow):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._inner = _StubInner({"answer": "x", "requires_review": False})
+
+    monkeypatch.setattr(conv_module, "RagRgreConvWorkflow", _StubbedConvWorkflow)
     pipe = Pipe()
     events = []
     result = await pipe.run(
