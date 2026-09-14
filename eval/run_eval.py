@@ -66,12 +66,16 @@ class EvalSettings:
         return cls()
 
 
-# Pipeline — import api.workflow.RagQueryPipeline defensively; eval may run --dry before api/ exists.
-# (spike, day 1) Verify the real signature.
+# Pipeline — canonical implementation lives in api.application.pipelines.workflow.
+# A failed import is loud and typed: eval cannot silently pretend the real
+# backend exists, so the ImportError is re-raised as a RuntimeError with context.
 try:  # pragma: no cover
-    from api.workflow import RagQueryPipeline  # type: ignore
-except Exception:  # noqa: BLE001
-    RagQueryPipeline = None
+    from api.application.pipelines.workflow import RagQueryPipeline
+except Exception as exc:  # noqa: BLE001 — any import-time failure must surface typed
+    raise RuntimeError(
+        "Failed to import canonical RagQueryPipeline from "
+        "api.application.pipelines.workflow"
+    ) from exc
 
 
 async def run_pipeline(
@@ -81,46 +85,13 @@ async def run_pipeline(
     settings: EvalSettings,
     history: Optional[list] = None,
 ) -> dict:
-    """Invoke the pipeline across several calling shapes (spike: verify the real signature)."""
-    kwargs: dict[str, Any] = {"query": question}
-    if as_of:
-        kwargs["as_of"] = as_of
-    if history:
-        kwargs["history"] = history
-    if hasattr(pipeline, "query"):
-        try:
-            return await pipeline.query(**kwargs)
-        except TypeError:
-            return await pipeline.query(question)
-    if hasattr(pipeline, "run"):
-        try:
-            return await pipeline.run(**kwargs)
-        except TypeError:
-            return await pipeline.run(question)
-    raise TypeError("pipeline không có method run()/query()")
+    """Invoke the pipeline through the RagQueryPipeline facade's run() contract."""
+    return await pipeline.run(query=question, as_of=as_of, history=history)
 
 
-def _build_pipeline(settings: EvalSettings) -> Any:
-    """Build RagQueryPipeline, trying multiple constructor shapes. (Spike: verify day 1.)"""
-    if RagQueryPipeline is None:
-        raise RuntimeError(
-            "api/workflow.py chưa có — không dựng được RagQueryPipeline. "
-            "Chạy --dry (mock) hoặc đợi api/ được dựng."
-        )
-    try:
-        return RagQueryPipeline()  # parameterless constructor
-    except TypeError:
-        pass
-    try:
-        return RagQueryPipeline(settings)  # takes settings
-    except TypeError:
-        pass
-    if _HAS_INGEST_SETTINGS:
-        try:
-            return RagQueryPipeline(IngestSettings())  # type: ignore[call-arg]
-        except Exception:  # noqa: BLE001
-            pass
-    raise RuntimeError("Không khớp constructor RagQueryPipeline — sửa _build_pipeline()")
+def _build_pipeline(settings: EvalSettings) -> RagQueryPipeline:
+    """Build the real pipeline (facade takes no settings)."""
+    return RagQueryPipeline()
 
 
 def is_rejected(payload: dict) -> bool:
