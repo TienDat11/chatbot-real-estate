@@ -121,6 +121,28 @@ class ChatMessage:
     content: str
     meta: dict[str, Any] | None
     created_at: datetime
+    project_key: str | None = None
+
+@dataclass(frozen=True)
+class GlobalSessionSummary:
+    """Global assistant session row (GA-03).
+
+    ``project_key`` is the reserved ``_global`` container identity; it is never
+    a real corpus project and must never be returned as a retrieval project.
+    ``active_project_key`` reflects the last *resolved* turn (NULL until the
+    first resolved turn, unchanged by neutral clarification turns).
+    """
+
+    session_id: str
+    device_id: str | None
+    identity_key: str | None
+    project_key: str
+    session_mode: str
+    active_project_key: str | None
+    title: str | None
+    message_count: int
+    handed_off: bool
+    last_active_at: datetime
 
 
 class ChatHistoryRepository(Protocol):
@@ -201,6 +223,39 @@ class ChatHistoryRepository(Protocol):
     ) -> list[tuple[int, ChatMessage]]: ...
     async def get_message_count(self, *, session_id: str) -> int: ...
     async def validate_customer_identity_constraint(self) -> str: ...
+    # --- GA-03 global assistant session persistence --------------------------
+    async def append_global_turn(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None,
+        identity_key: str | None,
+        resolved_project_key: str | None,
+        user_content: str,
+        assistant_content: str,
+        assistant_meta: dict[str, Any],
+    ) -> bool: ...
+    async def get_global_session(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+    ) -> GlobalSessionSummary | None: ...
+    async def list_global_sessions(
+        self,
+        *,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+        limit: int = 50,
+    ) -> list[GlobalSessionSummary]: ...
+    async def list_global_messages(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+    ) -> list[ChatMessage]: ...
 
 
 class ChatHistoryService:
@@ -334,3 +389,73 @@ class ChatHistoryService:
 
     async def validate_customer_identity_constraint(self) -> str:
         return await self.repository.validate_customer_identity_constraint()
+
+    # --- GA-03 global assistant session persistence --------------------------
+
+    async def persist_global_turn(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None,
+        identity_key: str | None,
+        resolved_project_key: str | None,
+        user_content: str,
+        assistant_content: str,
+        assistant_meta: dict[str, Any] | None = None,
+    ) -> bool:
+        """Persist one global assistant turn, creating the parent session on first use.
+        Ownership is validated against device_id/identity_key plus session_mode =
+        'global'; the project_key on the session is the reserved _global container
+        identity and is NOT required to equal resolved_project_key.
+        """
+        if not session_id:
+            return False
+        result = await self.repository.append_global_turn(
+            session_id=session_id,
+            device_id=device_id,
+            identity_key=identity_key,
+            resolved_project_key=resolved_project_key,
+            user_content=user_content,
+            assistant_content=assistant_content,
+            assistant_meta=assistant_meta or {},
+        )
+        return result is not False
+
+    async def global_session(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+    ) -> GlobalSessionSummary | None:
+        return await self.repository.get_global_session(
+            session_id=session_id,
+            device_id=device_id,
+            identity_key=identity_key,
+        )
+
+    async def global_sessions(
+        self,
+        *,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+        limit: int = 50,
+    ) -> list[GlobalSessionSummary]:
+        return await self.repository.list_global_sessions(
+            device_id=device_id,
+            identity_key=identity_key,
+            limit=limit,
+        )
+
+    async def global_messages(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+    ) -> list[ChatMessage]:
+        return await self.repository.list_global_messages(
+            session_id=session_id,
+            device_id=device_id,
+            identity_key=identity_key,
+        )
