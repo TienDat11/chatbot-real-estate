@@ -133,6 +133,24 @@ jobs:
   # GitHub principal permission to IMPERSONATE github-deployer@..., and that SA
   # is the identity holding run.admin / cloudbuild.builds.editor / storage
   # roles. Without it the federated token has no roles and the deploy 403s.
+  #
+  # One-time GCP setup this file depends on (project sale-chat-ai), all of it
+  # outside the repo and therefore invisible to a code review:
+  #   - one WIF provider PER repository, each pinning its own
+  #     assertion.repository (github-oidc for the personal repo,
+  #     github-oidc-saleai for this one), plus roles/iam.workloadIdentityUser
+  #     for that repo's principalSet on github-deployer@.
+  #   - github-deployer@ at project level: run.admin, cloudbuild.builds.editor,
+  #     artifactregistry.writer, logging.logWriter, roles/storage.bucketViewer
+  #     (gcloud resolves its staging bucket by LISTING buckets, so bucket-level
+  #     grants alone are not enough) and roles/serviceusage.serviceUsageConsumer
+  #     (required by gcloud builds submit).
+  #   - object WRITE stays bucket-scoped, never project-wide: only
+  #     gs://run-sources-sale-chat-ai-asia-southeast1 and
+  #     gs://sale-chat-ai_cloudbuild grant github-deployer
+  #     roles/storage.objectAdmin.
+  #   - roles/iam.serviceAccountUser on the runtime service account
+  #     (448504678237-compute@) so the deploy may act as it.
   deploy-be:
     name: Deploy backend — Cloud Run
     needs: [be, web]
