@@ -43,19 +43,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      # Advisory, not blocking: measured locally with ruff 0.16.3 over `api
-      # ingest eval tests` the tree carries 404 pre-existing findings under
-      # target-version py311. requirements.txt does not pin ruff, so a future
-      # ruff may add or remove rules — that is a second reason this step stays
-      # advisory until W2 clears the backlog and the version is pinned.
-      #
-      # `ruff format --check` is deliberately absent: ruff 0.16.3 CRASHES on
-      # api/domain/__init__.py ("Annotation range 0..4 is beyond the end of
-      # buffer"), so the job would fail for tooling reasons, not code reasons.
-      - name: Ruff lint (advisory)
-        continue-on-error: true
-        run: python -m ruff check api ingest eval tests --statistics
-
       - name: Compile check (api, ingest)
         run: python -m compileall -q api ingest
 
@@ -68,6 +55,42 @@ jobs:
           R2_PUBLIC_URL: https://pub-ci-dummy.r2.dev
           IMAGE_CDN_PROJECT_MAP: '{"camellia":"https://cdn-ci-dummy.example"}'
         run: pytest -q -m "not e2e"
+
+  # Advisory quality diagnostics. Deliberately NOT in the deploy jobs' `needs`:
+  # ruff debt must never be able to block a production deploy, and a separate
+  # job makes that structural instead of resting on a `continue-on-error` flag
+  # inside the gating job that someone could later flip.
+  #
+  # The count below is a non-contractual baseline, measured 2026-09-14 with
+  # ruff 0.16.3 over `api ingest eval tests`: 399 findings. It drifts by design —
+  # requirements.txt does not pin ruff, and target-version py311 exposes
+  # py3.10+ syntax that the old py39 target accepted.
+  #
+  # `ruff format --check` is deliberately absent: ruff 0.16.3 CRASHES on
+  # api/domain/__init__.py ("Annotation range 0..4 is beyond the end of
+  # buffer"), so the job would fail for tooling reasons, not code reasons.
+  quality-advisory:
+    name: Quality — ruff (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # No continue-on-error and no output filtering: a crashed or missing ruff
+      # is a red check in its own job, where it is visible, and inert for deploys.
+      - name: Ruff lint
+        run: python -m ruff check api ingest eval tests --statistics
 
   web:
     name: Web — build + typecheck
