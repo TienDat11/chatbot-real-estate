@@ -1,8 +1,10 @@
 # CI for rag-real-estate monorepo.
 # Gates:
-#   be  — python compileall + pytest (non-e2e)          [push/PR]
-#   web — Next.js build + typecheck (dummy Firebase env) [push/PR]
-#   deploy-be — Cloud Run source deploy                  [manual dispatch ONLY]
+#   be         — python compileall + pytest (non-e2e)          [push/PR]
+#   web        — Next.js build + typecheck (dummy Firebase env) [push/PR]
+#   deploy-be  — Cloud Run source deploy of ragre-api   [main push / dispatch]
+#   deploy-web — FE image via Cloud Build + ragre-web   [main push / dispatch]
+# The deploy jobs run only after be + web pass, and only on refs/heads/main.
 name: CI
 
 on:
@@ -14,7 +16,7 @@ on:
   workflow_dispatch:
 
 # Top-level lockdown: no token permissions anywhere unless a job declares
-# exactly what it needs (deploy-be declares contents:read + id-token:write).
+# exactly what it needs (each deploy job declares contents:read + id-token:write).
 permissions: {}
 
 # Never kill an in-flight production deploy; a newer run just waits queued.
@@ -40,6 +42,19 @@ jobs:
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
+
+      # Advisory, not blocking: measured locally with ruff 0.16.3 over `api
+      # ingest eval tests` the tree carries 404 pre-existing findings under
+      # target-version py311. requirements.txt does not pin ruff, so a future
+      # ruff may add or remove rules — that is a second reason this step stays
+      # advisory until W2 clears the backlog and the version is pinned.
+      #
+      # `ruff format --check` is deliberately absent: ruff 0.16.3 CRASHES on
+      # api/domain/__init__.py ("Annotation range 0..4 is beyond the end of
+      # buffer"), so the job would fail for tooling reasons, not code reasons.
+      - name: Ruff lint (advisory)
+        continue-on-error: true
+        run: python -m ruff check api ingest eval tests --statistics
 
       - name: Compile check (api, ingest)
         run: python -m compileall -q api ingest
@@ -91,45 +106,153 @@ jobs:
           NEXT_PUBLIC_FIREBASE_APP_ID=1:000000000000:web:cidummy
           EOF
 
-      - name: Build web workspace
-        run: npm run build --workspace=@rag-ragre/web
+      # Fail-fast order: cheap static checks before the expensive build, so a
+      # lint or type error reports in seconds instead of after a full next build.
+      - name: Lint
+        run: npm run lint -w @rag-ragre/web
 
       - name: Typecheck
         run: npm run typecheck
 
-  # Manual-dispatch-only policy: this job deploys to production Cloud Run
-  # (ragre-api) with real secrets mounted via Secret Manager. It never runs on
-  # push/PR to avoid secret exposure on untrusted branches and to force an
-  # explicit human approval step (dispatch) before every production deploy.
+      # Tests run before the (slower) production build so a logic failure
+      # reports without waiting on a full next build. The UI suite carries the
+      # trust-safety component contracts (ReviewBanner / ConfidenceBadge).
+      - name: Unit tests (ui)
+        run: npm run test -w @rag-ragre/ui
+
+      - name: Build web workspace
+        run: npm run build --workspace=@rag-ragre/web
+
+  # Production deploys. Both jobs are gated to refs/heads/main only, even for
+  # workflow_dispatch: dispatch can be triggered on any ref, and a deploy on a
+  # branch ref would hand production OIDC credentials to branch-controlled code.
+  # They still need [be, web], so the test gates run first on every push/PR.
+  #
+  # Auth is Workload Identity Federation (no long-lived SA keys). The
+  # service_account input is required: the WIF pool binding only grants the
+  # GitHub principal permission to IMPERSONATE github-deployer@..., and that SA
+  # is the identity holding run.admin / cloudbuild.builds.editor / storage
+  # roles. Without it the federated token has no roles and the deploy 403s.
   deploy-be:
     name: Deploy backend — Cloud Run
     needs: [be, web]
-    if: github.event_name == 'workflow_dispatch'
+    if: |
+      github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    # Serialise against an in-flight backend deploy; never cancel one.
+    concurrency:
+      group: deploy-be-production
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
 
-      # Prefer Workload Identity Federation over long-lived SA keys.
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: github-deployer@sale-chat-ai.iam.gserviceaccount.com
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      # Use gcloud's alternate delimiter because CORS_ORIGINS contains commas.
+      # Deliberately no env/secret override flags here: gcloud replaces the
+      # whole env and secretKeyRefs sets with whatever such a flag names, so any
+      # list baked into this file would silently drop or downgrade live
+      # production config (it goes stale the moment someone edits the serving
+      # revision). `gcloud run deploy --source` creates a new revision that
+      # inherits env + secretKeyRefs from the currently serving one, which is
+      # exactly the behaviour we want.
+      #
+      # The flags below match the live ragre-api revision (verified 2026-09-14).
       - name: Deploy to Cloud Run
         run: >-
           gcloud run deploy ragre-api
           --source .
           --region asia-southeast1
+          --quiet
           --min-instances=1
+          --max-instances=20
           --cpu-boost
           --no-cpu-throttling
           --timeout=360
           --startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080
-          --set-secrets "POSTGRES_PASSWORD=POSTGRES_PASSWORD:latest,ANON_IDENTITY_SECRET=ANON_IDENTITY_SECRET:latest,LEAD_MIRROR_HMAC_SECRET=LEAD_MIRROR_HMAC_SECRET:latest,LLM_API_KEY=LLM_API_KEY:latest,EMBEDDING_API_KEY=EMBEDDING_API_KEY:latest,RERANK_API_KEY=RERANK_API_KEY:latest,FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY=FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest"
-          --set-env-vars '^@^APP_ENV=prod@POSTGRES_HOST=aws-1-ap-southeast-1.pooler.supabase.com@POSTGRES_PORT=5432@POSTGRES_USER=postgres.wlvxhmzjyomtzwboehsd@POSTGRES_DATABASE=postgres@POSTGRES_MAX_CONNECTIONS=10@LIGHTRAG_WORKSPACE=ragre_mvp@EMBEDDING_DIM=1024@RAG_PREWARM_ENABLED=true@EMBEDDING_BINDING=gemini@EMBEDDING_MODEL=gemini-embedding-001@RERANK_BINDING=aibox@RERANK_BASE_URL=https://api.jina.ai@RERANK_MODEL=jina-reranker-v3.5@ENABLE_RERANK=true@LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/@LLM_MODEL_REWRITE=gemini-3.6-flash@LLM_MODEL_EXTRACT=gemini-3.6-flash@LLM_MODEL_ANSWER=gemini-3.6-flash@LLM_MODEL_ANSWER_PRO=gemini-3.6-flash@LLM_MODEL_GUARD=gemini-3.6-flash@LLM_MODEL_NL2SQL=gemini-3.6-flash@LLM_REASONING_EFFORT=low@CORS_ORIGINS=["https://sale-chat-bot-11e49.web.app", "https://sale-chat-bot-11e49.firebaseapp.com"]'
+
+  # FE ships as a prebuilt image: npm workspaces need the monorepo root context,
+  # which `gcloud run deploy --source apps/web` cannot provide, so the build
+  # goes through Cloud Build with deploy/cloudbuild-web.yaml.
+  deploy-web:
+    name: Deploy web — Cloud Build + Cloud Run
+    needs: [be, web]
+    if: |
+      github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    # Serialise against an in-flight frontend deploy; never cancel one.
+    concurrency:
+      group: deploy-web-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: github-deployer@sale-chat-ai.iam.gserviceaccount.com
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # NEXT_PUBLIC_* values are baked into the image at BUILD time, so an unset
+      # repository variable would produce (and deploy) a silently broken FE.
+      # Fail the job before spending build minutes instead.
+      - name: Assert FE build variables are set
+        env:
+          FE_FIREBASE_API_KEY: ${{ vars.FE_FIREBASE_API_KEY }}
+          FE_FIREBASE_AUTH_DOMAIN: ${{ vars.FE_FIREBASE_AUTH_DOMAIN }}
+          FE_FIREBASE_PROJECT_ID: ${{ vars.FE_FIREBASE_PROJECT_ID }}
+          FE_FIREBASE_STORAGE_BUCKET: ${{ vars.FE_FIREBASE_STORAGE_BUCKET }}
+          FE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.FE_FIREBASE_MESSAGING_SENDER_ID }}
+          FE_FIREBASE_APP_ID: ${{ vars.FE_FIREBASE_APP_ID }}
+          FE_FIREBASE_VAPID_KEY: ${{ vars.FE_FIREBASE_VAPID_KEY }}
+          FE_MEDIA_ORIGINS_JSON: ${{ vars.FE_MEDIA_ORIGINS_JSON }}
+          FE_API_PROXY_TARGET: ${{ vars.FE_API_PROXY_TARGET }}
+        run: |
+          missing=0
+          for v in FE_FIREBASE_API_KEY FE_FIREBASE_AUTH_DOMAIN FE_FIREBASE_PROJECT_ID \
+                   FE_FIREBASE_STORAGE_BUCKET FE_FIREBASE_MESSAGING_SENDER_ID \
+                   FE_FIREBASE_APP_ID FE_FIREBASE_VAPID_KEY FE_MEDIA_ORIGINS_JSON \
+                   FE_API_PROXY_TARGET; do
+            if [ -z "${!v}" ]; then
+              echo "::error::Repository variable $v is empty or unset; refusing to build a broken FE image."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      # Substitutions use gcloud's alternate delimiter (^D1^ … D2 …): the
+      # media-origins value is JSON and contains commas, which the default
+      # comma parser would split into a bogus extra entry
+      # ("Bad syntax for dict arg"). Single quotes keep the braces/quotes in the
+      # JSON away from bash.
+      - name: Build FE image via Cloud Build
+        run: |
+          gcloud builds submit \
+            --config deploy/cloudbuild-web.yaml \
+            --region asia-southeast1 \
+            --quiet \
+            --substitutions '^@^_FE_API_KEY=${{ vars.FE_FIREBASE_API_KEY }}@_FE_AUTH_DOMAIN=${{ vars.FE_FIREBASE_AUTH_DOMAIN }}@_FE_PROJECT_ID=${{ vars.FE_FIREBASE_PROJECT_ID }}@_FE_STORAGE_BUCKET=${{ vars.FE_FIREBASE_STORAGE_BUCKET }}@_FE_SENDER_ID=${{ vars.FE_FIREBASE_MESSAGING_SENDER_ID }}@_FE_APP_ID=${{ vars.FE_FIREBASE_APP_ID }}@_FE_VAPID_KEY=${{ vars.FE_FIREBASE_VAPID_KEY }}@_FE_MEDIA_ORIGINS_JSON=${{ vars.FE_MEDIA_ORIGINS_JSON }}@_FE_PROXY_TARGET=${{ vars.FE_API_PROXY_TARGET }}' \
+            .
+
+      # No env flags on purpose: the new revision inherits the live ragre-web
+      # config, and its only runtime variable (NEXT_PUBLIC_API_PROXY_TARGET) is
+      # baked into the image at build time by _FE_PROXY_TARGET above.
+      - name: Deploy FE to Cloud Run
+        run: >-
+          gcloud run deploy ragre-web
+          --image asia-southeast1-docker.pkg.dev/sale-chat-ai/ragre/ragre-web:latest
+          --region asia-southeast1
+          --quiet

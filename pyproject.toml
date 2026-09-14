@@ -2,7 +2,9 @@
 # Chạy: .venv/Scripts/python -m ruff check . && .venv/Scripts/python -m ruff format .
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+# Runtime is Python 3.11 (CI setup-python, Dockerfile, .venv). Declaring py39
+# under-reported py3.10+ syntax (X | None, asyncio.TimeoutError alias) as valid.
+target-version = "py311"
 exclude = [".venv", "node_modules", "docs", "_bmad"]
 
 [tool.ruff.lint]
