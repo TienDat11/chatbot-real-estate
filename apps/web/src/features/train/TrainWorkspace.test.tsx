@@ -123,7 +123,7 @@ describe("TrainWorkspace", () => {
     // the aborted signal above.
   });
 
-  it("renders the streamed answer with citations but no warning banner even when requires_review", async () => {
+  it("renders the review banner and confidence badge in training mode too", async () => {
     renderTrainWorkspace();
 
     sendQuestion("Quy trình giữ chỗ thế nào?");
@@ -145,11 +145,10 @@ describe("TrainWorkspace", () => {
 
     expect(await screen.findByText(/chọn căn và đặt giữ chỗ\./)).toBeTruthy();
     expect(screen.getByText("sales_kit.pdf")).toBeTruthy();
-    // The reliability warning banner and confidence badge must never render,
-    // even at LOW confidence with requires_review (high-stakes) set.
-    expect(screen.queryByTestId("confidence-badge")).toBeNull();
-    expect(screen.queryByText(/Câu trả lời cần tư vấn viên xác nhận/)).toBeNull();
-    expect(screen.queryByText(/độ tin cậy thấp/)).toBeNull();
+    // Trust-safety (W1-05): training is an internal review surface, so the
+    // LOW-confidence warning and the review banner must stay visible there.
+    expect(screen.getByTestId("confidence-badge").textContent).toBe("Độ tin cậy thấp");
+    expect(screen.getByText(/Câu trả lời cần tư vấn viên xác nhận/)).toBeTruthy();
   });
 
   it("never renders a lead CTA even when routing carries lead_cta_hint", async () => {

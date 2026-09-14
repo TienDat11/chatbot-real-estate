@@ -79,7 +79,7 @@ export function MessageList({ messages, streaming, suggestions, excludedProjectN
       // Instant path (streaming / reduced motion): direct scrollTop assignment.
       // jsdom (and some old webviews) lack Element.scrollTo — the same
       // assignment degrades gracefully where scrollTo is missing.
-      if (instant) {
+      if (instant || typeof node.scrollTo !== "function") {
         node.scrollTop = node.scrollHeight;
         return;
       }
