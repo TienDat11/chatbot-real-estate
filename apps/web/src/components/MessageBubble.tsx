@@ -48,6 +48,12 @@ interface MessageBubbleProps {
   message: ChatMessage;
   /** Retry hook for interrupted/retryable streams: re-sends the original question. */
   onRetry?: (message: ChatMessage) => void;
+  /**
+   * Internal-surface seam: trust/debug diagnostics (review banner, confidence
+   * badge, trace footer) render only when true. The parent that owns the
+   * surface mode decides; customer and sales storefronts keep the default.
+   */
+  showTrustDiagnostics?: boolean;
 }
 
 /**
@@ -82,7 +88,7 @@ function WaitingIndicator({ progressStep }: { progressStep?: number }) {
  * - Assistant: left-aligned, white card with sources, facts, streamed markdown
  *   (typing caret while streaming), then a compact trace footer.
  */
-export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
+export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const { message: antdMessage } = AntApp.useApp();
   // The greeting is the only message that carries videos (RAG answers attach
@@ -138,10 +144,11 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
           width: "100%",
         }}
       >
-        {/* Trust-safety (W1-05): a review flag must be visible on every
-            message it belongs to — streaming, errored, or finished — so it
-            sits outside the error/success branches and is never gated. */}
-        {message.requires_review === true && (
+        {/* Trust-safety (W1-05): on internal surfaces the review flag must be
+            visible on every message it belongs to — streaming, errored, or
+            finished — so it sits outside the error/success branches and is
+            never gated by lifecycle, only by surface. */}
+        {showTrustDiagnostics && message.requires_review === true && (
           <div style={{ marginBottom: 12 }}>
             <ReviewBanner />
           </div>
@@ -239,7 +246,7 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
                 </Tooltip>
               </div>
             )}
-            {!message.streaming && (message.confidence || message.traceId || message.latencyMs !== undefined) && (
+            {!message.streaming && showTrustDiagnostics && (message.confidence || message.traceId || message.latencyMs !== undefined) && (
               <div
                 style={{
                   marginTop: 10,

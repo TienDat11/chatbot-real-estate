@@ -2106,6 +2106,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
               .flatMap((project) => [projectDisplayName(project), projectShortName(project)])}
             streaming={streaming}
             onRetry={handleRetryInterrupted}
+            showTrustDiagnostics={isTraining}
           />
           <div style={{ padding: "12px 16px 10px", flexShrink: 0 }}>
             <Composer
