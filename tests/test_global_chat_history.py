@@ -109,6 +109,7 @@ class _FakeConn:
                     "meta": row_args[4],
                     "created_at": datetime(2026, 9, 14, 10, 0, self._msg_seq, tzinfo=timezone.utc),
                 })
+                self._msg_seq += 1
 
     def _owns_session(self, session_id, device_id, identity_key):
         """Replicate the adapter's ownership predicate for read-back assertions."""
@@ -147,10 +148,12 @@ class _FakeConn:
                     "last_active_at": _SEED_TS,
                 }
                 return _FakeRow(session_id=args[0])
-            # ON CONFLICT DO UPDATE WHERE ... ownership check
+            # ON CONFLICT DO UPDATE WHERE ... ownership check (mirrors adapter SQL:
+            # device_id IS NOT DISTINCT FROM EXCLUDED.device_id AND
+            # identity_key IS NOT DISTINCT FROM EXCLUDED.identity_key, AND session_mode='global')
             match = (
-                (self.session["device_id"] is not None and self.session["device_id"] == args[1] or
-                 self.session["identity_key"] is not None and self.session["identity_key"] == args[2])
+                self.session["device_id"] == args[1]
+                and self.session["identity_key"] == args[2]
                 and self.session["session_mode"] == GLOBAL_SESSION_MODE
             )
             if match:
