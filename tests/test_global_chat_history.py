@@ -73,8 +73,8 @@ class _FakeConn:
             # ON CONFLICT DO UPDATE WHERE ... ownership check
             # Simulate: matches only if device/identity match AND session_mode='global'
             match = (
-                (self.session["device_id"] is not None and self.session["device_id"] == args[1] or
-                 self.session["identity_key"] is not None and self.session["identity_key"] == args[2])
+                self.session["device_id"] == args[1]
+                and self.session["identity_key"] == args[2]
                 and self.session["session_mode"] == "global"
             )
             if match:
@@ -608,3 +608,77 @@ async def test_global_parent_uses_reserved_global_container_key(repo, monkeypatc
     )
     assert foreign_ident is not None
     assert foreign_ident.project_key == GLOBAL_SENTINEL_KEY
+
+
+@pytest.mark.asyncio
+async def test_global_session_rejects_same_device_wrong_identity(repo, monkeypatch):
+    """A caller presenting the session's own device_id but a DIFFERENT
+    identity_key must be rejected by append_global_turn.
+
+    This is the discriminating case between the AND ownership predicate
+    (both device_id AND identity_key must match) and the legacy OR predicate
+    (a single matching claim is sufficient). Under OR, dev-1 alone would
+    authorize the append; under AND it must fail closed.
+    """
+    conn = _FakeConnWithTx()
+
+    async def fake_get_pool():
+        return _FakePool(conn)
+
+    monkeypatch.setattr(postgres_chat_history, "get_lead_pool", fake_get_pool)
+
+    session_id = "g-sess-same-device"
+
+    # Owner creates the session with both credentials.
+    assert await repo.append_global_turn(
+        session_id=session_id,
+        device_id="dev-1",
+        identity_key="ident-1",
+        resolved_project_key=None,
+        user_content="hello",
+        assistant_content="hi",
+        assistant_meta={},
+    ) is True
+
+    # Snapshot persisted state (observed via owner credentials) before attack.
+    messages_before = [
+        (m.role, m.content, m.project_key)
+        for m in await repo.list_global_messages(
+            session_id=session_id, device_id="dev-1", identity_key="ident-1"
+        )
+    ]
+    session_before = await repo.get_global_session(
+        session_id=session_id, device_id="dev-1", identity_key="ident-1"
+    )
+    assert session_before is not None
+    assert session_before.active_project_key is None
+    assert session_before.message_count == 2
+
+    # Attacker: same device_id, but a different identity_key.
+    result = await repo.append_global_turn(
+        session_id=session_id,
+        device_id="dev-1",
+        identity_key="ident-ATTACKER",
+        resolved_project_key="camellia",
+        user_content="intrusion",
+        assistant_content="should not be written",
+        assistant_meta={},
+    )
+    assert result is False
+
+    # No new messages may be written.
+    messages_after = [
+        (m.role, m.content, m.project_key)
+        for m in await repo.list_global_messages(
+            session_id=session_id, device_id="dev-1", identity_key="ident-1"
+        )
+    ]
+    assert messages_after == messages_before
+
+    # Session state must be untouched by the rejected attempt.
+    session_after = await repo.get_global_session(
+        session_id=session_id, device_id="dev-1", identity_key="ident-1"
+    )
+    assert session_after.active_project_key is None
+    assert session_after.message_count == session_before.message_count
+    assert session_after.last_active_at == session_before.last_active_at
