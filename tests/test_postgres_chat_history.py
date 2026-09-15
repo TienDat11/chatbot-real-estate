@@ -269,3 +269,160 @@ async def test_lead_transcript_returns_none_for_truly_unlinked_lead(monkeypatch)
         lead_id=999
     )
     assert result is None
+
+# --- GA-03 real-DB regression: RETURNING-based ownership guard (no string tag) ---
+#
+# This test proves the fix for the INSERT...ON CONFLICT DO UPDATE WHERE guard.
+# Postgres returns 'INSERT 0 0' (NOT 'UPDATE 0') when the conflict clause WHERE
+# is false, so checking the command tag string == "UPDATE 0" is dead code that
+# never fires. The correct fix adds RETURNING session_id and checks row is None.
+#
+# To prove the fix is real (not just a fake that says so), this test runs
+# against a live PostgreSQL with the actual asyncpg adapter path.
+
+import asyncpg
+
+
+def _pg_admin_params():
+    """Probe parameters for a local PostgreSQL connection (admin-level)."""
+    try:
+        from api.infrastructure.config.config import get_settings
+        s = get_settings()
+        return {
+            "host": s.postgres_host,
+            "port": s.postgres_port,
+            "user": s.postgres_user,
+            "password": s.postgres_password,
+            "database": "postgres",
+            "connect_timeout": 5,
+        }
+    except Exception:
+        return None
+
+
+def _real_db_available():
+    """Probe whether a PostgreSQL is reachable for integration tests."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    params = _pg_admin_params()
+    if params is None:
+        return None
+    try:
+        conn = psycopg2.connect(**params)
+        conn.close()
+        return params
+    except Exception:
+        return None
+
+
+
+# Core schema for the global session ownership regression.
+# Deliberately minimal: only the columns the adapter touches in append_global_turn.
+_GA03_TEST_SCHEMA = """
+CREATE TEMP TABLE IF NOT EXISTS chat_sessions (
+    session_id TEXT PRIMARY KEY,
+    device_id TEXT NULL,
+    identity_key TEXT NULL,
+    project_key TEXT NOT NULL,
+    title TEXT NULL,
+    message_count INT NOT NULL DEFAULT 0,
+    handed_off BOOL NOT NULL DEFAULT FALSE,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    session_mode TEXT NOT NULL DEFAULT 'project',
+    active_project_key TEXT NULL,
+    answer_mode TEXT NULL
+);
+
+CREATE TEMP TABLE IF NOT EXISTS chat_messages (
+    id BIGSERIAL PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+    project_key TEXT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content TEXT NOT NULL,
+    meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+
+
+@pytest.mark.asyncio
+async def test_global_turn_ownership_guard_real_db(monkeypatch):
+    """Integration proof on real PostgreSQL: a foreign device/identity cannot
+    mutate an existing global session created by a different owner.
+
+    The guard uses RETURNING session_id + row-is-None; a stale '== "UPDATE 0"'
+    guard would silently allow the write. This test FAILS if the guard is
+    reverted to the string-tag comparison.
+    """
+    psycopg2 = pytest.importorskip("psycopg2")
+    params = _real_db_available()
+    if params is None:
+        pytest.skip("local PostgreSQL not reachable for ownership-guard regression")
+
+    # Use the existing database with TEMP tables — no database-level DDL required,
+    # so this works against managed poolers (Supabase) that restrict CREATE DATABASE.
+    import urllib.parse
+    pw = urllib.parse.quote(params["password"], safe="")
+    dsn = (
+        f"postgresql://{params['user']}:{pw}"
+        f"@{params['host']}:{params['port']}/{params['database']}"
+    )
+
+    async with asyncpg.create_pool(
+        dsn=dsn,
+        min_size=1,
+        max_size=1,
+    ) as pool:
+        async with pool.acquire() as conn:
+            await conn.execute(_GA03_TEST_SCHEMA)
+
+        # Monkeypatch the adapter to use our real test pool.
+        async def _fake_get_pool():
+            return pool
+
+        monkeypatch.setattr(postgres_chat_history, "get_lead_pool", _fake_get_pool)
+
+        repo = postgres_chat_history.PostgresChatHistoryRepository()
+
+        # Owner creates the global session.
+        ok = await repo.append_global_turn(
+            session_id="g-real-sess",
+            device_id="dev-owner",
+            identity_key="ident-owner",
+            resolved_project_key=None,
+            user_content="hello",
+            assistant_content="hi",
+            assistant_meta={},
+        )
+        assert ok is True
+
+        # Foreign caller (different device AND different identity) attempts
+        # to append a turn into the same session id.
+        result = await repo.append_global_turn(
+            session_id="g-real-sess",
+            device_id="dev-FOREIGN",
+            identity_key="ident-FOREIGN",
+            resolved_project_key="camellia",
+            user_content="foreign?",
+            assistant_content="should not persist",
+            assistant_meta={},
+        )
+        assert result is False, "foreign caller must be rejected (RETURNING guard)"
+
+        # Verify no foreign messages landed in the table.
+        async with pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM chat_messages WHERE session_id = $1", "g-real-sess"
+            )
+            assert count == 2, f"foreign messages leaked: {count} rows"
+
+        # Verify the session row is still owned by the original owner.
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT device_id, identity_key, project_key, session_mode "
+                "FROM chat_sessions WHERE session_id = $1", "g-real-sess"
+            )
+            assert row["device_id"] == "dev-owner"
+            assert row["identity_key"] == "ident-owner"
+            assert row["project_key"] == "_global"
+            assert row["session_mode"] == "global"

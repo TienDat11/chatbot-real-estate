@@ -13,6 +13,7 @@ from api.application.services.chat_history_service import (
     TRANSCRIPT_MAX_MESSAGES,
     ChatMessage,
     ChatSessionSummary,
+    GlobalSessionSummary,
     TrainingSessionSummary,
 )
 from api.infrastructure.adapters.postgres_leads import get_lead_pool
@@ -619,6 +620,245 @@ class PostgresChatHistoryRepository:
                 "ALTER TABLE chat_sessions VALIDATE CONSTRAINT chk_sessions_customer_identity"
             )
             return "validated"
+    # --- GA-03 global assistant session persistence ---------------------------
+
+    GLOBAL_SENTINEL_KEY = "_global"
+    GLOBAL_SESSION_MODE = "global"
+
+    async def append_global_turn(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None,
+        identity_key: str | None,
+        resolved_project_key: str | None,
+        user_content: str,
+        assistant_content: str,
+        assistant_meta: dict[str, Any],
+    ) -> bool:
+        """Append one global assistant turn.
+
+        The parent session row is created on first use with the reserved
+        ``_global`` container key and ``session_mode='global'``. Subsequent
+        turns are guarded by device_id/identity_key ownership PLUS
+        ``session_mode = 'global'``; the session's project_key is _global and is
+        NEVER required to equal resolved_project_key (the parent scope is
+        _global, individual turns carry their own project_key on messages).
+
+        ``active_project_key`` is updated ONLY when resolved_project_key is
+        not None. Neutral clarification turns (resolved_project_key IS NULL)
+        leave the previous active_project_key unchanged.
+        """
+        # An anonymous handle is required: a bare session_id is a routing value,
+        # not a credential. Refuse to create or mutate without a verifiable claim.
+        if device_id is None and identity_key is None:
+            return False
+        try:
+            pool = await get_lead_pool()
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    row = await conn.fetchrow(
+                        """INSERT INTO chat_sessions(
+                               session_id, device_id, identity_key, project_key,
+                               title, message_count, session_mode, active_project_key
+                           )
+                           VALUES($1,$2,$3,$4,$5,0,$6,NULL)
+                           ON CONFLICT(session_id) DO UPDATE SET
+                               last_active_at=now()
+                           WHERE chat_sessions.device_id IS NOT DISTINCT FROM EXCLUDED.device_id
+                             AND chat_sessions.identity_key IS NOT DISTINCT FROM EXCLUDED.identity_key
+                             AND chat_sessions.session_mode='global'
+                             AND chat_sessions.answer_mode IS NULL
+                           RETURNING session_id""",
+                        session_id,
+                        device_id,
+                        identity_key,
+                        self.GLOBAL_SENTINEL_KEY,
+                        user_content[:120],
+                        self.GLOBAL_SESSION_MODE,
+                    )
+                    if row is None:
+                        raise PermissionError("global chat session ownership mismatch")
+                    await conn.executemany(
+                        """INSERT INTO chat_messages(
+                               session_id, project_key, role, content, meta
+                           ) VALUES($1,$2,$3,$4,$5::jsonb)""",
+                        [
+                            (
+                                session_id,
+                                resolved_project_key,
+                                "user",
+                                user_content,
+                                "{}",
+                            ),
+                            (
+                                session_id,
+                                resolved_project_key,
+                                "assistant",
+                                assistant_content,
+                                json.dumps(assistant_meta, ensure_ascii=False),
+                            ),
+                        ],
+                    )
+                    if resolved_project_key is not None:
+                        await conn.execute(
+                            """UPDATE chat_sessions
+                                SET message_count=message_count+2,
+                                    last_active_at=now(),
+                                    active_project_key=$2
+                                WHERE session_id=$1""",
+                            session_id,
+                            resolved_project_key,
+                        )
+                    else:
+                        await conn.execute(
+                            """UPDATE chat_sessions
+                                SET message_count=message_count+2,
+                                    last_active_at=now()
+                                WHERE session_id=$1""",
+                            session_id,
+                        )
+            return True
+        except PermissionError:
+            return False
+        except Exception as exc:
+            if not _is_history_degraded(exc):
+                raise
+            _warn_history_degraded(exc)
+            return False
+
+    async def get_global_session(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+    ) -> GlobalSessionSummary | None:
+        """Retrieve a global session, guarded by ownership + session_mode='global'.
+
+        At least one of device_id/identity_key must be provided and must match
+        the stored row. The session's project_key is the reserved _global
+        container identity; it is never a real retrieval project.
+        """
+        try:
+            pool = await get_lead_pool()
+            async with pool.acquire() as conn:
+                if device_id is None and identity_key is None:
+                    return None
+                row = await conn.fetchrow(
+                    """SELECT session_id, device_id, identity_key, project_key,
+                              session_mode, active_project_key, title,
+                              message_count, handed_off, last_active_at
+                       FROM chat_sessions
+                       WHERE session_id=$1 AND project_key=$4
+                         AND session_mode=$5 AND answer_mode IS NULL
+                         AND ($2::text IS NOT NULL AND identity_key = $2
+                              OR $3::text IS NOT NULL AND device_id = $3)""",
+                    session_id,
+                    identity_key,
+                    device_id,
+                    self.GLOBAL_SENTINEL_KEY,
+                    self.GLOBAL_SESSION_MODE,
+                )
+            return GlobalSessionSummary(**dict(row)) if row else None
+        except Exception as exc:
+            if not _is_history_degraded(exc):
+                raise
+            _warn_history_degraded(exc)
+            return None
+
+    async def list_global_sessions(
+        self,
+        *,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+        limit: int = 50,
+    ) -> list[GlobalSessionSummary]:
+        """List global sessions for an anonymous handle, newest-first.
+
+        At least one of device_id/identity_key must be provided; with both NULL
+        the call fails closed and returns an empty list (no session enumeration
+        for unclaimed callers).
+        """
+        if device_id is None and identity_key is None:
+            return []
+        try:
+            pool = await get_lead_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT session_id, device_id, identity_key, project_key,
+                              session_mode, active_project_key, title,
+                              message_count, handed_off, last_active_at
+                       FROM chat_sessions
+                       WHERE session_mode='global' AND answer_mode IS NULL
+                         AND ($1::text IS NOT NULL AND device_id = $1
+                              OR $2::text IS NOT NULL AND identity_key = $2)
+                       ORDER BY last_active_at DESC, session_id DESC
+                       LIMIT $3""",
+                    device_id,
+                    identity_key,
+                    limit,
+                )
+            return [GlobalSessionSummary(**dict(row)) for row in rows]
+        except Exception as exc:
+            if not _is_history_degraded(exc):
+                raise
+            _warn_history_degraded(exc)
+            return []
+
+    async def list_global_messages(
+        self,
+        *,
+        session_id: str,
+        device_id: str | None = None,
+        identity_key: str | None = None,
+    ) -> list[ChatMessage]:
+        """List messages for a global session, ordered by creation.
+
+        Ownership is enforced via an IN-subquery on chat_sessions so the message
+        rows are only returned when the caller can prove they own the parent
+        global session. A bare session_id (both claims NULL) returns an empty
+        list — no transcript leak.
+
+        Each message carries its per-turn project_key (NULL for neutral
+        clarification turns, the resolved project key for resolved turns).
+        """
+        if device_id is None and identity_key is None:
+            return []
+        try:
+            pool = await get_lead_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT role, content, meta, created_at, project_key
+                       FROM chat_messages
+                       WHERE session_id=$1
+                         AND session_id IN (
+                             SELECT session_id FROM chat_sessions
+                             WHERE session_id=$1 AND session_mode='global'
+                               AND answer_mode IS NULL
+                               AND ($2::text IS NOT NULL AND identity_key = $2
+                                    OR $3::text IS NOT NULL AND device_id = $3)
+                         )
+                       ORDER BY created_at ASC, id ASC""",
+                    session_id,
+                    identity_key,
+                    device_id,
+                )
+            return [
+                ChatMessage(
+                    role=row["role"],
+                    content=row["content"],
+                    meta=_normalize_meta(row["meta"]),
+                    created_at=row["created_at"],
+                    project_key=row["project_key"],
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            if not _is_history_degraded(exc):
+                raise
+            _warn_history_degraded(exc)
+            return []
 
 
 repository = PostgresChatHistoryRepository()

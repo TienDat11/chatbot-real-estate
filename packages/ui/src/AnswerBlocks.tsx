@@ -18,6 +18,10 @@ import { normalizeMath } from "./math-format";
 // navy #0E2A47 primary, warm border neutral #E9E2D6. The ui package stays
 // dependency-free, so hex values are kept in sync by convention.
 
+// Colors mirror the app's premium proptech tokens (apps/web/src/lib/tokens.ts):
+// navy #0E2A47 primary, warm border neutral #E9E2D6. The ui package stays
+// dependency-free, so hex values are kept in sync by convention.
+
 export interface AnswerBlocksProps {
   content: string;
   className?: string;

@@ -87,13 +87,13 @@ const ENDPOINT_PROJECTS = {
   ],
 };
 
-// Spec §5.2 body, byte-faithful.
+// Spec §5.2 body, faithful to server copy with ANONYMOUS_BASE_TURN_CAP=10.
 const BODY_429 = {
   ok: false,
   error: {
     code: "ANONYMOUS_QUOTA_EXCEEDED",
-    message: "Anh/chị đã dùng hết 3 lượt tư vấn miễn phí. Để lại số điện thoại để nhận tư vấn miễn phí nhé!",
-    quota: { used_turns: 3, remaining_turns: 0, cap: 3, is_authenticated: false, bonus_granted: 0 },
+    message: "Anh/chị đã dùng hết 10 lượt tư vấn miễn phí. Để lại số điện thoại để nhận tư vấn miễn phí nhé!",
+    quota: { used_turns: 10, remaining_turns: 0, cap: 10, is_authenticated: false, bonus_granted: 0 },
   },
   lead_cta: { required: true },
 };
@@ -162,8 +162,8 @@ describe("ChatPage anonymous quota gating", () => {
   });
 
   it("drives the badge from SSE ack/done snapshots, persists the minted token and keeps lead_cta timing", async () => {
-    const quotaPre = { used_turns: 0, remaining_turns: 3, cap: 3, is_authenticated: false, bonus_granted: 0 };
-    const quotaPost = { used_turns: 1, remaining_turns: 2, cap: 3, is_authenticated: false, bonus_granted: 0 };
+    const quotaPre = { used_turns: 0, remaining_turns: 10, cap: 10, is_authenticated: false, bonus_granted: 0 };
+    const quotaPost = { used_turns: 1, remaining_turns: 9, cap: 10, is_authenticated: false, bonus_granted: 0 };
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL) => {
@@ -202,7 +202,7 @@ describe("ChatPage anonymous quota gating", () => {
 
     // The stream replays in one batch, so the observable end state is the
     // done snapshot (authoritative post-consumption, §5.3).
-    await waitFor(() => expect(screen.getByText("Còn 2 lượt")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Còn 9 lượt")).toBeTruthy());
     // Ack wiring proven through its payload: the minted-on-server token from
     // the ack frame persisted (self-heal path).
     await waitFor(() =>

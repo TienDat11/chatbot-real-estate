@@ -13,6 +13,8 @@ interface MessageListProps {
   excludedProjectNames?: string[];
   /** Retry hook for interrupted/retryable streams: re-sends the original question. */
   onRetry?: (message: ChatMessage) => void;
+  /** Forwarded unchanged to every bubble: internal-surface diagnostics visibility. */
+  showTrustDiagnostics?: boolean;
 }
 
 const GENERIC_SUGGESTIONS = [
@@ -26,7 +28,7 @@ const GENERIC_SUGGESTIONS = [
  * Scrollable message area. Auto-scrolls to the bottom on new messages or
  * while streaming; shows question suggestions before the first exchange.
  */
-export function MessageList({ messages, streaming, suggestions, excludedProjectNames = [], onRetry }: MessageListProps) {
+export function MessageList({ messages, streaming, suggestions, excludedProjectNames = [], onRetry, showTrustDiagnostics = false }: MessageListProps) {
   const sourceSuggestions = suggestions?.length ? suggestions : GENERIC_SUGGESTIONS;
   const visibleSuggestions = sourceSuggestions.filter((suggestion) =>
     !excludedProjectNames.some((name) => suggestion.toLocaleLowerCase().includes(name.toLocaleLowerCase())),
@@ -79,7 +81,7 @@ export function MessageList({ messages, streaming, suggestions, excludedProjectN
       // Instant path (streaming / reduced motion): direct scrollTop assignment.
       // jsdom (and some old webviews) lack Element.scrollTo — the same
       // assignment degrades gracefully where scrollTo is missing.
-      if (instant) {
+      if (instant || typeof node.scrollTo !== "function") {
         node.scrollTop = node.scrollHeight;
         return;
       }
@@ -115,7 +117,7 @@ export function MessageList({ messages, streaming, suggestions, excludedProjectN
     >
       <div style={{ maxWidth: 860, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
         {messages.map((m) => (
-          <MessageBubble key={m.id} message={m} onRetry={onRetry} />
+          <MessageBubble key={m.id} message={m} onRetry={onRetry} showTrustDiagnostics={showTrustDiagnostics} />
         ))}
         {messages.length > 0 && !streaming && (
           <div className="suggestion-grid" style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, textAlign: "left" }}>

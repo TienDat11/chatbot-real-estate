@@ -1,0 +1,61 @@
+{
+  "_comment": "Ceiling of pre-existing Clean Architecture dependency debt (LGN-P0-003). A CEILING, not a snapshot: the guard fails only on edges NOT listed here, so removing debt passes without editing this file. Never regenerate it upward to make a failing run green.",
+  "edges": [
+    {
+      "source": "api/application/services/crm_customer_service.py",
+      "imported": "api.interfaces.api.deps"
+    },
+    {
+      "source": "api/application/services/phone_reveal_audit.py",
+      "imported": "api.interfaces.api.deps"
+    },
+    {
+      "source": "api/application/services/query_quota_gate.py",
+      "imported": "api.interfaces.api.deps.admin"
+    },
+    {
+      "source": "api/application/services/staff_audit_service.py",
+      "imported": "api.interfaces.api.deps"
+    },
+    {
+      "source": "api/domain/services/conv_slots.py",
+      "imported": "api.infrastructure.dependencies"
+    },
+    {
+      "source": "api/domain/services/guard_input.py",
+      "imported": "api.infrastructure.config.config"
+    },
+    {
+      "source": "api/domain/services/llm.py",
+      "imported": "api.infrastructure.adapters.openai_compatible_llm"
+    },
+    {
+      "source": "api/domain/services/llm.py",
+      "imported": "api.infrastructure.dependencies"
+    },
+    {
+      "source": "api/domain/services/nl2sql_guard.py",
+      "imported": "api.application.services.sql_leg"
+    },
+    {
+      "source": "api/domain/services/nl2sql_guard.py",
+      "imported": "api.infrastructure.dependencies"
+    },
+    {
+      "source": "api/domain/services/rerank.py",
+      "imported": "api.infrastructure.adapters.http_rerank"
+    },
+    {
+      "source": "api/domain/services/rerank.py",
+      "imported": "api.infrastructure.adapters.noop"
+    },
+    {
+      "source": "api/domain/services/rerank.py",
+      "imported": "api.infrastructure.dependencies"
+    },
+    {
+      "source": "api/domain/services/rewrite.py",
+      "imported": "api.infrastructure.dependencies"
+    }
+  ]
+}

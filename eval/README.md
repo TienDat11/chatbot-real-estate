@@ -3,10 +3,20 @@
 Bộ đánh giá chatbot RAG bất động sản (plan §10-11, §16.1). Chạy golden set qua
 `eval/golden_set_v1.json` và bộ test anti-injection qua `eval/injection_test_vn.json`.
 
-## Yêu cầu chạy thật
+Tài liệu này KHÔNG công bố bất kỳ con số accuracy nào của hệ thống. Mọi ngưỡng gate
+đều là hằng số trong code / `_meta` data file — đọc tại đó, đừng copy số vào đây.
 
-Verification thật cần 3 thứ ĐỀU SẴN: PostgreSQL (schema + seed), LLM (extract/answer/judge),
-reranker. **Hiện tại chưa có infra** — chỉ chạy được `--dry`.
+## Yêu cầu chạy thật (real verification)
+
+Verification thật cần ĐỦ 4 thứ sẵn sàng cùng lúc:
+
+1. PostgreSQL (schema + seed, gồm chunk content cho judge)
+2. Embedding model (dims 1024, khoá theo aibox text-embedding-v4)
+3. Reranker
+4. Answer model (LLM sinh câu trả lời) + judge model (ghim riêng qua `EVAL_JUDGE_MODEL`)
+
+Thiếu bất kỳ thành phần nào → KHÔNG có verification thật. `--dry` không phải bước
+thay thế (xem mục `--dry` ở cuối).
 
 ## CLI
 
@@ -14,7 +24,7 @@ reranker. **Hiện tại chưa có infra** — chỉ chạy được `--dry`.
 python eval/run_eval.py                          # full golden set, backend thật
 python eval/run_eval.py --subset 10              # 10 câu đầu
 python eval/run_eval.py --only-category legal    # chỉ 1 category
-python eval/run_eval.py --dry                    # CI: mock pipeline + mock judge (định thức)
+python eval/run_eval.py --dry                    # CHỈ tự test harness: MockPipeline + MockJudge — không gọi PG/LLM/embedding/rerank
 python eval/run_eval.py --inject                 # chạy eval/injection_test_vn.json qua guard
 python eval/run_eval.py --json-out eval/results.json
 python eval/run_eval.py --fail-fast              # exit 1 nếu có câu fail
@@ -22,16 +32,20 @@ python eval/run_eval.py --fail-fast              # exit 1 nếu có câu fail
 
 Flag: `--golden` (mặc định `eval/golden_set_v1.json`), `--subset N`, `--only-category`,
 `--dry`, `--inject`, `--json-out PATH`, `--fail-fast`. Env: `POSTGRES_*`, `LLM_BASE_URL`,
-`LLM_API_KEY`, `EVAL_JUDGE_MODEL` (ghim `deepseek-v4-flash-0731`), `EVAL_PIPELINE_TIMEOUT_S`.
+`LLM_API_KEY`, `EVAL_JUDGE_MODEL`, `EVAL_PIPELINE_TIMEOUT_S`.
 
-## Thresholds (ngưỡng §11)
+## Exit gates (điều kiện exit code)
 
-| Metric | Ngưỡng | Ghi chú |
-|---|---|---|
-| Numeric exact-match | **≥ 0.95** | Gate cứng — exit code 1 nếu thấp hơn (cuối `amain`) |
-| Faithfulness (unsupported-claim) | **= 0** | Judge LLM: claim ngoài context → fail câu |
-| Latency | **P50 < 6s, P95 < 10s** | In ở SUMMARY là PASS/CHECK (chưa phải exit gate) |
-| Injection | **≥ 90%** | `_meta.ok_threshold_pct` trong `injection_test_vn.json` |
+Runner có gate ở cuối `amain()`; giá trị ngưỡng nằm TRONG CODE/DATA:
+
+- **Numeric exact-match** — exit code 1 khi tỷ lệ câu khớp số học rơi dưới ngưỡng
+  §11 (hằng số trong `amain()`).
+- **Faithfulness (unsupported-claim)** — judge LLM chấm từng câu; claim ngoài context →
+  câu đó fail (không có exit gate riêng, chỉ tính vào pass rate).
+- **Latency** — SUMMARY in P50/P95 so với ngân sách vận hành (hằng số trong
+  `_print_summary`); đây là chỉ số hiệu năng, chưa phải exit gate.
+- **Injection** — `eval_injection` pass khi tỷ lệ chặn đạt `ok_threshold_pct` khai báo
+  trong `_meta` của `injection_test_vn.json`.
 
 ## Image relevance (illustrative images)
 
@@ -59,14 +73,29 @@ Cách đọc:
 
 ## Injection test contract
 
-`eval/injection_test_vn.json`: **20 prompt tiếng Việt = 10 injection + 10 benign control.**
-Mỗi prompt có `{id, prompt, label: injection|benign, expect_reject}`. Contract: injection
-phải bị chặn (`expect_reject=true`), benign KHÔNG được reject (`expect_reject=false`).
-Chạy bằng `--inject`; ghi FP/FN khi chạy. Pass khi `pass_pct >= ok_threshold_pct` (90).
+`eval/injection_test_vn.json` chứa các prompt tiếng Việt hai nhóm: injection và benign
+control (số lượng từng nhóm đọc trong `_meta` / mảng `prompts` của file). Mỗi prompt có
+`{id, prompt, label: injection|benign, expect_reject}`. Contract: injection phải bị chặn
+(`expect_reject=true`), benign KHÔNG được reject (`expect_reject=false`). Chạy bằng
+`--inject`; ghi FP/FN khi chạy. Pass khi tỷ lệ chặn đạt `ok_threshold_pct` trong `_meta`.
 
-## ⚠️ `--dry` — chỉ là harness self-test, KHÔNG phải verification pipeline
+## ⚠️ `--dry` — harness self-test, KHÔNG phải verification pipeline
 
-`--dry` dùng **`MockPipeline` + `MockJudge`**: trả payload khớp expectation của golden câu
-để test harness đo được (định thức, không gọi PG/LLM/rerank). **Kết quả `--dry` KHÔNG chứng
-minh pipeline thật đúng** — chỉ chứng minh harness chạy và đo được. Verification pipeline thật
-cần chạy real run với PostgreSQL + LLM + rerank (hiện blocked: chưa có infra).
+`--dry` chạy **`MockPipeline` + `MockJudge`**: `MockPipeline.run()` trả payload được
+tổng hợp từ chính expectation của golden câu (`expected_answer_contains`,
+`expected_facts`, `expected_images`), `MockJudge.judge()` luôn verdict "supported".
+Vì mock tự khớp kỳ vọng, điểm SUMMARY khi `--dry` **luôn đẹp một cách giả tạo**.
+
+`--dry` chỉ chứng minh đúng một điều: **harness wiring chạy được** — CLI parse flag,
+golden JSON đọc được, các checker (`numeric_exact_match`, `_check_routing`,
+`_check_images`, `_check_refusal`, `_check_freshness`, `_persona_checks`) gọi được và
+tính tổng/exit code đúng. Nó **không** chứng minh:
+
+- pipeline thật trả lời đúng,
+- embedding / retrieval / reranker hoạt động,
+- faithfulness hay confidence của câu trả lời thật,
+- ảnh minh hoạ hay routing thật khớp kỳ vọng.
+
+Verification pipeline thật bắt buộc chạy real run (không `--dry`) với PostgreSQL +
+embedding model + reranker + answer model + judge model. Kết quả `--dry` không được
+dùng làm bằng chứng chất lượng ở bất kỳ đâu.

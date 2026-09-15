@@ -1700,7 +1700,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
       ? `Chuyên viên tư vấn dự án ${projectShortName(currentProject)}`
       : "Chuyên viên tư vấn bất động sản";
 
-  // Quota badge copy follows the approved policy: anonymous 3 (+5 once),
+  // Quota badge copy follows the approved policy: anonymous 10 (+5 once),
   // registered customer 5 (+5 once), sales exactly 10, admin unlimited.
   const quotaBadgeText = quota === null ? "" : quotaBadgeLabel(quota);
   // Staff surfaces never reuse the customer lead-bonus CTA, even before the
@@ -2106,6 +2106,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
               .flatMap((project) => [projectDisplayName(project), projectShortName(project)])}
             streaming={streaming}
             onRetry={handleRetryInterrupted}
+            showTrustDiagnostics={isTraining}
           />
           <div style={{ padding: "12px 16px 10px", flexShrink: 0 }}>
             <Composer

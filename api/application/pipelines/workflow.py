@@ -1,7 +1,8 @@
 """LlamaIndex Workflows orchestrator for the 8-step query pipeline (AD-18).
 
 Flow: guard -> rewrite/route -> RAG + SQL + geo legs in parallel -> rerank ->
-merge (SSE: places -> sources -> facts) -> generate (stream) -> output guard ->
+merge (SSE: places -> sources -> facts) -> generate (buffer) -> output guard
+(verify-before-delivery: ONE token frame on success, none on fail-closed) ->
 audit. Every step degrades gracefully on timeout/error instead of crashing.
 
 Cross-step data lives in ``ctx.store`` (DictState); events are routing signals
@@ -45,7 +46,11 @@ from api.application.services.sql_leg import SqlLegResult, run_sql_leg
 from api.domain.services.guard_input import GuardResult as InputGuardResult
 from api.domain.services.guard_input import guard_input, rule_screen
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
-from api.domain.services.guard_output import guard_output, sanitize_output
+from api.domain.services.guard_output import (
+    guard_output,
+    normalize_answer_display,
+    sanitize_output,
+)
 from api.domain.services.rewrite import RoutedResult, fallback_route, rewrite_query
 from api.domain.services.utils import sha256_hex
 from api.domain.value_objects.constants import (
@@ -57,12 +62,6 @@ from api.domain.value_objects.constants import (
 )
 from api.infrastructure.config.config import project_geo_center
 from api.infrastructure.dependencies import get_geo, get_reranker
-from api.domain.services.guard_output import (
-    GuardResult as OutputGuardResult,
-    guard_output,
-    normalize_answer_display,
-    sanitize_output,
-)
 from api.infrastructure.ports.geo import GeoResult
 
 logger = logging.getLogger("api.workflow")
@@ -91,6 +90,13 @@ STEP_TIMEOUTS = {
 
 # Event callback: accepts async or sync callables (workflow awaits coroutines).
 EventCallback = Callable[[str, dict], Awaitable[None] | None]
+# Deterministic safe-copy for fail-closed output: when verification is
+# unavailable (guard timeout/exception) or returns LOW confidence, no original
+# answer byte reaches the customer (LGN-P0-002 publication invariant).
+VERIFICATION_FALLBACK_MESSAGE = (
+    "Tôi chưa thể xác minh câu trả lời này từ các nguồn hiện có. "
+    "Vui lòng thử lại sau."
+)
 
 
 class QueryRejected(Exception):
@@ -605,11 +611,12 @@ class RagQueryWorkflow(Workflow):
             merged, await ctx.store.get("history"), routed.high_stakes
         ):
             token = sanitize_output(token)
+            # Buffer every chunk in memory; no SSE_EVENT_TOKEN may leave this
+            # step until output_guard has verified the joined answer (LGN-P0-002:
+            # verify-before-customer-delivery).
             parts.append(token)
-            await self._emit(SSE_EVENT_TOKEN, {"text": token})
         answer = normalize_answer_display("".join(parts))
         await ctx.store.set("answer", answer)
-
         audit = await ctx.store.get("audit")
         audit.update(
             model=merged.meta.get("model"),
@@ -626,6 +633,7 @@ class RagQueryWorkflow(Workflow):
         merged: Merged = await ctx.store.get("merged")
         answer: str = await ctx.store.get("answer")
         routed: RoutedResult = await ctx.store.get("routed")
+        verification_failed = False
         try:
             guard_res = await asyncio.wait_for(
                 guard_output(
@@ -634,10 +642,45 @@ class RagQueryWorkflow(Workflow):
                 timeout=STEP_TIMEOUTS["output_guard"],
             )
         except asyncio.TimeoutError:
+            # Fail closed (W1-02): a guard that never ran means the answer is
+            # UNVERIFIED, so it must not ship as MEDIUM/no-review. LOW forces
+            # requires_review, which keeps the human-in-the-loop path for
+            # exactly the answers nobody checked.
+            verification_failed = True
             guard_res = OutputGuardResult(
-                confidence="MEDIUM", requires_review=False, verdicts={"timeout": True}
+                confidence="LOW",
+                requires_review=True,
+                verdicts={"timeout": True, "verification_unavailable": True},
             )
             await self._flag(ctx, "output_guard_timeout")
+        except Exception as exc:  # noqa: BLE001 — verification failure is never silent
+            # Only the exception CLASS is recorded: a verifier message can carry
+            # query/SQL fragments and must not reach the audit trail or flags.
+            verification_failed = True
+            error_type = type(exc).__name__
+            guard_res = OutputGuardResult(
+                confidence="LOW",
+                requires_review=True,
+                verdicts={"verification_unavailable": True, "error_type": error_type},
+            )
+            await self._flag(ctx, f"output_guard_error:{error_type}")
+
+        # LGN-P0-002: verify-before-customer-delivery. The original answer is
+        # published ONLY when the guard returned normally AND confidence != "LOW".
+        # On guard timeout, guard exception, or a LOW verdict (numeric grounding
+        # failure, orphan citation, etc.) the answer is unverified — emit the
+        # deterministic safe-copy instead so no original byte reaches the customer.
+        publish_original = not verification_failed and guard_res.confidence != "LOW"
+        if publish_original:
+            # Verified: emit the complete answer as ONE post-verification token
+            # frame. Normalization ran in generate; the guard only validated it.
+            await self._emit(SSE_EVENT_TOKEN, {"text": answer})
+        else:
+            # Fail-closed: replace the delivery answer with the safe-copy and
+            # persist to store so no wrapper downstream can retain the original.
+            answer = VERIFICATION_FALLBACK_MESSAGE
+            await ctx.store.set("answer", answer)
+            await self._emit(SSE_EVENT_TOKEN, {"text": answer})
 
         audit = await ctx.store.get("audit")
         audit.update(confidence=guard_res.confidence, guard_verdicts=guard_res.verdicts)

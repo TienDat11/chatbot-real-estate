@@ -171,7 +171,9 @@ def _citation_grounding(answer: str, sources: list[dict], known_fe_ids: list[str
     """
     known = set(known_fe_ids or [])
     verdict: dict[str, Any] = {"status": "pending", "detail": "no span to check"}
-    fe_cites = re.findall(r"\[fe-\d{3}\]", answer or "")
+    # Capture the bare id: the brackets are markup, and comparing them against
+    # `known` (which holds plain fe_ids) reported EVERY citation as missing.
+    fe_cites = re.findall(r"\[(fe-\d{3})\]", answer or "")
     if fe_cites:
         missing = [c for c in fe_cites if c not in known]
         verdict = {"status": "pass" if not missing else "fail", "fe_citations": len(fe_cites), "missing": missing}
@@ -323,7 +325,15 @@ async def guard_output(
     numeric_pass = not orphan
 
     # (b) citation grounding best-effort
-    verdicts["citation_grounding"] = _citation_grounding(answer, sources, [f.get("fe_id") for f in facts or []])
+    citation_verdict = _citation_grounding(
+        answer, sources, [f.get("fe_id") for f in facts or []]
+    )
+    verdicts["citation_grounding"] = citation_verdict
+    # A citation naming an evidence id that does not exist is a VERIFIABLE
+    # grounding failure (unlike the "pending" verdict when there is no span to
+    # check), so it forces LOW exactly the way an orphan number does — and LOW
+    # is what raises requires_review below.
+    citation_fail = citation_verdict.get("status") == "fail"
 
     # (c) confidence 3-tier
     sql_row_count = int(meta.get("sql_row_count", 0) or 0)
@@ -332,7 +342,12 @@ async def guard_output(
     has_approx = bool(meta.get("has_approx", False))
     geo_places = int(meta.get("geo_places", 0) or 0)
     confidence = _confidence_3tier(
-        numeric_pass, sql_row_count, strong_chunks, degraded, has_approx, geo_places
+        numeric_pass and not citation_fail,
+        sql_row_count,
+        strong_chunks,
+        degraded,
+        has_approx,
+        geo_places,
     )
 
     # (d) high_stakes flag (routing carries it for high-stakes legal answers).

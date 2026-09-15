@@ -1,5 +1,5 @@
 import type { Confidence, FactEvidence, Image, Source, Video } from "@rag-ragre/contracts";
-import { SourcesList, FactsTable, AnswerBlocks } from "@rag-ragre/ui";
+import { SourcesList, FactsTable, AnswerBlocks, ReviewBanner, ConfidenceBadge } from "@rag-ragre/ui";
 import { Alert, App as AntApp, Button, Tooltip, Typography } from "antd";
 import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
 import { useCallback, useState } from "react";
@@ -48,6 +48,12 @@ interface MessageBubbleProps {
   message: ChatMessage;
   /** Retry hook for interrupted/retryable streams: re-sends the original question. */
   onRetry?: (message: ChatMessage) => void;
+  /**
+   * Internal-surface seam: trust/debug diagnostics (review banner, confidence
+   * badge, trace footer) render only when true. The parent that owns the
+   * surface mode decides; customer and sales storefronts keep the default.
+   */
+  showTrustDiagnostics?: boolean;
 }
 
 /**
@@ -82,7 +88,7 @@ function WaitingIndicator({ progressStep }: { progressStep?: number }) {
  * - Assistant: left-aligned, white card with sources, facts, streamed markdown
  *   (typing caret while streaming), then a compact trace footer.
  */
-export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
+export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const { message: antdMessage } = AntApp.useApp();
   // The greeting is the only message that carries videos (RAG answers attach
@@ -138,6 +144,15 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
           width: "100%",
         }}
       >
+        {/* Trust-safety (W1-05): on internal surfaces the review flag must be
+            visible on every message it belongs to — streaming, errored, or
+            finished — so it sits outside the error/success branches and is
+            never gated by lifecycle, only by surface. */}
+        {showTrustDiagnostics && message.requires_review === true && (
+          <div style={{ marginBottom: 12 }}>
+            <ReviewBanner />
+          </div>
+        )}
         {message.error ? (
           message.interrupted || message.retryable ? (
             <>
@@ -231,7 +246,7 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
                 </Tooltip>
               </div>
             )}
-            {!message.streaming && (message.traceId || message.latencyMs !== undefined) && (
+            {!message.streaming && showTrustDiagnostics && (message.confidence || message.traceId || message.latencyMs !== undefined) && (
               <div
                 style={{
                   marginTop: 10,
@@ -244,6 +259,11 @@ export function MessageBubble({ message, onRetry }: MessageBubbleProps) {
                   flexWrap: "wrap",
                 }}
               >
+                {/* Backend confidence (done frame or hydrated transcript)
+                    shares the trace footer: LOW is the explicit red warning,
+                    MEDIUM stays neutral, and the banner above is reserved for
+                    actual review decisions. */}
+                {message.confidence && <ConfidenceBadge confidence={message.confidence} />}
                 {message.traceId && <span>trace_id: {message.traceId}</span>}
                 {message.latencyMs !== undefined && (
                   <span>phản hồi trong {formatLatency(message.latencyMs)}</span>
