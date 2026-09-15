@@ -55,7 +55,8 @@ class _FakeConn:
         q = query.strip().upper()
         if q.startswith("INSERT INTO CHAT_SESSIONS"):
             # Simulate ON CONFLICT: if no session exists, INSERT 0 1;
-            # if it exists but ownership mismatches, UPDATE 0.
+            # if it exists but ownership mismatches, INSERT 0 0
+            # (Postgres never returns UPDATE 0 for INSERT...ON CONFLICT DO UPDATE WHERE).
             if self.session is None:
                 self.session = {
                     "session_id": args[0],
@@ -78,8 +79,8 @@ class _FakeConn:
             )
             if match:
                 self.session["last_active_at"] = _SEED_TS
-                return "UPDATE 1"
-            return "UPDATE 0"
+                return "INSERT 0 1"
+            return "INSERT 0 0"
 
         if q.startswith("UPDATE CHAT_SESSIONS"):
             if self.session is None:
@@ -99,7 +100,6 @@ class _FakeConn:
         if q.startswith("INSERT INTO CHAT_MESSAGES"):
             for row_args in args_seq:
                 # (session_id, project_key, role, content, meta)
-                self._msg_seq += 1
                 self.messages.append({
                     "id": self._msg_seq,
                     "session_id": row_args[0],
@@ -109,6 +109,7 @@ class _FakeConn:
                     "meta": row_args[4],
                     "created_at": datetime(2026, 9, 14, 10, 0, self._msg_seq, tzinfo=timezone.utc),
                 })
+
     def _owns_session(self, session_id, device_id, identity_key):
         """Replicate the adapter's ownership predicate for read-back assertions."""
         if self.session is None:
@@ -126,6 +127,37 @@ class _FakeConn:
     async def fetchrow(self, query: str, *args):
         self.executed.append(("fetchrow", query, args))
         q = query.strip().upper()
+        if q.startswith("INSERT INTO CHAT_SESSIONS") and "RETURNING" in q:
+            # Simulate INSERT ... ON CONFLICT DO UPDATE WHERE ... RETURNING.
+            # Returns the session_id row when the upsert touches a row (fresh
+            # insert or ownership-matched conflict update); returns None when the
+            # conflict clause WHERE is false (ownership mismatch — Postgres yields
+            # INSERT 0 0 and no row for RETURNING).
+            if self.session is None:
+                self.session = {
+                    "session_id": args[0],
+                    "device_id": args[1],
+                    "identity_key": args[2],
+                    "project_key": args[3],
+                    "title": args[4],
+                    "message_count": 0,
+                    "session_mode": args[5],
+                    "active_project_key": None,
+                    "handed_off": False,
+                    "last_active_at": _SEED_TS,
+                }
+                return _FakeRow(session_id=args[0])
+            # ON CONFLICT DO UPDATE WHERE ... ownership check
+            match = (
+                (self.session["device_id"] is not None and self.session["device_id"] == args[1] or
+                 self.session["identity_key"] is not None and self.session["identity_key"] == args[2])
+                and self.session["session_mode"] == GLOBAL_SESSION_MODE
+            )
+            if match:
+                self.session["last_active_at"] = _SEED_TS
+                return _FakeRow(session_id=args[0])
+            return None
+
         if q.startswith("SELECT SESSION_ID") and "CHAT_SESSIONS" in q:
             session_id = args[0]
             identity_key = args[1]

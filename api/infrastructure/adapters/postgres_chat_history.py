@@ -657,7 +657,7 @@ class PostgresChatHistoryRepository:
             pool = await get_lead_pool()
             async with pool.acquire() as conn:
                 async with conn.transaction():
-                    session_result = await conn.execute(
+                    row = await conn.fetchrow(
                         """INSERT INTO chat_sessions(
                                session_id, device_id, identity_key, project_key,
                                title, message_count, session_mode, active_project_key
@@ -668,7 +668,8 @@ class PostgresChatHistoryRepository:
                            WHERE chat_sessions.device_id IS NOT DISTINCT FROM EXCLUDED.device_id
                              AND chat_sessions.identity_key IS NOT DISTINCT FROM EXCLUDED.identity_key
                              AND chat_sessions.session_mode='global'
-                             AND chat_sessions.answer_mode IS NULL""",
+                             AND chat_sessions.answer_mode IS NULL
+                           RETURNING session_id""",
                         session_id,
                         device_id,
                         identity_key,
@@ -676,7 +677,7 @@ class PostgresChatHistoryRepository:
                         user_content[:120],
                         self.GLOBAL_SESSION_MODE,
                     )
-                    if session_result == "UPDATE 0":
+                    if row is None:
                         raise PermissionError("global chat session ownership mismatch")
                     await conn.executemany(
                         """INSERT INTO chat_messages(
