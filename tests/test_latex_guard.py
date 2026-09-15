@@ -3,9 +3,10 @@ The answer LLM occasionally emits LaTeX (\(...\), \frac{a}{b}, $$...$$) that the
 chat UI renders as markup. The prompt bans it (system_policy.md §GIỌNG VĂN) and
 ``normalize_answer_display`` rewrites a COMPLETED answer to readable Unicode —
 non-destructively (delimiters/commands only, unknown markup left verbatim, no
-text dropped). Streaming is untouched: the per-token dash rule in
-``sanitize_output`` stays exactly as before, normalization runs only on the
-joined answer.
+text dropped). The per-token dash rule in ``sanitize_output`` is unchanged;
+normalization runs only on the joined answer. LGN-P0-002 changed delivery, not
+normalization: no token frame leaves ``generate``, and ``output_guard`` emits the
+normalized answer once verification passes.
 """
 
 from __future__ import annotations
@@ -133,16 +134,25 @@ def _run_workflow(monkeypatch, tokens: list[str]) -> tuple[dict, list]:
     return asyncio.run(go()), events
 
 
-def test_sse_tokens_untouched_but_final_answer_normalized(monkeypatch):
-    """Streaming keeps raw tokens verbatim (existing SSE semantics); only the
-    joined answer stored/returned at the completed boundary is normalized."""
+def test_sse_tokens_verified_then_delivered_once_normalized(monkeypatch):
+    """LGN-P0-002 contract: no token may leave the pipeline before output_guard
+    verifies the answer; the single delivered token frame is the normalized
+    answer, and no raw LaTeX (no \\( \\) or \\frac) ever reaches the customer.
+
+    The raw-latex chunks are fed only through the buffer, not streamed, so the
+    customer cannot observe LaTeX glyphs — the concatenated token stream and the
+    done payload answer are the same normalized text, delivered exactly once."""
     tokens = [r"diện tích \(", "68", r" m2\), \frac{a}{b}"]
     result, events = _run_workflow(monkeypatch, tokens)
 
-    token_events = [(e, d) for e, d in events if e == workflow_module.SSE_EVENT_TOKEN]
-    assert [d["text"] for d, in [(d, ) for _, d in token_events]] == tokens
+    token_events = [d for e, d in events if e == workflow_module.SSE_EVENT_TOKEN]
+    # Post-verification contract: exactly one token frame carrying the full
+    # normalized answer (LGN-P0-002 verify-before-delivery).
+    assert len(token_events) == 1
+    delivered = token_events[0]["text"]
+    assert delivered == "diện tích 68 m2, a/b"
+    assert "\\" not in delivered  # no raw LaTeX delimiters/commands reach the user
 
-    joined = "".join(tokens)
-    assert result["answer"] == normalize_answer_display(joined)
-    assert "\\" not in result["answer"]
-    assert result["answer"] == "diện tích 68 m2, a/b"
+    # Stream/done equivalence: the single token equals the done payload answer.
+    assert result["answer"] == delivered
+    assert result["answer"] == normalize_answer_display("".join(tokens))
