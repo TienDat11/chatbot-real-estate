@@ -99,6 +99,9 @@ def _is_word_boundary(ch: str) -> bool:
     return not (ch.isascii() and (ch.isalpha() or ch.isdigit()))
 
 
+_LEADING_ARTICLES: frozenset[str] = frozenset({"the"})
+
+
 def _safe_needles(needles: tuple[str, ...]) -> tuple[str, ...]:
     """Drop degenerate truncated needles before they bind scope.
 
@@ -125,6 +128,11 @@ def _safe_needles(needles: tuple[str, ...]) -> tuple[str, ...]:
     prefix of the parenthetical ``the soleil da nang (bo suu tap ...)`` and must
     be kept — its next character is a space, so the mid-word rule preserves it
     while discarding only the truncated garbage (``the so`` / ``the came``).
+
+    Additionally, drop any needle whose words are EXCLUSIVELY leading articles
+    (e.g. ``the``): a bare article is too short to identify a project and would
+    match any query containing it. A needle with any non-article word
+    (``the sun city``) survives.
     """
     keep: list[str] = []
     for v in needles:
@@ -137,6 +145,10 @@ def _safe_needles(needles: tuple[str, ...]) -> tuple[str, ...]:
             if not _is_word_boundary(boundary):
                 degenerate = True
                 break
+        if not degenerate:
+            words = v.split()
+            if words and all(word in _LEADING_ARTICLES for word in words):
+                degenerate = True
         if not degenerate:
             if v and v not in keep:
                 keep.append(v)

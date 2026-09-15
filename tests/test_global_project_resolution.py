@@ -290,3 +290,30 @@ async def test_no_default_project_is_used() -> None:
     assert res_empty.project_key is None
     assert res_empty.source == ProjectResolutionSource.NONE
     assert res_empty.candidates == ()
+
+
+@pytest.mark.asyncio
+async def test_leading_article_only_needle_does_not_bind_project() -> None:
+    """A needle consisting only of a leading article (``the``) must not bind scope.
+
+    Regression for GA-04: ``project_match_variants`` emits a bare article as a
+    needle when the project's brand token is exactly 3 chars (e.g. ``sun`` /
+    "The Sun City" yields needles ``('sun', 'the sun city', 'the')``). The bare
+    ``the`` survived ``_safe_needles`` and matched any query containing it,
+    silently resolving an unresolved turn to a project the customer never named.
+
+    With a synthetic 3-char-token catalogue entry, a query that never names the
+    project must stay unresolved (no default, no guessed scope).
+    """
+    catalogue: list[tuple[str, str]] = [("sun", "The Sun City")]
+    res = await resolve_global_project(
+        query="the camera is broken?",
+        selected_project_key=None,
+        route_project_key=None,
+        session_project_key=None,
+        known_projects=catalogue,
+    )
+    assert res.status == ProjectResolutionStatus.UNRESOLVED
+    assert res.project_key is None
+    assert res.source == ProjectResolutionSource.NONE
+    assert res.candidates == ()
