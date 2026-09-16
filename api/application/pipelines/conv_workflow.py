@@ -114,6 +114,7 @@ class ConvRunEv(Event):
     # G3-r6: named context project for training turns (default None keeps
     # every existing construction site and normal-mode behavior unchanged).
     training_context_project_key: str | None = None
+    known_projects: list[tuple[str, str]] | None = None
 
 
 class RagRgreConvWorkflow(Workflow):
@@ -194,7 +195,13 @@ class RagRgreConvWorkflow(Workflow):
         # corpus, so detection runs BEFORE the inner (retrieval) workflow and
         # short-circuits it below. The facade passes the live registry list;
         # direct callers degrade to the static seed mirror without any I/O.
-        known_projects = getattr(ev, "known_projects", None) or default_known_projects()
+        known_projects = getattr(ev, "known_projects", None)
+        if known_projects is None:
+            # Legacy /query path: no caller-supplied catalogue — degrade to the
+            # static seed mirror without any I/O. The GA core always supplies a
+            # fail-closed list (possibly empty), which is preserved as-is so an
+            # unresolved catalogue never triggers seed-based redirect detection.
+            known_projects = default_known_projects()
         current_key = project_key or get_context(session_id, device_id).project_key
         # FR-25 (revised): the cross-project redirect is a CUSTOMER funnel
         # guardrail — a training lookup legitimately names real projects, and
@@ -250,6 +257,7 @@ class RagRgreConvWorkflow(Workflow):
             project_key=project_key,
             device_id=device_id,
             training_context_project_key=getattr(ev, "training_context_project_key", None),
+            known_projects=getattr(ev, "known_projects", None),
         )
 
     @step()
@@ -271,6 +279,7 @@ class RagRgreConvWorkflow(Workflow):
             project_key=ev.project_key,
             device_id=ev.device_id,
             training_context_project_key=getattr(ev, "training_context_project_key", None),
+            known_projects=getattr(ev, "known_projects", None),
         )
         result: Any = None
         run_error: Exception | None = None
@@ -374,6 +383,7 @@ class RagQueryPipelineConv:
         device_id: str | None = None,
         on_event: EventCallback | None = None,
         training_context_project_key: str | None = None,
+        known_projects: list[tuple[str, str]] | None = None,
     ) -> dict:
         # One async registry read per request (B2/M1): binding the record makes
         # the conv layer (brand_token, conv_directive) and the inner workflow
@@ -388,9 +398,13 @@ class RagQueryPipelineConv:
 
         registry_key = training_retrieval_scope(project_key, training_context_project_key)
         record = await load_project_registry_record(registry_key)
-        # Live known-project list for the cross-project guardrail (same async
-        # port as every registry consumer); degrades to the seed mirror inside.
-        known_projects = await load_known_projects()
+        # Authoritative known-project list for the cross-project guardrail (M1).
+        # A caller-supplied catalogue (the GA core's fail-closed list, including
+        # an explicit empty one) MUST be reused verbatim; only legacy /query
+        # callers that pass None trigger the live registry read, which itself
+        # degrades to the seed mirror inside `load_known_projects`.
+        if known_projects is None:
+            known_projects = await load_known_projects()
         with bound_request_project(record):
             wf = RagRgreConvWorkflow(on_event=on_event if on_event is not None else self._on_event)
             return await wf.run(

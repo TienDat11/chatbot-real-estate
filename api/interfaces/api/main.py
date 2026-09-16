@@ -993,6 +993,7 @@ def create_app() -> FastAPI:
         sales_session_router,
     )
     from api.interfaces.api.anon_routes import router as anon_router  # noqa: PLC0415
+    from api.interfaces.api.assistant_routes import router as assistant_router  # noqa: PLC0415
     from api.interfaces.api.auth_routes import router as auth_router  # noqa: PLC0415
     from api.interfaces.api.crm_routes import router as crm_router  # noqa: PLC0415
     from api.interfaces.api.deps import require_training_sales  # noqa: PLC0415
@@ -1014,6 +1015,7 @@ def create_app() -> FastAPI:
     app.include_router(anon_router)
     app.include_router(auth_router)
     app.include_router(notifications_router)
+    app.include_router(assistant_router)
 
     @app.get("/health")
     async def health() -> dict:

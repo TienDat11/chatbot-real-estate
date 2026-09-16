@@ -727,6 +727,7 @@ class RagQueryPipeline:
         device_id: str | None = None,
         on_event: EventCallback | None = None,
         training_context_project_key: str | None = None,
+        known_projects: list[tuple[str, str]] | None = None,
     ) -> dict:
         # One async registry read per request (B2/M1): the record is bound into
         # the request snapshot so every downstream legacy helper (identity,
@@ -750,6 +751,7 @@ class RagQueryPipeline:
                 project_key=project_key,
                 device_id=device_id,
                 training_context_project_key=training_context_project_key,
+                known_projects=known_projects,
             )
             return await handler
 
