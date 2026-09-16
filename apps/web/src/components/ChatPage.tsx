@@ -1750,13 +1750,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
       <header
         className="app-header chat-header"
         style={{
-          padding: "12px 24px",
           display: usesSalesShell ? "none" : "flex",
-          flexWrap: "wrap",
-          gap: "8px 12px",
-          alignItems: "center",
-          borderBottom: `1px solid ${C.border}`,
-          background: C.surface,
           flexShrink: 0,
           zIndex: 1,
           minWidth: 0,
@@ -1764,6 +1758,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
           overflowWrap: "anywhere",
         }}
       >
+        <div className="chat-header__identity-group">
         <div
           className="chat-header__identity-mark hero-badge"
           style={{
@@ -1781,7 +1776,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
         >
           <SafetyCertificateOutlined />
         </div>
-        <div className="chat-header__identity" style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere", overflow: "hidden", flex: "1 1 160px" }}>
+        <div className="chat-header__identity">
           <Typography.Title
             level={4}
             style={{
@@ -1837,15 +1832,10 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
             </span>
             </Typography.Text>
           </div>
+        </div>
           <div
             className="chat-header__actions"
             style={{
-              marginLeft: "auto",
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              flexWrap: "wrap",
-              justifyContent: "flex-end",
               minWidth: 0,
               maxWidth: "100%",
             }}

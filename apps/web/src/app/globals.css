@@ -324,17 +324,46 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
   white-space: nowrap;
 }
 
-.chat-header__identity,
-.chat-header__actions {
-  min-width: 0;
+.chat-header {
+  padding: 12px 24px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
 }
+.chat-header__identity-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 160px;
+}
+
+.chat-header__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+}
+
+.chat-header__identity {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  flex: 1 1 160px;
+}
+
 
 @media (max-width: 640px) {
   .chat-header {
     padding: 10px 12px !important;
     align-items: flex-start !important;
   }
-  .chat-header__identity {
+  .chat-header__identity-group {
     flex: 1 1 100%;
   }
   .chat-header__actions {
