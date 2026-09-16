@@ -112,8 +112,8 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
     return (
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <div
+          className="message-bubble message-bubble--user"
           style={{
-            maxWidth: "72%",
             background: C.primary,
             color: "#FFFFFF",
             borderRadius: "16px 16px 4px 16px",
@@ -134,8 +134,8 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
   return (
     <div style={{ display: "flex", justifyContent: "flex-start" }}>
       <div
+        className="message-bubble message-bubble--assistant"
         style={{
-          maxWidth: "86%",
           background: C.surface,
           border: "1px solid " + C.border,
           borderRadius: "16px 16px 16px 4px",

@@ -36,24 +36,26 @@ export function AccountControls() {
     <Space size={8} wrap>
       <Typography.Text
         type="secondary"
+        className="account-controls__identity"
         style={{ maxWidth: 220, display: "inline-flex", alignItems: "center", gap: 6 }}
         title={label}
       >
         <UserOutlined aria-hidden="true" />
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span className="account-controls__identity-text" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {label}
         </span>
       </Typography.Text>
       <Button
         type="default"
         icon={<LogoutOutlined />}
+        className="account-controls__logout"
         aria-label="Đăng xuất tài khoản"
         onClick={() => {
           void auth.signOut().then(() => router.push(loginHref));
         }}
         style={{ height: 40, fontWeight: 600, borderRadius: RADIUS.btn }}
       >
-        Đăng xuất
+        <span className="account-controls__logout-label">Đăng xuất</span>
       </Button>
     </Space>
   );

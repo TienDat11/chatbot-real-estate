@@ -14,11 +14,6 @@ import {
   type ActiveProject,
 } from "./activeProjects";
 
-// No width token exists in the design-token module (C/RADIUS/SHADOW/FS cover
-// color, corner and type scales only), so the modal width stays a local named
-// constant instead of a magic number (review n5). 680px fits the cover-on-left
-// premium rows without truncating the full project address.
-const PROJECT_PICKER_MODAL_WIDTH = 680;
 
 export interface ProjectPickerProps {
   open: boolean;
@@ -68,7 +63,8 @@ export function ProjectPicker({
       onCancel={onClose}
       footer={null}
       centered
-      width={PROJECT_PICKER_MODAL_WIDTH}
+      width="min(680px, calc(100vw - 48px))"
+      className="project-picker-modal"
       keyboard={!force}
       maskClosable={!force}
       closable={!force}
@@ -145,7 +141,7 @@ function ProjectCard({
       aria-selected={selected}
       aria-label={fullName}
       onClick={() => onSelect(project.project_key)}
-      className="project-card card-in"
+      className="project-picker__card project-card card-in"
       style={{
         display: "flex",
         alignItems: "center",
@@ -164,10 +160,9 @@ function ProjectCard({
       }}
     >
       <span
+        className="project-picker__cover"
         style={{
           flexShrink: 0,
-          width: 96,
-          height: 64,
           borderRadius: RADIUS.small,
           overflow: "hidden",
           display: "block",
@@ -176,8 +171,9 @@ function ProjectCard({
       >
         <ProjectCover src={cover} alt={name} ratio="3 / 2" warm={hot} />
       </span>
-      <span style={{ flex: 1, minWidth: 0 }}>
+      <span className="project-picker__body" style={{ flex: 1, minWidth: 0 }}>
         <span
+          className="project-picker__title-row"
           style={{
             display: "flex",
             alignItems: "center",
@@ -188,13 +184,13 @@ function ProjectCard({
             color: C.text,
           }}
         >
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span className="project-picker__title">
               <span title={fullName}>{name}</span>
           </span>
           {hot && (
             <span
               role="status"
-              className="chip-gold"
+              className="chip-gold project-picker__badge"
               style={{
                 flexShrink: 0,
                 display: "inline-flex",
@@ -214,14 +210,12 @@ function ProjectCard({
         </span>
         {location && (
           <span
+            className="project-picker__location"
             style={{
               display: "block",
               fontSize: 14,
               lineHeight: "22px",
               color: C.textMuted,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
             }}
           >
             {location}
@@ -230,6 +224,7 @@ function ProjectCard({
       </span>
       {selected && (
         <span
+          className="project-picker__selected-icon"
           style={{
             flexShrink: 0,
             width: 26,

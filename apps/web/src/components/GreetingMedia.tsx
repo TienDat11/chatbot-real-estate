@@ -99,8 +99,9 @@ function pickHeroVideos(videos: Video[] | undefined): Video[] {
 /** Sales-toned eyebrow above a media block. */
 function MediaLabel({ icon, title, sub }: { icon: React.ReactNode; title: string; sub: string }) {
   return (
-    <header style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+    <header className="greeting-media__label" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
       <span
+        className="greeting-media__label-icon"
         style={{
           width: 26,
           height: 26,
@@ -172,7 +173,7 @@ function VideoHero({ videos, onMediaFailure }: { videos: Video[]; onMediaFailure
 
   return (
     <section aria-label="Video giới thiệu dự án">
-      <div style={headerRowStyle}>
+      <div className="greeting-media__header-row" style={headerRowStyle}>
         <MediaLabel
           icon={<VideoCameraOutlined />}
           title="Tham quan dự án"

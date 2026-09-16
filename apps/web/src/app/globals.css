@@ -284,7 +284,36 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
   font-size: var(--fs-body, 17px);
   line-height: var(--fs-body-line, 28px);
 }
-
+/* Chat bubble widths (RUI-03): semantic classes driven entirely by CSS
+   breakpoints. Desktop keeps the existing conversation rhythm (user ~72%,
+   assistant ~86%); the <=640px tier widens both so the bubbles respect the
+   narrow column without touching source layout. No JS viewport listeners. */
+.message-bubble--user {
+  max-width: 72%;
+}
+.message-bubble--assistant {
+  max-width: 86%;
+}
+@media (max-width: 640px) {
+  .message-bubble--user {
+    max-width: 92%;
+  }
+  .message-bubble--assistant {
+    max-width: 98%;
+  }
+}
+/* Greeting media header (RUI-03): the label and the Segmented control share one
+   row. Desktop keeps them side-by-side; <=640px stacks so the segmented picker
+   never crowds the 26px icon label on a narrow column. */
+.greeting-media__header-row {
+  flex-wrap: nowrap;
+}
+@media (max-width: 640px) {
+  .greeting-media__header-row {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}
 /* ======================================================================
  * Premium proptech component layer
  * ==================================================================== */
@@ -301,9 +330,18 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
 .app-shell__intro { margin-bottom: 20px; }
 @media (max-width: 760px) {
   .app-shell__header-inner { min-height: 64px; padding: 10px 16px; gap: 12px; flex-wrap: wrap; }
+  /* Two-row shell: brand + account on row 1, horizontal nav on row 2. */
   .app-shell__nav { order: 3; flex-basis: 100%; overflow-x: auto; padding-bottom: 2px; }
   .app-shell__account { margin-left: auto; }
   .app-shell__content { padding: 16px 16px 32px; }
+}
+@media (max-width: 480px) {
+  .app-shell__subtitle,
+  .app-shell__role-tag,
+  .account-controls__identity-text,
+  .account-controls__logout-label {
+    display: none;
+  }
 }
 
 /* Bounded shell for full-height chat workspaces (/sales/chat, /sales/train):
@@ -377,13 +415,71 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
     linear-gradient(135deg, #0e2a47 0%, #141d2b 55%, #1b2737 100%);
 }
 
-/* Login keeps the visual/auth split on desktop and becomes a single auth card on mobile. */
+/* Login shell: 3fr 2fr visual/auth split on desktop; single column on mobile.
+   The login-visual column is hidden on small viewports so only the auth card
+   remains, and the grid collapses to one flexible track (no forced minmax that
+   would leave an empty gutter). Default display for .login-visual is owned here
+   (not inline) so the mobile display:none always wins without !important. */
+.login-visual {
+  display: flex;
+}
+.login-shell {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+}
 @media (max-width: 720px) {
+  .login-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* The visual column is a sibling of the auth card in the grid, not an inline
+     style, so a plain display:none (no !important) defeats it without fighting
+     a concrete inline declaration — consistent with the anti-broad-override rule. */
   .login-visual {
-    display: none !important;
+    display: none;
   }
 }
-
+/* Project picker card (RUI-03): responsive cover/title/location layout.
+   Desktop defaults match the pre-existing inline dimensions; mobile (<=480px)
+   shrinks the cover and lets title/location wrap so the full project identity
+   (not just the hot badge) stays readable on narrow phones. */
+.project-picker__cover {
+  width: 96px;
+  height: 64px;
+}
+.project-picker__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-picker__location {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 480px) {
+  .project-picker__cover {
+    width: 72px;
+    height: 48px;
+  }
+  .project-picker__title-row {
+    flex-wrap: wrap;
+  }
+  .project-picker__title,
+  .project-picker__location {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+}
+/* Project picker modal (RUI-03): desktop targets the 680px premium card width,
+   but that value overhangs below ~720px. Cap the rendered box to the viewport
+   inset so narrow viewports never trigger horizontal scroll, while the 680px
+   target wins wherever it fits. */
+.project-picker-modal {
+  max-width: calc(100vw - 48px);
+}
 /* Auth split-screen visual: layered brand gradient (navy -> charcoal with gold
    and terracotta radial accents) standing in for project photography. Uses the
    same recipe as .media-gradient--warm so auth surfaces stay on the one brand
