@@ -90,4 +90,32 @@ describe("GreetingMedia containment", () => {
     expect(container.querySelector("img")).toBeTruthy();
     expect(container.textContent).toContain("Mặt tiền dự án");
   });
+
+  it("places the bridge copy before the image gallery when both media types exist", () => {
+    vi.stubEnv(
+      "NEXT_PUBLIC_MEDIA_ORIGINS_JSON",
+      JSON.stringify([{ origin: "https://example.test", pathPrefixes: ["/media/"] }]),
+    );
+    const { container } = render(
+      <GreetingMedia
+        videos={[VIDEO]}
+        images={[{
+          image_id: "image-2",
+          kind: "exterior",
+          title: "Mặt tiền dự án",
+          caption: null,
+          alt_text: "Mặt tiền dự án",
+          url_cdn: "https://example.test/media/image-2.jpg",
+          width: 800,
+          height: 600,
+          score: 1,
+        }]}
+      />,
+    );
+    const bridge = container.querySelector(".greeting-media__bridge-copy");
+    const gallery = container.querySelector('section[aria-label="Hình ảnh & tài liệu dự án"]');
+    expect(bridge).toBeTruthy();
+    expect(gallery).toBeTruthy();
+    expect(bridge!.compareDocumentPosition(gallery!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
 });

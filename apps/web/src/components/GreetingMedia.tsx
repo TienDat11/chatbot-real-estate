@@ -56,11 +56,10 @@ export function GreetingMedia({ videos, images, ready = true }: GreetingMediaPro
     >
       {showVideo && <VideoHero videos={heroVideos} onMediaFailure={() => setMediaUnavailable(true)} />}
       {showVideo && showImages && <div style={{ height: 16 }} />}
-      {showImages && <ImageGallery images={publicImages} />}
-      {/* Bridge copy between the film and the sheets: a short sales line that
-          keeps momentum while separating the two media blocks visually. */}
+      {/* Bridge copy sits between the film and sheets so the narrative remains media-first. */}
       {(showVideo || showImages) && (
         <Typography.Paragraph
+          className="greeting-media__bridge-copy"
           style={{
             margin: "12px 0 0",
             color: C.textMuted,
@@ -75,6 +74,7 @@ export function GreetingMedia({ videos, images, ready = true }: GreetingMediaPro
           {GREETING_MID_TEXT}
         </Typography.Paragraph>
       )}
+      {showImages && <ImageGallery images={publicImages} />}
       {mediaUnavailable && !showVideo && !showImages && (
         <p role="status" style={{ margin: "12px 0 0", color: C.textMuted, fontSize: 13, lineHeight: "20px", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
           Nội dung chữ vẫn hiển thị đầy đủ. Media công khai hiện không khả dụng.
