@@ -255,9 +255,15 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     embedding_openrouter_model: str = "openai/text-embedding-3-small"
     # Hostname allowlist for outbound embedding/rerank HTTP calls (SSRF guard).
-    # gemini host added for the Google [OI]-compat embedding route.
+    # Exact hostnames only (case-insensitive match in validate_outbound_url).
+    # gemini host: Google [OI]-compat embedding route; api.jina.ai: rerank
+    # route (RERANK_BINDING=aibox -> https://api.jina.ai/v1/rerank).
     outbound_allowed_hosts: list[str] = Field(
-        default_factory=lambda: ["openrouter.ai", "generativelanguage.googleapis.com"]
+        default_factory=lambda: [
+            "openrouter.ai",
+            "generativelanguage.googleapis.com",
+            "api.jina.ai",
+        ]
     )
     # Development-only opt-in: allow loopback/private outbound endpoints (tests / local dev)
     outbound_allow_private: bool = False
