@@ -1,13 +1,9 @@
 // @vitest-environment jsdom
 /**
- * Premium streaming UX contract (round 2):
- *  1. waiting phase (streaming, no content) shows the staged thinking label;
- *  2. streaming phase renders via the stream-safe AnswerBlocks path;
- *  3. non-interrupted retryable errors show the retry affordance;
- *  4. non-retryable non-interrupted errors render the styled error Alert
- *     (no retry button);
- *  5. finished assistant messages expose the copy button; clipboard write
- *     fires the "Đã sao chép" feedback.
+ * Streaming UX contract:
+ *  1. one compact progress surface remains visible for the full stream;
+ *  2. sources are stored early but rendered only after completion;
+ *  3. completed answers place sources after answer/media/copy content.
  */
 import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -55,26 +51,74 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("MessageBubble thinking/typing states", () => {
-  it("waiting phase (no content) shows the staged thinking label", () => {
-    renderBubble(baseMessage({ streaming: true, acknowledged: true }));
-    expect(screen.getByText(/Đang phân tích câu hỏi/)).toBeTruthy();
-    expect(screen.getByText("AI đã nhận câu hỏi")).toBeTruthy();
+describe("MessageBubble streaming progress", () => {
+  it("starts collapsed with an icon-only disclosure control", () => {
+    renderBubble(baseMessage({ streaming: true, progressStep: 0 }));
+    expect(screen.getByText("Đang hiểu yêu cầu")).toBeTruthy();
+    expect(screen.queryByText("Hiểu yêu cầu")).toBeNull();
+    const button = screen.getByRole("button", { name: "Mở tiến trình" });
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    expect(button.textContent).toBe("");
   });
 
-  it("thinking label advances with progressStep", () => {
-    renderBubble(baseMessage({ streaming: true, acknowledged: true, progressStep: 1 }));
-    expect(screen.getByText(/Đang tra cứu tài liệu pháp lý/)).toBeTruthy();
+  it("allows manual expand and collapse", () => {
+    renderBubble(baseMessage({ streaming: true, progressStep: 2 }));
+    const button = screen.getByRole("button", { name: "Mở tiến trình" });
+    fireEvent.click(button);
+    expect(screen.getByRole("button", { name: "Thu gọn tiến trình" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Hiểu yêu cầu")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Thu gọn tiến trình" }));
+    expect(screen.getByRole("button", { name: "Mở tiến trình" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Hiểu yêu cầu")).toBeNull();
   });
 
-  it("streaming phase with partial content renders the stream-safe path (no raw heading)", () => {
+  it("does not change manual expansion when content starts streaming", () => {
+    const view = renderBubble(baseMessage({ streaming: true, content: "", progressStep: 0 }));
+    fireEvent.click(screen.getByRole("button", { name: "Mở tiến trình" }));
+    view.rerender(<AntApp><MessageBubble message={baseMessage({ streaming: true, content: "Đầu", progressStep: 3 })} /></AntApp>);
+    expect(screen.getByRole("button", { name: "Thu gọn tiến trình" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps the compact progress header visible with partial answer content", () => {
+    renderBubble(baseMessage({ streaming: true, content: "Một phần câu trả lời", progressStep: 3 }));
+    expect(screen.getByText("Đang soạn câu trả lời")).toBeTruthy();
+    expect(screen.getByText("Một phần câu trả lời")).toBeTruthy();
+  });
+
+  it("keeps partial markdown stream-safe while progress remains visible", () => {
     const { container } = renderBubble(
-      baseMessage({ streaming: true, content: "Giá căn 2PN như sau\n## Bảng giá" }),
+      baseMessage({ streaming: true, content: "Giá căn 2PN như sau\n## Bảng giá", progressStep: 3 }),
     );
-    // Unfinished heading stays plain text (no h* element, no literal # leak).
     expect(container.querySelector("h1,h2,h3,h4,h5,h6")).toBeNull();
     expect(container.textContent).not.toContain("#");
     expect(container.textContent).toContain("Bảng giá");
+  });
+
+
+  it("hides progress after completion", () => {
+    const view = renderBubble(baseMessage({ streaming: true, progressStep: 0 }));
+    view.rerender(<AntApp><MessageBubble message={baseMessage({ streaming: false, content: "Hoàn tất" })} /></AntApp>);
+    expect(screen.queryByRole("region", { name: "Tiến trình trả lời" })).toBeNull();
+  });
+});
+
+describe("MessageBubble source placement", () => {
+  const sources = [{ doc_id: "doc-1", title: "Tài liệu tham khảo", kind: "training" }];
+
+  it("defers sources while the answer is streaming", () => {
+    renderBubble(baseMessage({ streaming: true, content: "Đang trả lời", sources }));
+    expect(screen.getByText("Đang trả lời")).toBeTruthy();
+    expect(screen.queryByText("Nguồn tài liệu")).toBeNull();
+    expect(screen.queryByText("Tài liệu tham khảo")).toBeNull();
+  });
+
+  it("renders sources after the completed answer", () => {
+    const { container } = renderBubble(baseMessage({ streaming: false, content: "Câu trả lời cuối", sources }));
+    expect(screen.getByText("Câu trả lời cuối")).toBeTruthy();
+    expect(screen.getByText("Tài liệu tham khảo")).toBeTruthy();
+    const answer = container.textContent!.indexOf("Câu trả lời cuối");
+    const source = container.textContent!.indexOf("Tài liệu tham khảo");
+    expect(answer).toBeLessThan(source);
   });
 });
 

@@ -232,6 +232,99 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
   to { transform: rotate(360deg); }
 }
 
+/* Compact streamed-response progress surface. Responsive properties live here
+ * so the header remains usable without viewport JavaScript. */
+.response-progress {
+  margin: 0 0 14px;
+  min-width: 0;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--c-surface-alt) 42%, transparent);
+  color: var(--c-text);
+}
+.response-progress__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+}
+.response-progress__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--c-text-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.response-progress__spinner,
+.response-progress__toggle {
+  flex-shrink: 0;
+}
+.response-progress__toggle {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  flex: 0 0 32px;
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  background: var(--c-surface);
+  color: var(--c-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.response-progress__toggle:hover {
+  background: var(--c-primary-soft);
+  border-color: var(--c-border-hover);
+  color: var(--c-primary);
+}
+.response-progress__timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0 12px 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.response-progress__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--c-text-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.response-progress__item.is-active {
+  color: var(--c-text);
+  font-weight: 600;
+}
+.response-progress__marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--c-success);
+}
+.response-progress__item.is-active .response-progress__marker {
+  color: var(--c-primary);
+}
+@media (max-width: 480px) {
+  .response-progress__header {
+    align-items: flex-start;
+  }
+  .response-progress__status {
+    align-items: flex-start;
+  }
+}
+
 /* Respect reduced motion for all micro-animations */
 @media (prefers-reduced-motion: reduce) {
   .ack-dots span,
