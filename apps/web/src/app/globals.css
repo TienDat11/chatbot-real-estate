@@ -314,6 +314,35 @@ html.font-scale-3 { --fs-body: 21px; --fs-body-line: 33px; }
     gap: 6px;
   }
 }
+
+.greeting-media__segment-label {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-header__identity,
+.chat-header__actions {
+  min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .chat-header {
+    padding: 10px 12px !important;
+    align-items: flex-start !important;
+  }
+  .chat-header__identity {
+    flex: 1 1 100%;
+  }
+  .chat-header__actions {
+    flex: 1 1 100%;
+    width: 100%;
+    justify-content: flex-start !important;
+  }
+}
 /* ======================================================================
  * Premium proptech component layer
  * ==================================================================== */

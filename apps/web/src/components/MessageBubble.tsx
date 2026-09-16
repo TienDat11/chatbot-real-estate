@@ -110,7 +110,7 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
 
   if (isUser) {
     return (
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", minWidth: 0, maxWidth: "100%" }}>
         <div
           className="message-bubble message-bubble--user"
           style={{
@@ -121,7 +121,9 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
             fontSize: FS.body,
             lineHeight: FS.bodyLine,
             whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
+            overflowWrap: "anywhere",
+            minWidth: 0,
+            maxWidth: "100%",
             boxShadow: SHADOW.primary,
           }}
         >
@@ -130,9 +132,8 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
       </div>
     );
   }
-
   return (
-    <div style={{ display: "flex", justifyContent: "flex-start" }}>
+    <div style={{ display: "flex", justifyContent: "flex-start", minWidth: 0, maxWidth: "100%" }}>
       <div
         className="message-bubble message-bubble--assistant"
         style={{
@@ -142,6 +143,9 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
           padding: "16px 18px",
           boxShadow: SHADOW.card,
           width: "100%",
+          minWidth: 0,
+          maxWidth: "100%",
+          overflowWrap: "anywhere",
         }}
       >
         {/* Trust-safety (W1-05): on internal surfaces the review flag must be

@@ -92,13 +92,13 @@ FROM node:22-slim AS runtime
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1
 
-# `next start` needs these two in the runtime env: next.config.ts loads
-# src/lib/mediaPolicy to compute images.remotePatterns at server start, and an
-# empty value silently yields an empty allowlist (next/image 400s on R2 assets).
+# `next start` needs the media origin env so next.config.ts can derive the
+# same image remotePatterns allowlist used during the build. Empty values
+# intentionally yield an empty allowlist (next/image 400s on R2 assets).
 # Note rewrites are baked at BUILD time into routes-manifest.json, so
 # NEXT_PUBLIC_API_PROXY_TARGET is a build-arg here and is NOT re-read at
-# runtime despite what the name suggests. Empty strings are safe: mediaPolicy
-# and mapTiles both treat "" as unset.
+# runtime despite what the name suggests. Empty strings are safe: the
+# config-local media helper and mapTiles both treat "" as unset.
 ARG NEXT_PUBLIC_MEDIA_ORIGINS_JSON
 ARG NEXT_PUBLIC_MAP_TILE_URL
 ENV NEXT_PUBLIC_MEDIA_ORIGINS_JSON=$NEXT_PUBLIC_MEDIA_ORIGINS_JSON \
@@ -109,8 +109,8 @@ WORKDIR /app
 # uid-1000 user fails with `useradd: UID 1000 is not unique`.
 
 # Root node_modules (hoisted workspace deps) + workspace sources. `next start`
-# re-loads next.config.ts at runtime (rewrites are computed at server start)
-# and next.config.ts imports ./src/lib/mediaPolicy, so src/ must ship too.
+# `next start` re-loads next.config.ts at runtime; the config-local media
+# helper derives remotePatterns without importing application source files.
 COPY --from=builder --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/packages ./packages

@@ -49,9 +49,14 @@ export function GreetingMedia({ videos, images, ready = true }: GreetingMediaPro
         opacity: ready ? 1 : 0,
         transform: ready ? "translateY(0)" : "translateY(8px)",
         transition: `opacity 0.5s cubic-bezier(0.16,1,0.3,1), transform 0.5s cubic-bezier(0.16,1,0.3,1)`,
+        minWidth: 0,
+        maxWidth: "100%",
+        overflowWrap: "anywhere",
       }}
     >
       {showVideo && <VideoHero videos={heroVideos} onMediaFailure={() => setMediaUnavailable(true)} />}
+      {showVideo && showImages && <div style={{ height: 16 }} />}
+      {showImages && <ImageGallery images={publicImages} />}
       {/* Bridge copy between the film and the sheets: a short sales line that
           keeps momentum while separating the two media blocks visually. */}
       {(showVideo || showImages) && (
@@ -62,15 +67,16 @@ export function GreetingMedia({ videos, images, ready = true }: GreetingMediaPro
             fontSize: 13,
             lineHeight: "20px",
             fontStyle: "italic",
+            minWidth: 0,
+            maxWidth: "100%",
+            overflowWrap: "anywhere",
           }}
         >
           {GREETING_MID_TEXT}
         </Typography.Paragraph>
       )}
-      {showVideo && showImages && <div style={{ height: 16 }} />}
-      {showImages && <ImageGallery images={publicImages} />}
       {mediaUnavailable && !showVideo && !showImages && (
-        <p role="status" style={{ margin: "12px 0 0", color: C.textMuted, fontSize: 13, lineHeight: "20px" }}>
+        <p role="status" style={{ margin: "12px 0 0", color: C.textMuted, fontSize: 13, lineHeight: "20px", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
           Nội dung chữ vẫn hiển thị đầy đủ. Media công khai hiện không khả dụng.
         </p>
       )}
@@ -99,7 +105,7 @@ function pickHeroVideos(videos: Video[] | undefined): Video[] {
 /** Sales-toned eyebrow above a media block. */
 function MediaLabel({ icon, title, sub }: { icon: React.ReactNode; title: string; sub: string }) {
   return (
-    <header className="greeting-media__label" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+    <header className="greeting-media__label" style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       <span
         className="greeting-media__label-icon"
         style={{
@@ -117,14 +123,14 @@ function MediaLabel({ icon, title, sub }: { icon: React.ReactNode; title: string
       >
         {icon}
       </span>
-      <div style={{ minWidth: 0 }}>
+      <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
         <Typography.Text
           strong
-          style={{ color: C.text, fontSize: 14, lineHeight: "18px", display: "block" }}
+          style={{ color: C.text, fontSize: 14, lineHeight: "18px", display: "block", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}
         >
           {title}
         </Typography.Text>
-        <Typography.Text style={{ color: C.textMuted, fontSize: 12, lineHeight: "16px" }}>
+        <Typography.Text style={{ color: C.textMuted, fontSize: 12, lineHeight: "16px", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
           {sub}
         </Typography.Text>
       </div>
@@ -172,8 +178,8 @@ function VideoHero({ videos, onMediaFailure }: { videos: Video[]; onMediaFailure
   };
 
   return (
-    <section aria-label="Video giới thiệu dự án">
-      <div className="greeting-media__header-row" style={headerRowStyle}>
+    <section aria-label="Video giới thiệu dự án" style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
+      <div className="greeting-media__header-row" style={{ ...headerRowStyle, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
         <MediaLabel
           icon={<VideoCameraOutlined />}
           title="Tham quan dự án"
@@ -187,10 +193,14 @@ function VideoHero({ videos, onMediaFailure }: { videos: Video[]; onMediaFailure
               setActiveIdx(Number(v));
             }}
             options={videos.map((v, i) => ({
-              label: (v.kind && KIND_META[v.kind]?.label) || v.title || `Video ${i + 1}`,
+              label: (
+                <span className="greeting-media__segment-label" title={v.title || undefined}>
+                  {(v.kind && KIND_META[v.kind]?.label) || v.title || `Video ${i + 1}`}
+                </span>
+              ),
               value: i,
             }))}
-            style={{ fontSize: 12 }}
+            style={{ fontSize: 12, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}
           />
         )}
       </div>
@@ -204,6 +214,8 @@ function VideoHero({ videos, onMediaFailure }: { videos: Video[]; onMediaFailure
           overflow: "hidden",
           background: C.surfaceAlt,
           boxShadow: SHADOW.pop,
+          minWidth: 0,
+          maxWidth: "100%",
         }}
       >
         {/* Every tape stays mounted; only the active one is visible. Each player
@@ -315,9 +327,9 @@ function VideoPlayer({ video, label, active, autoPlay, onMediaFailure }: VideoPl
   };
 
   return (
-    <div style={{ position: "absolute", inset: 0, display: active ? "block" : "none" }}>
+    <div style={{ position: "absolute", inset: 0, display: active ? "block" : "none", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       {failed ? (
-        <div role="status" style={{ height: "100%", display: "grid", placeItems: "center", padding: 24, textAlign: "center", color: C.textMuted }}>
+        <div role="status" style={{ height: "100%", display: "grid", placeItems: "center", padding: 24, textAlign: "center", color: C.textMuted, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
           Video công khai hiện không khả dụng: {video.title}
         </div>
       ) : <video
@@ -362,9 +374,12 @@ function VideoPlayer({ video, label, active, autoPlay, onMediaFailure }: VideoPl
           alignItems: "flex-end",
           justifyContent: "space-between",
           gap: 10,
+          minWidth: 0,
+          maxWidth: "100%",
+          overflowWrap: "anywhere",
         }}
       >
-        <div style={{ minWidth: 0 }}>
+        <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
           <Tag
             style={{
               marginInlineEnd: 0,
@@ -377,6 +392,9 @@ function VideoPlayer({ video, label, active, autoPlay, onMediaFailure }: VideoPl
               padding: "0 7px",
               lineHeight: "20px",
               marginBottom: 6,
+              maxWidth: "100%",
+              whiteSpace: "normal",
+              overflowWrap: "anywhere",
             }}
           >
             {label}
@@ -388,6 +406,9 @@ function VideoPlayer({ video, label, active, autoPlay, onMediaFailure }: VideoPl
               fontWeight: 600,
               lineHeight: "20px",
               display: "block",
+              minWidth: 0,
+              maxWidth: "100%",
+              overflowWrap: "anywhere",
               textShadow: "0 1px 2px rgba(0,0,0,0.4)",
             }}
           >

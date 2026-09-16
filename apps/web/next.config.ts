@@ -1,6 +1,42 @@
 import type { NextConfig } from "next";
-import { getConfiguredMediaPatterns } from "./src/lib/mediaPolicy";
 
+function getConfiguredMediaPatterns(): Array<{ protocol: "https"; hostname: string; pathname: string }> {
+  const raw = process.env.NEXT_PUBLIC_MEDIA_ORIGINS_JSON;
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const value = item as { origin?: unknown; pathPrefixes?: unknown };
+      if (typeof value.origin !== "string" || !Array.isArray(value.pathPrefixes)) return [];
+      const origin = value.origin.trim().replace(/\/$/, "");
+      let url: URL;
+      try {
+        url = new URL(origin);
+      } catch {
+        return [];
+      }
+      if (url.protocol !== "https:" || url.username || url.password || url.port) return [];
+      const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+      const isPrivateIpv4 = (address: string): boolean =>
+        /^(?:10|127|169\.254|192\.168)\./.test(address) || /^172\.(?:1[6-9]|2\d|3[0-1])\./.test(address);
+      const mappedIpv4 = hostname.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+      const isPrivateIpv6 =
+        hostname === "::" || hostname === "::1" ||
+        (mappedIpv4 !== undefined && isPrivateIpv4(mappedIpv4)) ||
+        /^fe[89ab][0-9a-f]{1,2}:/.test(hostname) || /^f[cd][0-9a-f]{2}:/.test(hostname);
+      if (hostname === "localhost" || hostname.endsWith(".local") || hostname === "0.0.0.0" || isPrivateIpv4(hostname) || isPrivateIpv6) return [];
+      const pathPrefixes = value.pathPrefixes
+        .filter((prefix): prefix is string => typeof prefix === "string" && prefix.length > 0)
+        .map((prefix) => (prefix.trim().startsWith("/") ? prefix.trim() : `/${prefix.trim()}`))
+        .filter((prefix) => prefix !== "/" && !prefix.includes("..") && prefix.endsWith("/"));
+      return pathPrefixes.map((prefix) => ({ protocol: "https" as const, hostname, pathname: `${prefix.replace(/\/$/, "")}/**` }));
+    });
+  } catch {
+    return [];
+  }
+}
 // Workspace packages ship unbundled source; let Next transpile them directly.
 const TRANSPILE_PACKAGES = [
   "@rag-ragre/contracts",

@@ -44,20 +44,33 @@ export function AnswerBlocks({ content, className, streaming = false }: AnswerBl
   return (
     <div
       className={cn("rag-answer", className)}
-      style={{ fontSize: "var(--fs-body, 17px)", lineHeight: "var(--fs-body-line, 28px)" }}
+      style={{
+        fontSize: "var(--fs-body, 17px)",
+        lineHeight: "var(--fs-body-line, 28px)",
+        minWidth: 0,
+        maxWidth: "100%",
+        overflowWrap: "anywhere",
+      }}
       aria-live={streaming ? "polite" : undefined}
     >
       {stable.map((block, i) => {
         const kind = classifyBlock(block);
         return <BlockSwitch key={i} block={block} kind={kind} />;
       })}
-      {/* In-progress tail: plain text only — no markdown pipeline can emit a
-          half-built <table>/<h*> from markup that has not closed yet, and the
-          marker strip keeps raw #/|/- glyphs out of the visible copy. Font
-          stays at the body scale so the pending tail never flashes larger
-          than the fixed bubble frame ([B3]). */}
       {pending !== null && (
-        <div className="rag-answer__pending" style={{ margin: "8px 0", fontSize: "var(--fs-body, 17px)", lineHeight: "var(--fs-body-line, 28px)", color: "#1A2233", whiteSpace: "pre-wrap", maxWidth: "65ch" }}>
+        <div
+          className="rag-answer__pending"
+          style={{
+            margin: "8px 0",
+            fontSize: "var(--fs-body, 17px)",
+            lineHeight: "var(--fs-body-line, 28px)",
+            color: "#1A2233",
+            whiteSpace: "pre-wrap",
+            minWidth: 0,
+            maxWidth: "100%",
+            overflowWrap: "anywhere",
+          }}
+        >
           {stripMarkdownMarkers(pending)}
         </div>
       )}
@@ -179,9 +192,9 @@ function TableBlock({ block }: { block: string }) {
   const { header, rows } = parsed;
   const useCards = header.length > 3 || rows.length === 0;
   return (
-    <div style={{ margin: "10px 0", overflowX: "auto" }}>
+    <div style={{ margin: "10px 0", overflowX: "auto", maxWidth: "100%", minWidth: 0 }}>
       {useCards ? <DefinitionCards header={header} rows={rows} /> : (
-        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 16 }}>
+        <table style={{ borderCollapse: "collapse", width: "max-content", minWidth: "100%", fontSize: 16 }}>
           <thead>
             <tr>
               {header.map((h) => <th key={h} style={{ textAlign: "left", fontSize: 15, fontWeight: 600, color: "#1A2233", padding: "8px 12px", borderBottom: "2px solid #E9E2D6" }}>{renderInline(h)}</th>)}
@@ -205,16 +218,16 @@ function DefinitionCards({ header, rows }: { header: string[]; rows: string[][] 
     return <div style={{ color: "#5B6478", fontSize: 15 }}>{header.join(", ")}</div>;
   }
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0, maxWidth: "100%" }}>
       {rows.map((row, ri) => (
-        <div key={ri} style={{ padding: "8px 0", borderBottom: "1px solid #E9E2D6" }}>
+        <div key={ri} style={{ padding: "8px 0", borderBottom: "1px solid #E9E2D6", minWidth: 0 }}>
           {row.map((cell, ci) => {
             const label = header[ci] ?? "col-" + (ci + 1);
             const isNumeric = /[0-9.,]+/.test(cell);
             return (
-              <div key={ci} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0" }}>
-                <span style={{ fontSize: 14, color: "#5B6478" }}>{label}</span>
-                <span style={{ fontSize: isNumeric ? 17 : 15, fontWeight: isNumeric ? 600 : 400, color: "#1A2233", fontVariantNumeric: "tabular-nums" }}>{renderInline(cell)}</span>
+              <div key={ci} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", minWidth: 0, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 14, color: "#5B6478", minWidth: 0, overflowWrap: "anywhere" }}>{label}</span>
+                <span style={{ fontSize: isNumeric ? 17 : 15, fontWeight: isNumeric ? 600 : 400, color: "#1A2233", fontVariantNumeric: "tabular-nums", minWidth: 0, overflowWrap: "anywhere" }}>{renderInline(cell)}</span>
               </div>
             );
           })}
@@ -270,7 +283,19 @@ function renderInline(text: string) {
       remarkPlugins={[remarkGfm]}
       components={{
         p: ({ children }: { children?: React.ReactNode }) => children,
-        strong: ({ children }: { children?: React.ReactNode }) => <strong style={{ color: "#0E2A47", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{children}</strong>,
+        strong: ({ children }: { children?: React.ReactNode }) => (
+          <strong style={{ color: "#0E2A47", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+            {children}
+          </strong>
+        ),
+        a: ({ children, href }: { children?: React.ReactNode; href?: string }) => (
+          <a href={href} style={{ overflowWrap: "anywhere" }}>
+            {children}
+          </a>
+        ),
+        code: ({ children }: { children?: React.ReactNode }) => (
+          <code style={{ overflowWrap: "anywhere" }}>{children}</code>
+        ),
         // [B1] Defensive: a stray thematic break that somehow reaches an
         // inline render must never emit <hr> (a <p><hr></p> pairing fails
         // validateDOMNesting and hydrates differently); collapse to nothing.

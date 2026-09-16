@@ -39,15 +39,25 @@ export function ProjectRedirectCard({ redirect }: ProjectRedirectCardProps) {
         background: C.goldSoft,
         border: `1px solid ${C.goldBorder}`,
         borderRadius: RADIUS.card,
+        minWidth: 0,
+        maxWidth: "100%",
+        overflowWrap: "anywhere",
       }}
     >
       <Link
         href={href}
         aria-label={`Chuyển sang dự án ${label}`}
-        style={{ display: "block" }}
+        style={{ display: "block", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}
       >
-        <Button type="primary" block size="large" style={{ fontWeight: 600 }}>
-          Chuyển sang dự án {label} →
+        <Button
+          type="primary"
+          block
+          size="large"
+          style={{ fontWeight: 600, minWidth: 0, maxWidth: "100%", whiteSpace: "normal", height: "auto", minHeight: 40 }}
+        >
+          <span style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
+            Chuyển sang dự án {label} →
+          </span>
         </Button>
       </Link>
     </div>

@@ -35,11 +35,14 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
       className="composer-shell"
       style={{
         maxWidth: 860,
+        width: "100%",
+        minWidth: 0,
         margin: "0 auto",
         display: "flex",
         gap: 10,
         alignItems: "flex-end",
         padding: 6,
+        overflowWrap: "anywhere",
         transition: "border-color 0.18s ease, box-shadow 0.18s ease",
       }}
     >
@@ -52,12 +55,16 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
         disabled={disabled}
         variant="borderless"
         style={{
+          minWidth: 0,
+          maxWidth: "100%",
+          flex: "1 1 auto",
           padding: "10px 12px",
           fontSize: 15,
           lineHeight: "24px",
           resize: "none",
           background: "transparent",
           color: C.text,
+          overflowWrap: "anywhere",
         }}
         aria-label="Câu hỏi"
       />
@@ -72,6 +79,7 @@ export function Composer({ value, onChange, onSend, disabled, streaming }: Compo
           borderRadius: 12,
           height: 42,
           minWidth: 92,
+          flexShrink: 0,
           border: "none",
           fontWeight: 600,
         }}

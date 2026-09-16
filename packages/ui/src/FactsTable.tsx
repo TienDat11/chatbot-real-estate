@@ -35,7 +35,7 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
 
   if (variant === "cards") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0, maxWidth: "100%" }}>
         {visibleFacts.map((fact) => (
           <div
             key={fact.fe_id}
@@ -44,13 +44,16 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
               borderRadius: 10,
               padding: "8px 10px",
               background: "#F3EFE7",
+              minWidth: 0,
+              maxWidth: "100%",
+              overflowWrap: "anywhere",
             }}
           >
-            <Typography.Text strong style={{ fontSize: 12.5, color: "#1A2233", display: "block" }}>
+            <Typography.Text strong style={{ fontSize: 12.5, color: "#1A2233", display: "block", minWidth: 0, overflowWrap: "anywhere" }}>
               {humanizeSubject(fact.subject)}
             </Typography.Text>
             {fact.policy_key && (
-              <code style={{ fontSize: 11.5, color: "#0E2A47", background: "#E8EEF7", padding: "0 5px", borderRadius: 4 }}>
+              <code style={{ fontSize: 11.5, color: "#0E2A47", background: "#E8EEF7", padding: "0 5px", borderRadius: 4, maxWidth: "100%", overflowWrap: "anywhere" }}>
                 {policyLabel(fact.policy_key)}
               </code>
             )}
@@ -64,14 +67,18 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
                     fontSize: 12,
                     lineHeight: "18px",
                     flexWrap: "wrap",
+                    minWidth: 0,
+                    maxWidth: "100%",
                   }}
                 >
-                  <span style={{ color: "#5B6478", flexShrink: 0 }}>{fieldLabel(key)}:</span>
+                  <span style={{ color: "#5B6478", flexShrink: 0, overflowWrap: "anywhere" }}>{fieldLabel(key)}:</span>
                   <span
                     style={{
                       fontVariantNumeric: "tabular-nums",
                       color: "#1A2233",
-                      wordBreak: "break-word",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                      overflowWrap: "anywhere",
                     }}
                   >
                     {formatField(key, value, formatMoney)}
@@ -80,7 +87,7 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
               ))}
             </div>
             {fact.note && (
-              <Typography.Text type="secondary" style={{ fontSize: 11.5, display: "block", marginTop: 2 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 11.5, display: "block", marginTop: 2, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
                 {normalizeFactValue(fact.note)}
               </Typography.Text>
             )}
@@ -125,7 +132,7 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
           return <span style={{ color: "#B0B7C6" }}>—</span>;
         }
         return (
-          <div>
+          <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
             {entries.map(([key, value]) => (
               <div
                 key={key}
@@ -135,15 +142,19 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
                   fontSize: 13,
                   lineHeight: "20px",
                   flexWrap: "wrap",
+                  minWidth: 0,
+                  maxWidth: "100%",
                 }}
               >
-                <span style={{ color: "#5B6478", flexShrink: 0 }}>{fieldLabel(key)}:</span>
+                <span style={{ color: "#5B6478", flexShrink: 0, overflowWrap: "anywhere" }}>{fieldLabel(key)}:</span>
                 <span
                   style={{
                     fontVariantNumeric: "tabular-nums",
                     color: "#1A2233",
                     fontWeight: value !== null ? 500 : 400,
-                    wordBreak: "break-word",
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    overflowWrap: "anywhere",
                   }}
                 >
                   {formatField(key, value, formatMoney)}
@@ -151,7 +162,7 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
               </div>
             ))}
             {note && (
-              <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 2 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 2, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
                 {note}
               </Typography.Text>
             )}
@@ -162,14 +173,14 @@ export function FactsTable({ facts, formatMoney = true, variant = "table" }: Fac
   ];
 
   return (
-    <div style={{ overflowX: "auto", maxWidth: "100%" }}>
+    <div style={{ overflowX: "auto", maxWidth: "100%", minWidth: 0 }}>
       <Table<FactEvidence>
         rowKey="fe_id"
         columns={columns}
         dataSource={visibleFacts}
         size="small"
         pagination={false}
-        style={{ fontSize: 13 }}
+        style={{ fontSize: 13, minWidth: 560 }}
         tableLayout="auto"
       />
     </div>

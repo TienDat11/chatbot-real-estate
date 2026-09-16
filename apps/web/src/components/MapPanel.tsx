@@ -452,7 +452,7 @@ export function MapPanel({
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       {/* Panel header: title + mode tabs. Distinct visual from the parent
           Segmented (smaller, bordered, inset) so the two levels never confuse. */}
       <div style={{ padding: "10px 12px 6px" }}>
@@ -524,7 +524,7 @@ export function MapPanel({
           </button>
         </div>
       </div>
-      <div style={{ padding: "0 12px 10px", overflowX: "auto", display: "flex", gap: 8, flexShrink: 0 }}>
+      <div style={{ padding: "0 12px 10px", overflowX: "auto", display: "flex", gap: 8, flexShrink: 0, minWidth: 0, maxWidth: "100%" }}>
         {FILTERS.map((f) => {
           const active = activeFilter.key === f.key;
           return (
@@ -565,7 +565,7 @@ export function MapPanel({
           />
         ) : (
           <>
-            <div ref={containerRef} style={{ position: "absolute", inset: 0, filter: "saturate(0.85) contrast(1.02)" }} />
+            <div ref={containerRef} style={{ position: "absolute", inset: 0, filter: "saturate(0.85) contrast(1.02)", minWidth: 0, maxWidth: "100%" }} />
             {tilesFailed && (
               <div
                 role="status"
@@ -579,25 +579,30 @@ export function MapPanel({
                   justifyContent: "center",
                   padding: 16,
                   background: "#F6F3EC",
+                  minWidth: 0,
+                  maxWidth: "100%",
+                  overflowWrap: "anywhere",
                 }}
               >
                 <div
                   style={{
                     maxWidth: 420,
                     width: "100%",
+                    minWidth: 0,
                     textAlign: "center",
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
                     gap: 8,
+                    overflowWrap: "anywhere",
                   }}
                 >
                   <EnvironmentOutlined style={{ fontSize: 32, color: NAVY }} aria-hidden="true" />
-                  <Typography.Text strong style={{ fontSize: 17, color: INK }}>
+                  <Typography.Text strong style={{ fontSize: 17, color: INK, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere", textAlign: "center" }}>
                     {project.name ?? "Dự án"}
                   </Typography.Text>
                   {project.address && (
-                    <Typography.Text style={{ fontSize: 14, color: MUTED }}>
+                    <Typography.Text style={{ fontSize: 14, color: MUTED, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere", textAlign: "center" }}>
                       {project.address}
                     </Typography.Text>
                   )}
@@ -617,10 +622,13 @@ export function MapPanel({
                   position: "absolute",
                   top: 12,
                   right: 12,
-                  zIndex: 2,
                   display: "flex",
                   alignItems: "center",
                   gap: 10,
+                  minWidth: 0,
+                  maxWidth: "calc(100% - 24px)",
+                  overflowWrap: "anywhere",
+                  zIndex: 2,
                   background: "#FFFFFF",
                   border: `1px solid ${NAVY}`,
                   borderRadius: 10,
@@ -630,8 +638,10 @@ export function MapPanel({
               >
                 <CarOutlined style={{ color: NAVY, fontSize: 20 }} />
                 <div>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: INK }}>{routeBadge.statsLabel}</div>
-                  <div style={{ fontSize: 13, color: MUTED }}>Đường đi dự kiến</div>
+                  <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: INK, overflowWrap: "anywhere" }}>{routeBadge.statsLabel}</div>
+                    <div style={{ fontSize: 13, color: MUTED, overflowWrap: "anywhere" }}>Đường đi dự kiến</div>
+                  </div>
                 </div>
               </div>
             )}
@@ -690,11 +700,11 @@ function PlaceList({
   onDirections: () => void;
 }) {
   return (
-    <div style={{ height: "100%", overflowY: "auto" }}>
-      <Typography.Text strong style={{ display: "block", padding: "6px 14px 4px", fontSize: 14, color: MUTED, textTransform: "uppercase", letterSpacing: 0.4 }}>
+    <div style={{ height: "100%", overflowY: "auto", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
+      <Typography.Text strong style={{ display: "block", padding: "6px 14px 4px", fontSize: 14, color: MUTED, textTransform: "uppercase", letterSpacing: 0.4, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
         Gần dự án nhất
       </Typography.Text>
-      <ul style={{ listStyle: "none", margin: 0, padding: "0 12px 16px" }}>
+      <ul style={{ listStyle: "none", margin: 0, padding: "0 12px 16px", minWidth: 0, maxWidth: "100%" }}>
         {places.map((p, i) => {
           const key = `${p.name}#${i}`;
           const active = highlightKey === key;
@@ -706,30 +716,32 @@ function PlaceList({
                 background: active ? "#FFF4C2" : "#FFFFFF",
                 border: "1px solid #E9ECF2",
                 borderRadius: 12,
-                padding: "12px 14px",
-                margin: "0 0 10px",
-                transition: "background .3s",
+                padding: 12,
+                marginBottom: 10,
+                minWidth: 0,
+                maxWidth: "100%",
+                overflowWrap: "anywhere",
               }}
             >
               <button
                 type="button"
                 onClick={() => onPick(p)}
                 aria-label={`${p.name}, cách ${fmtDistance(p.distance_m)}`}
-                style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                style={{ display: "block", width: "100%", minWidth: 0, maxWidth: "100%", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer", overflowWrap: "anywhere" }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 17, fontWeight: 600, color: INK, flex: 1, minWidth: 0 }}>{p.name}</span>
-                  <span style={{ fontSize: 14, color: MUTED, whiteSpace: "nowrap" }}>{fmtDistance(p.distance_m)}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, maxWidth: "100%" }}>
+                  <span style={{ fontSize: 17, fontWeight: 600, color: INK, flex: 1, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>{p.name}</span>
+                  <span style={{ fontSize: 14, color: MUTED, whiteSpace: "nowrap", flexShrink: 0 }}>{fmtDistance(p.distance_m)}</span>
                 </div>
-                <div style={{ fontSize: 14, color: MUTED, marginTop: 2 }}>{p.kinds[0] ?? "Tiện ích"}</div>
-                {p.address && <div style={{ fontSize: 14, color: MUTED, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 2 }}>{p.address}</div>}
+                <div style={{ fontSize: 14, color: MUTED, marginTop: 2, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>{p.kinds[0] ?? "Tiện ích"}</div>
+                {p.address && <div style={{ fontSize: 14, color: MUTED, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere", marginTop: 2 }}>{p.address}</div>}
               </button>
               <Button
                 type="primary"
                 icon={<CarOutlined />}
                 block
                 onClick={onDirections}
-                style={{ marginTop: 10, height: 48, fontSize: 16, background: NAVY, fontWeight: 600 }}
+                style={{ marginTop: 10, height: 48, maxWidth: "100%", fontSize: 16, background: NAVY, fontWeight: 600, whiteSpace: "normal" }}
               >
                 Chỉ đường
               </Button>
