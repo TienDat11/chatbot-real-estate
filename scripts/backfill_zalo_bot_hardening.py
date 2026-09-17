@@ -85,12 +85,15 @@ async def backfill(pool, identity_secret: str) -> int:
                         raise ZaloStorageError("BACKFILL_CONFLICT")
                     needs_update = (not already_mapped or row["identity_key"] is None
                                     or row["source_event_key"] is None
+                                    or (row["status"] == "processing" and row["lease_until"] is None)
                                     or (row["status"] in {"done", "dead", "rejected"} and row["completed_at"] is None))
                     if needs_update:
                         await conn.execute(
                             """UPDATE zalo_bot_events SET ingress_key=$2,identity_key=$3,source_event_key=$4,
                             completed_at=CASE WHEN status IN ('done','dead','rejected')
-                              THEN COALESCE(completed_at,updated_at,received_at) ELSE completed_at END
+                              THEN COALESCE(completed_at,updated_at,received_at) ELSE completed_at END,
+                            lease_until=CASE WHEN status='processing' AND lease_until IS NULL
+                              THEN received_at ELSE lease_until END
                             WHERE id=$1""", row["id"], key, identity, source,
                         )
                         changed += 1

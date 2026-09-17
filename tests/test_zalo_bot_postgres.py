@@ -292,14 +292,22 @@ async def test_actual_migrations_backfill_repeat_and_final_constraints(database,
     old = []
     if legacy:
         async with db.pool.acquire() as conn:
-            for status, entered, cached in (("pending", False, False), ("processing", True, False), ("rejected", False, False), ("done", False, True)):
+            for status, entered, cached in (("pending", False, False), ("processing", True, False), ("processing", False, True), ("rejected", False, False), ("done", False, True)):
                 row = await conn.fetchrow("""INSERT INTO zalo_bot_events(chat_id,message_id,event_name,text,status,assistant_outcome)
                     VALUES($1,$2,'message.text.received','legacy text',$3,$4::jsonb) RETURNING *""",
-                    "legacy-" + status, status, status,
+                    "legacy-" + status + ("-cached" if cached else ""), status, status,
                     json.dumps({"answer": "persisted", "resolution_status": "answered", "project_key": None, "meta": {}}) if cached else None)
                 if entered:
                     await conn.execute("UPDATE zalo_bot_events SET source_event_key=$2 WHERE id=$1", row["id"], f'zalo-bot:event:v1:{row["id"]}')
                 old.append((dict(row), entered or cached))
+    await _migration(db.pool, "2026-09-17-zalo-bot-hardening.sql")
+    processing = [original for original, _ in old if original["status"] == "processing"]
+    due = await db.store.due_candidates()
+    for original in processing:
+        async with db.pool.acquire() as conn:
+            assert await conn.fetchval("SELECT lease_until FROM zalo_bot_events WHERE id=$1", original["id"]) is None
+        assert original["id"] not in due
+        assert await db.store.claim_event(original["id"]) is None
     await _cutover(db.pool)
     await db.store.validate_schema()
     async with db.pool.acquire() as conn:
@@ -319,6 +327,9 @@ async def test_actual_migrations_backfill_repeat_and_final_constraints(database,
             assert row["source_event_key"] == f'zalo-bot:event:v1:{original["id"]}'
             assert row["assistant_outcome"] == original["assistant_outcome"]
             assert (await conn.fetchval("SELECT count(*) FROM zalo_bot_admissions WHERE source_event_key=$1", row["source_event_key"])) == int(possible_core)
+            if original["status"] == "processing":
+                assert row["status"] == "processing"
+                assert row["lease_until"] == original["received_at"]
             if original["status"] in {"done", "rejected"}:
                 assert row["completed_at"] == original["updated_at"]
         indexes = await conn.fetch("""SELECT c.relname,i.indisvalid,i.indisready FROM pg_index i
@@ -330,6 +341,52 @@ async def test_actual_migrations_backfill_repeat_and_final_constraints(database,
         with pytest.raises(asyncpg.NotNullViolationError):
             await conn.execute("INSERT INTO zalo_bot_events(chat_id,message_id,event_name,text) VALUES('old-writer','m','text','x')")
     await db.store.validate_schema()
+    due = await db.store.due_candidates()
+    for original in processing:
+        assert original["id"] in due
+        async with db.pool.acquire() as conn:
+            attempts_before_claim = await conn.fetchval("SELECT attempt_count FROM zalo_bot_events WHERE id=$1", original["id"])
+        claimed = await db.store.claim_event(original["id"])
+        assert claimed is not None and claimed.id == original["id"]
+        assert claimed.status == "processing"
+        assert claimed.attempt_count == attempts_before_claim + 1
+        expected_cache = original["assistant_outcome"]
+        if isinstance(expected_cache, str):
+            expected_cache = json.loads(expected_cache)
+        assert claimed.assistant_outcome == expected_cache
+
+
+async def test_processing_null_lease_blocks_cutover_but_not_new_ingress(database):
+    from api.infrastructure.adapters.postgres_zalo_events import ZaloStorageError
+    from scripts.backfill_zalo_bot_hardening import backfill
+    db = database
+    await _cutover(db.pool)
+    stranded_id = await _insert("stranded")
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE zalo_bot_events SET status='processing',lease_until=received_at WHERE id=$1", stranded_id)
+    await db.store.validate_schema()
+    # Only the lease changes: mappings, tombstone and schema already pass.
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE zalo_bot_events SET lease_until=NULL WHERE id=$1", stranded_id)
+    with pytest.raises(ZaloStorageError) as exc:
+        await db.store.validate_schema()
+    assert exc.value.code == "BACKFILL_REQUIRED"
+    assert stranded_id not in await db.store.due_candidates()
+    assert await db.store.claim_event(stranded_id) is None
+    new_id = await _insert("new-during-cutover")
+    assert new_id is not None
+    async with db.pool.acquire() as conn:
+        new_row = await conn.fetchrow("SELECT status,lease_until FROM zalo_bot_events WHERE id=$1", new_id)
+        assert new_row["status"] == "pending" and new_row["lease_until"] is None
+    new_claim = await db.store.claim_event(new_id)
+    assert new_claim is not None and new_claim.id == new_id
+    async with db.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT lease_until > now() FROM zalo_bot_events WHERE id=$1", new_id)
+    assert await backfill(db.pool, SECRET) == 1
+    await db.store.validate_schema()
+    assert stranded_id in await db.store.due_candidates()
+    recovered = await db.store.claim_event(stranded_id)
+    assert recovered is not None and recovered.id == stranded_id
 
 
 async def test_backfill_conflict_rolls_back_batch_and_finalize_refuses_nulls(database):

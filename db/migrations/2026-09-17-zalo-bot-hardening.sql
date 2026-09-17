@@ -5,7 +5,7 @@ SET LOCAL lock_timeout = '5s';
 -- Validate existing objects BEFORE changing anything. Missing new objects are
 -- expected; IF NOT EXISTS must never silently accept incompatible definitions.
 DO $preflight$
-DECLARE r record; a record; obj regclass; definition text; actual text[];
+DECLARE r record; col record; obj regclass; definition text; actual text[];
 BEGIN
   IF to_regclass('public.zalo_bot_events') IS NULL
      OR to_regclass('public.zalo_sales_bindings') IS NULL THEN
@@ -56,14 +56,14 @@ BEGIN
       RAISE EXCEPTION 'ZALO_SCHEMA_INCOMPATIBLE';
     END IF;
     SELECT format_type(p.atttypid,p.atttypmod) AS typ,p.attnotnull AS nn,
-      pg_get_expr(d.adbin,d.adrelid) AS def INTO a
+      pg_get_expr(d.adbin,d.adrelid) AS def INTO col
     FROM pg_attribute p LEFT JOIN pg_attrdef d ON d.adrelid=p.attrelid AND d.adnum=p.attnum
     WHERE p.attrelid=obj AND p.attname=r.col AND p.attnum>0 AND NOT p.attisdropped;
     IF NOT FOUND THEN
       IF r.required THEN RAISE EXCEPTION 'ZALO_SCHEMA_INCOMPATIBLE'; END IF;
-    ELSIF a.typ<>r.typ OR (r.nn IS NOT NULL AND a.nn<>r.nn)
-      OR (r.def IS DISTINCT FROM 'sequence' AND a.def IS DISTINCT FROM r.def)
-      OR (r.def='sequence' AND (a.def IS NULL OR a.def NOT LIKE 'nextval(%'
+    ELSIF col.typ<>r.typ OR (r.nn IS NOT NULL AND col.nn<>r.nn)
+      OR (r.def IS DISTINCT FROM 'sequence' AND col.def IS DISTINCT FROM r.def)
+      OR (r.def='sequence' AND (col.def IS NULL OR col.def NOT LIKE 'nextval(%'
         OR pg_get_serial_sequence('public.' || r.tbl,r.col) IS NULL)) THEN
       RAISE EXCEPTION 'ZALO_SCHEMA_INCOMPATIBLE';
     END IF;

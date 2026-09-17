@@ -513,6 +513,7 @@ async def _validate_schema(conn, *, finalized=True, indexes=True, check_data=Tru
               OR k.event_id IS DISTINCT FROM e.id OR k.source_event_key IS DISTINCT FROM e.source_event_key
               OR e.source_event_key <> 'zalo-bot:event:v1:' || e.id::text
               OR e.status NOT IN ('pending','processing','failed','done','dead','rejected')
+              OR (e.status='processing' AND e.lease_until IS NULL)
               OR e.attempt_count < 0 OR (a.identity_key IS NOT NULL AND a.identity_key<>e.identity_key)
               OR ((e.assistant_outcome IS NOT NULL OR e.outbound_message_id IS NOT NULL) AND a.source_event_key IS NULL)
               OR (e.status IN ('done','dead','rejected') AND (e.completed_at IS NULL
