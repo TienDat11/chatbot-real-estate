@@ -15,7 +15,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import AfterValidator, Field, SecretStr, field_validator, model_validator
+from pydantic import AfterValidator, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("api.config")
@@ -87,6 +87,17 @@ class Settings(BaseSettings):
             raise ValueError("Zalo Bot webhook secret must be a string")
         if self.zalo_bot_enabled and not 8 <= len(secret) <= 256:
             raise ValueError("Enabled Zalo Bot requires a webhook secret of 8..256 characters")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_zalo_identity_secret(self) -> Settings:
+        secret = self.zalo_bot_identity_secret.get_secret_value()
+        if not isinstance(secret, str) or (secret and not 32 <= len(secret) <= 256):
+            raise ValueError("Zalo Bot identity secret must be empty or 32..256 characters")
+        if secret and secret in (
+            self.zalo_bot_token, self.zalo_bot_webhook_secret.get_secret_value()
+        ):
+            raise ValueError("Zalo Bot identity secret must be independent of transport credentials")
         return self
 
     @model_validator(mode="after")
@@ -203,11 +214,24 @@ class Settings(BaseSettings):
         # echo raw input into ValidationError.json()/errors() surfaces.
         if isinstance(values, Mapping):
             values = dict(values)
-            if "zalo_bot_webhook_secret" in values:
-                secret = values["zalo_bot_webhook_secret"]
-                if not isinstance(secret, SecretStr):
-                    values["zalo_bot_webhook_secret"] = SecretStr(secret)
-        return handler(values)
+            for field in ("zalo_bot_webhook_secret", "zalo_bot_identity_secret"):
+                if field in values and not isinstance(values[field], SecretStr):
+                    values[field] = SecretStr(values[field])
+        try:
+            return handler(values)
+        except ValidationError as exc:
+            # Token remains str for existing callers. Redact error inputs too:
+            # a rejected token/identity collision otherwise echoes the key.
+            errors = exc.errors()
+            for error in errors:
+                error_input = error.get("input")
+                if isinstance(error_input, Mapping) and "zalo_bot_token" in error_input:
+                    error["input"] = {
+                        **error_input, "zalo_bot_token": SecretStr(error_input["zalo_bot_token"])
+                    }
+            raise ValidationError.from_exception_data(
+                cls.__name__, errors, hide_input=True
+            ) from None
 
     # App
     app_env: str = "dev"
@@ -513,6 +537,9 @@ class Settings(BaseSettings):
     # X-Bot-Api-Secret-Token header. An empty value fails closed (403) at
     # every webhook. Never log the header or this secret.
     zalo_bot_webhook_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Stable correlation key, never derived from transport credentials. Empty
+    # permits ingress-only startup; the identity helper fails closed at use.
+    zalo_bot_identity_secret: SecretStr = Field(default=SecretStr(""), repr=False)
     # Hard cap (bytes) on an inbound webhook body declared via Content-Length
     # AND on the body actually read. Prevents unbounded request-body DoS.
     zalo_bot_max_body_bytes: int = Field(default=65536, gt=0)
