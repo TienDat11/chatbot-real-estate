@@ -16,6 +16,7 @@ from typing import Any
 from api.application.services.chat_history_service import ChatHistoryService
 from api.application.services.global_project_resolution import (
     ProjectResolution,
+    ProjectResolutionSource,
     ProjectResolutionStatus,
     resolve_global_project,
 )
@@ -43,6 +44,25 @@ EventCallback = Callable[[str, dict[str, Any]], Awaitable[None] | None]
 # assistant meta. It is never emitted by the public transport adapter, so a
 # downstream replay can be matched by the caller's own session identity only.
 _SOURCE_EVENT_META_KEY = "_source_event_key"
+
+
+def _pending_neutral_intent(messages: list) -> str | None:
+    """Return the newest unconsumed clarification's user text, if present."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if getattr(message, "role", None) != "assistant":
+            continue
+        meta = getattr(message, "meta", None)
+        envelope = meta.get("ga_outcome") if isinstance(meta, dict) else None
+        if not isinstance(envelope, dict) or envelope.get("resolution_status") not in (
+            "unresolved", "ambiguous"
+        ):
+            return None
+        if index == 0 or getattr(messages[index - 1], "role", None) != "user":
+            return None
+        intent = getattr(messages[index - 1], "content", None)
+        return intent if isinstance(intent, str) else None
+    return None
 
 
 class GlobalAssistantPersistenceError(RuntimeError):
@@ -133,6 +153,13 @@ class PreparedTurn:
     messages: list
     history: list[dict[str, str]]
     replay: GlobalAssistantOutcome | None = None
+    # Preserve the customer's original question through a picker selection;
+    # never persist this effective query as the user's message text.
+    effective_query: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.effective_query is None:
+            object.__setattr__(self, "effective_query", self.request.query)
 
     def clarification_candidates(self) -> tuple[str, ...]:
         """Picker options for an unresolved/ambiguous turn surfaced to the client.
@@ -299,12 +326,19 @@ class GlobalAssistantService:
             else []
         )
 
+        effective_query = request.query
+        if resolution.source is ProjectResolutionSource.USER_SELECTION:
+            intent = _pending_neutral_intent(messages)
+            if intent and intent != request.query:
+                effective_query = f"{intent}\n{request.query}"
+
         return PreparedTurn(
             request=request,
             resolution=resolution,
             known_projects=known_projects,
             messages=messages,
             history=history,
+            effective_query=effective_query,
         )
 
     async def execute_prepared_turn(self, prepared: PreparedTurn) -> GlobalAssistantOutcome:
@@ -344,7 +378,7 @@ class GlobalAssistantService:
         project_key = prepared.resolution.project_key
         pipeline = self._pipeline_factory(on_event=prepared.request.on_event)
         payload = await pipeline.run(
-            prepared.request.query,
+            prepared.effective_query,
             prepared.request.session_id,
             None,
             prepared.history,
@@ -436,9 +470,6 @@ class GlobalAssistantService:
 
 def _noop_resolution() -> ProjectResolution:
     """Placeholder resolution for the replay short-circuit path."""
-    from api.application.services.global_project_resolution import (
-        ProjectResolutionSource,
-    )
     return ProjectResolution(
         status=ProjectResolutionStatus.AMBIGUOUS,
         project_key=None,
