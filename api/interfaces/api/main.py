@@ -1003,6 +1003,7 @@ def create_app() -> FastAPI:
     from api.interfaces.api.projects import router as projects_router  # noqa: PLC0415
     from api.interfaces.api.sales import router as sales_router  # noqa: PLC0415
     from api.interfaces.api.sessions import router as sessions_router  # noqa: PLC0415
+    from api.interfaces.api.zalo_bot_routes import router as zalo_bot_router  # noqa: PLC0415
 
     app.include_router(lead_router)
     app.include_router(sales_router)
@@ -1016,6 +1017,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(notifications_router)
     app.include_router(assistant_router)
+    app.include_router(zalo_bot_router)
 
     @app.get("/health")
     async def health() -> dict:

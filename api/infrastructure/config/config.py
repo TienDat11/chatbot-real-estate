@@ -10,11 +10,12 @@ import json
 import logging
 import os
 import secrets
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import AfterValidator, Field, field_validator, model_validator
+from pydantic import AfterValidator, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("api.config")
@@ -55,6 +56,7 @@ class Settings(BaseSettings):
         env_file=(str(_REPO_ROOT / ".env"), str(_REPO_ROOT / f".env.{_APP_ENV}")),
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # Known development-only value; production startup fails fast when it survives.
@@ -77,6 +79,15 @@ class Settings(BaseSettings):
     _KNOWN_WEAK_LEAD_MIRROR_SECRETS = _KNOWN_WEAK_ANON_SECRETS + (
         "rag-real-estate-lead-mirror-default-secret",
     )
+
+    @model_validator(mode="after")
+    def _validate_zalo_webhook_secret(self) -> Settings:
+        secret = self.zalo_bot_webhook_secret.get_secret_value()
+        if not isinstance(secret, str):
+            raise ValueError("Zalo Bot webhook secret must be a string")
+        if self.zalo_bot_enabled and not 8 <= len(secret) <= 256:
+            raise ValueError("Enabled Zalo Bot requires a webhook secret of 8..256 characters")
+        return self
 
     @model_validator(mode="after")
     def _enforce_approved_llm_provider(self) -> Settings:
@@ -182,6 +193,21 @@ class Settings(BaseSettings):
                 "credentialed/auth endpoints"
             )
         return self
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _protect_zalo_webhook_secret(cls, values, handler):
+        # Wrap all validators so model-level errors retain the redacted copy.
+        # Any Mapping (UserDict, MappingProxyType, custom) is materialized into
+        # a plain dict FIRST — a mapping reaching handler(raw) makes pydantic
+        # echo raw input into ValidationError.json()/errors() surfaces.
+        if isinstance(values, Mapping):
+            values = dict(values)
+            if "zalo_bot_webhook_secret" in values:
+                secret = values["zalo_bot_webhook_secret"]
+                if not isinstance(secret, SecretStr):
+                    values["zalo_bot_webhook_secret"] = SecretStr(secret)
+        return handler(values)
 
     # App
     app_env: str = "dev"
@@ -477,6 +503,23 @@ class Settings(BaseSettings):
     trusted_proxy_ips: list[str] = Field(default_factory=list)
     chat_history_retention_days: int = 30
     lead_cta_after_turns: int = 3
+
+    # --- Zalo Bot webhook ingress (ZB-01) ---
+    # zalo_bot_enabled gates the ingress: when False an authenticated, valid
+    # webhook still returns 2xx but performs zero side effects (no DB write,
+    # no RAG, no provider outbound). Disabled must never break app startup.
+    zalo_bot_enabled: bool = False
+    # Shared secret checked via hmac.compare_digest against the
+    # X-Bot-Api-Secret-Token header. An empty value fails closed (403) at
+    # every webhook. Never log the header or this secret.
+    zalo_bot_webhook_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Hard cap (bytes) on an inbound webhook body declared via Content-Length
+    # AND on the body actually read. Prevents unbounded request-body DoS.
+    zalo_bot_max_body_bytes: int = Field(default=65536, gt=0)
+    # Provider access token for the Zalo Bot API (ZB-02 outbound). Plumbed
+    # for a later provider adapter and MUST NOT be read by the ingress path.
+    zalo_bot_token: str = ""
+    zalo_bot_api_base_url: str = "https://bot-api.zaloplatforms.com"
 
     @field_validator("trusted_proxy_ips", mode="before")
     @classmethod
