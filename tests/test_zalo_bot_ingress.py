@@ -290,7 +290,7 @@ def test_strict_envelope_ignores_unsupported_payload(client, store, scheduler, p
     (True, 8, True), (True, 256, True), (True, 257, False),
 ])
 def test_settings_webhook_secret_boundary(enabled, length, valid):
-    from pydantic import ValidationError
+    from pydantic import SecretStr
 
     from api.infrastructure.config.config import Settings
 
@@ -298,14 +298,16 @@ def test_settings_webhook_secret_boundary(enabled, length, valid):
     values = dict(
         _env_file=None, app_env="test", enforce_approved_llm_provider=False,
         zalo_bot_enabled=enabled, zalo_bot_webhook_secret=secret,
+        zalo_bot_identity_secret=SecretStr("i" * 32), zalo_bot_token="token",
     )
     if valid:
         settings = Settings(**values)
+        settings.validate_zalo_runtime()
         assert settings.zalo_bot_enabled is enabled
         assert settings.zalo_bot_webhook_secret.get_secret_value() == secret
     else:
-        with pytest.raises(ValidationError) as error:
-            Settings(**values)
+        with pytest.raises(ValueError) as error:
+            Settings(**values).validate_zalo_runtime()
         if secret:
             assert secret not in str(error.value)
 
@@ -440,26 +442,10 @@ def test_route_query_length_boundary(client, extra, accepted):
 
 
 def test_adapter_atomic_insert_and_conflict(monkeypatch):
-    from contextlib import asynccontextmanager
-
     from api.infrastructure.adapters import postgres_zalo_events
+    from tests.test_zalo_bot_store import install_ingress
 
-    queries = []
-
-    class Connection:
-        async def fetchrow(self, sql, *params):
-            queries.append((" ".join(sql.split()), params))
-            return {"id": 41} if len(queries) == 1 else None
-
-    class Pool:
-        @asynccontextmanager
-        async def acquire(self):
-            yield Connection()
-
-    async def shared_pool():
-        return Pool()
-
-    monkeypatch.setattr(postgres_zalo_events, "get_lead_pool", shared_pool)
+    conn = install_ingress(monkeypatch)
 
     async def insert_twice():
         values = dict(chat_id="chat", message_id="message", event_name="message.text.received", text="text")
@@ -467,12 +453,8 @@ def test_adapter_atomic_insert_and_conflict(monkeypatch):
         assert await postgres_zalo_events.insert_event(**values) is None
 
     asyncio.run(insert_twice())
-    assert len(queries) == 2
-    for sql, params in queries:
-        assert "INSERT INTO zalo_bot_events (chat_id, message_id, event_name, text) VALUES" in sql
-        assert "ON CONFLICT (chat_id, message_id) DO NOTHING RETURNING id" in sql
-        assert "VALUES ($1, $2, $3, $4)" in sql
-        assert params == ("chat", "message", "message.text.received", "text")
+    assert list(conn.rows) == [41]
+    assert list(conn.tombstones.values()) == [(41, "zalo-bot:event:v1:41")]
 
 
 def test_migration_existing_schema_sql_shape_only():
@@ -684,16 +666,19 @@ def test_invalid_secret_safe_on_all_validation_surfaces(secret, markers, wrapped
     from api.infrastructure.config.config import Settings
 
     values = dict(_env_file=None, app_env="test", enforce_approved_llm_provider=False,
-                  zalo_bot_enabled=isinstance(secret, str),
+                  zalo_bot_enabled=True,
                   zalo_bot_webhook_secret=SecretStr(secret) if wrapped else secret)
-    with pytest.raises(ValidationError) as caught:
-        Settings(**values)
+    with pytest.raises(ValueError) as caught:
+        settings = Settings(**values)
+        settings.validate_zalo_runtime()
     exc = caught.value
     surfaces = {
-        "str": str(exc), "repr": repr(exc), "json": exc.json(),
-        "errors": repr(exc.errors()), "errors_json": json.dumps(exc.errors(), default=str),
+        "str": str(exc), "repr": repr(exc),
         "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
     }
+    if isinstance(exc, ValidationError):
+        surfaces.update(json=exc.json(), errors=repr(exc.errors()),
+                        errors_json=json.dumps(exc.errors(), default=str))
     if isinstance(secret, str):
         surfaces["settings_repr"] = repr(Settings(**{**values, "zalo_bot_enabled": False}))
     leaked = {
@@ -732,18 +717,20 @@ def test_non_dict_mapping_secret_safe_on_all_surfaces(mapping_type, secret):
             return len(self._data)
 
     base = {"app_env": "test", "enforce_approved_llm_provider": False,
-            "zalo_bot_enabled": False, "zalo_bot_webhook_secret": secret}
+            "zalo_bot_enabled": True, "zalo_bot_webhook_secret": secret}
     mapping = {"UserDict": UserDict, "MappingProxyType": MappingProxyType,
                "custom": _CustomMapping}[mapping_type](base)
     assert isinstance(mapping, Mapping) and not isinstance(mapping, dict)
-    with pytest.raises(ValidationError) as caught:
-        Settings.model_validate(mapping, strict=True)
+    with pytest.raises(ValueError) as caught:
+        Settings.model_validate(mapping, strict=True).validate_zalo_runtime()
     exc = caught.value
     surfaces = {
-        "str": str(exc), "repr": repr(exc), "json": exc.json(),
-        "errors": repr(exc.errors()), "errors_json": json.dumps(exc.errors(), default=str),
+        "str": str(exc), "repr": repr(exc),
         "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
     }
+    if isinstance(exc, ValidationError):
+        surfaces.update(json=exc.json(), errors=repr(exc.errors()),
+                        errors_json=json.dumps(exc.errors(), default=str))
     leaked = {name for name, rendered in surfaces.items() if "Q7!" in rendered or "991" in rendered}
     assert leaked == set()
 

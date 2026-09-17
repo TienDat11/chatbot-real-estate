@@ -15,7 +15,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import AfterValidator, Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import AfterValidator, Field, SecretStr, SkipValidation, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("api.config")
@@ -80,25 +80,60 @@ class Settings(BaseSettings):
         "rag-real-estate-lead-mirror-default-secret",
     )
 
-    @model_validator(mode="after")
-    def _validate_zalo_webhook_secret(self) -> Settings:
-        secret = self.zalo_bot_webhook_secret.get_secret_value()
-        if not isinstance(secret, str):
-            raise ValueError("Zalo Bot webhook secret must be a string")
-        if self.zalo_bot_enabled and not 8 <= len(secret) <= 256:
-            raise ValueError("Enabled Zalo Bot requires a webhook secret of 8..256 characters")
-        return self
+    def validate_zalo_runtime(self) -> None:
+        """Reject unsafe Zalo settings at installation, without taking web offline.
 
-    @model_validator(mode="after")
-    def _validate_zalo_identity_secret(self) -> Settings:
-        secret = self.zalo_bot_identity_secret.get_secret_value()
-        if not isinstance(secret, str) or (secret and not 32 <= len(secret) <= 256):
-            raise ValueError("Zalo Bot identity secret must be empty or 32..256 characters")
-        if secret and secret in (
-            self.zalo_bot_token, self.zalo_bot_webhook_secret.get_secret_value()
+        Disabled Zalo never validates credentials or initializes infrastructure.
+        Environment integers are decimal strings; bool/float coercion is forbidden.
+        """
+        if not self.zalo_bot_enabled:
+            return
+        bounds = {
+            "zalo_bot_max_body_bytes": (1, None),
+            "zalo_bot_burst_window_seconds": (1, 300),
+            "zalo_bot_burst_max_events": (1, 10000),
+            "zalo_bot_poll_seconds": (1, None),
+            "zalo_bot_batch_size": (1, 100),
+            "zalo_bot_max_attempts": (1, 100),
+            "zalo_bot_lease_seconds": (30, None),
+            "zalo_bot_core_timeout_seconds": (1, None),
+            "zalo_bot_lease_margin_seconds": (6, None),
+            "zalo_bot_retry_max_age_hours": (1, None),
+            "zalo_bot_terminal_retention_days": (1, None),
+        }
+        parsed = {}
+        for name, (minimum, maximum) in bounds.items():
+            value = getattr(self, name)
+            if isinstance(value, str) and value.isascii() and value.isdecimal():
+                try:
+                    value = int(value)
+                except ValueError:
+                    raise ValueError("ZALO_CONFIG_INVALID") from None
+            if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
+                raise ValueError("ZALO_CONFIG_INVALID")
+            parsed[name] = value
+        if parsed["zalo_bot_lease_seconds"] <= (
+            parsed["zalo_bot_core_timeout_seconds"] + parsed["zalo_bot_lease_margin_seconds"]
         ):
-            raise ValueError("Zalo Bot identity secret must be independent of transport credentials")
-        return self
+            raise ValueError("ZALO_CONFIG_INVALID")
+        identity = self.zalo_bot_identity_secret.get_secret_value()
+        webhook = self.zalo_bot_webhook_secret.get_secret_value()
+        token = self.zalo_bot_token
+        if (
+            not isinstance(identity, str) or not 32 <= len(identity) <= 256
+            or not isinstance(webhook, str) or not 8 <= len(webhook) <= 256
+            or not isinstance(token, str) or not token.strip()
+            or identity in (webhook, token)
+        ):
+            raise ValueError("ZALO_CONFIG_INVALID")
+        try:
+            identity.encode("utf-8")
+            webhook.encode("utf-8")
+            token.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("ZALO_CONFIG_INVALID") from None
+        for name, value in parsed.items():
+            setattr(self, name, value)
 
     @model_validator(mode="after")
     def _enforce_approved_llm_provider(self) -> Settings:
@@ -537,16 +572,27 @@ class Settings(BaseSettings):
     # X-Bot-Api-Secret-Token header. An empty value fails closed (403) at
     # every webhook. Never log the header or this secret.
     zalo_bot_webhook_secret: SecretStr = Field(default=SecretStr(""), repr=False)
-    # Stable correlation key, never derived from transport credentials. Empty
-    # permits ingress-only startup; the identity helper fails closed at use.
+    # Stable correlation key, never derived from transport credentials.
+    # Required only at enabled runtime installation; disabled startup stays inert.
     zalo_bot_identity_secret: SecretStr = Field(default=SecretStr(""), repr=False)
     # Hard cap (bytes) on an inbound webhook body declared via Content-Length
     # AND on the body actually read. Prevents unbounded request-body DoS.
     zalo_bot_max_body_bytes: int = Field(default=65536, gt=0)
-    # Provider access token for the Zalo Bot API (ZB-02 outbound). Plumbed
-    # for a later provider adapter and MUST NOT be read by the ingress path.
-    zalo_bot_token: str = ""
+    # Provider token is checked locally at runtime installation, never probed.
+    zalo_bot_token: SkipValidation[str] = Field(default="", repr=False)
     zalo_bot_api_base_url: str = "https://bot-api.zaloplatforms.com"
+    # Recommended configurable values, NOT approved production settings.
+    # Preserve raw env input until enabled installation can reject it Zalo-only.
+    zalo_bot_burst_window_seconds: SkipValidation[int] = 60
+    zalo_bot_burst_max_events: SkipValidation[int] = 60
+    zalo_bot_poll_seconds: SkipValidation[int] = 5
+    zalo_bot_batch_size: SkipValidation[int] = 20
+    zalo_bot_max_attempts: SkipValidation[int] = 8
+    zalo_bot_lease_seconds: SkipValidation[int] = 120
+    zalo_bot_core_timeout_seconds: SkipValidation[int] = 90
+    zalo_bot_lease_margin_seconds: SkipValidation[int] = 15
+    zalo_bot_retry_max_age_hours: SkipValidation[int] = 24
+    zalo_bot_terminal_retention_days: SkipValidation[int] = 7
 
     @field_validator("trusted_proxy_ips", mode="before")
     @classmethod

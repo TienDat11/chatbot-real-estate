@@ -12,7 +12,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from api.application.services.zalo_bot_identity import global_session_id, opaque_identity
+from api.application.services.zalo_bot_identity import global_session_id, ingress_key, opaque_identity
 
 _KEY = "identity-test-key-independent-123456789"
 _CHAT = "private-chat-marker-90317"
@@ -43,11 +43,9 @@ def _settings(settings_type, **overrides):
 
 
 def _assert_safe_error(exc, *markers):
-    surfaces = (
-        str(exc), repr(exc), exc.json(), repr(exc.errors()),
-        json.dumps(exc.errors(), default=str),
-        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
-    )
+    surfaces = [str(exc), repr(exc), "".join(traceback.format_exception(exc))]
+    if isinstance(exc, ValidationError):
+        surfaces.extend([exc.json(), repr(exc.errors()), json.dumps(exc.errors(), default=str)])
     assert not any(marker in surface for marker in markers for surface in surfaces)
 
 
@@ -83,20 +81,27 @@ def test_transport_rotation_does_not_change_identity_or_session(settings_type):
     after = opaque_identity(_CHAT, rotated.zalo_bot_identity_secret.get_secret_value())
     assert after == identity
     assert global_session_id(after) == global_session_id(identity)
+    assert ingress_key(_CHAT, "message", original.zalo_bot_identity_secret.get_secret_value()) == (
+        ingress_key(_CHAT, "message", rotated.zalo_bot_identity_secret.get_secret_value())
+    )
     assert isinstance(rotated.zalo_bot_token, str)
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_missing_identity_allows_ingress_but_fails_at_use(settings_type, enabled):
-    settings = _settings(settings_type, zalo_bot_enabled=enabled)
+def test_missing_identity_is_inert_only_when_disabled(settings_type):
+    settings = _settings(settings_type)
     assert settings.zalo_bot_identity_secret.get_secret_value() == ""
+    settings.validate_zalo_runtime()
     with pytest.raises(ValueError):
         opaque_identity(_CHAT, settings.zalo_bot_identity_secret.get_secret_value())
+    enabled = _settings(settings_type, zalo_bot_enabled=True)
+    with pytest.raises(ValueError):
+        enabled.validate_zalo_runtime()
 
 
 @pytest.mark.parametrize("secret", ["x" * 32, "x" * 256, "密" * 32])
 def test_configured_key_boundaries_and_masking(settings_type, secret):
-    settings = _settings(settings_type, zalo_bot_identity_secret=secret)
+    settings = _settings(settings_type, zalo_bot_enabled=True, zalo_bot_identity_secret=secret)
+    settings.validate_zalo_runtime()
     assert settings.zalo_bot_identity_secret.get_secret_value() == secret
     assert opaque_identity(_CHAT, secret).startswith(_PREFIX)
     assert secret not in repr(settings)
@@ -114,27 +119,32 @@ def test_configured_key_boundaries_and_masking(settings_type, secret):
 ], ids=["short", "long", "list", "dict", "integer", "none"])
 @pytest.mark.parametrize("wrapped", [False, True], ids=["raw", "SecretStr"])
 def test_invalid_identity_secret_safe_on_all_surfaces(settings_type, secret, markers, wrapped):
-    with pytest.raises(ValidationError) as caught:
-        _settings(settings_type, zalo_bot_identity_secret=SecretStr(secret) if wrapped else secret)
+    with pytest.raises(ValueError) as caught:
+        settings = _settings(settings_type, zalo_bot_enabled=True,
+                             zalo_bot_identity_secret=SecretStr(secret) if wrapped else secret)
+        settings.validate_zalo_runtime()
     _assert_safe_error(caught.value, *markers)
 
 
 @pytest.mark.parametrize("credential", ["zalo_bot_token", "zalo_bot_webhook_secret"])
 def test_identity_cannot_equal_transport_credential_without_secret_echo(settings_type, credential):
-    with pytest.raises(ValidationError) as caught:
-        _settings(settings_type, zalo_bot_identity_secret=_KEY, **{credential: _KEY})
+    settings = _settings(settings_type, zalo_bot_enabled=True,
+                         zalo_bot_identity_secret=_KEY, **{credential: _KEY})
+    with pytest.raises(ValueError) as caught:
+        settings.validate_zalo_runtime()
     _assert_safe_error(caught.value, _KEY)
 
 
 @pytest.mark.parametrize("mapping_type", [dict, UserDict, MappingProxyType])
-def test_model_level_errors_mask_identity_without_mutating_input(settings_type, mapping_type):
+def test_runtime_errors_mask_identity_without_mutating_input(settings_type, mapping_type):
     values = dict(
         app_env="test", enforce_approved_llm_provider=False,
         zalo_bot_enabled=True, zalo_bot_webhook_secret="",
         zalo_bot_identity_secret=_KEY, zalo_bot_token="transport-token",
     )
-    with pytest.raises(ValidationError) as caught:
-        settings_type.model_validate(mapping_type(values))
+    settings = settings_type.model_validate(mapping_type(values))
+    with pytest.raises(ValueError) as caught:
+        settings.validate_zalo_runtime()
     _assert_safe_error(caught.value, _KEY)
     assert values["zalo_bot_identity_secret"] == _KEY
 
@@ -165,3 +175,51 @@ def test_invalid_session_inputs_fail_safely(identity):
         global_session_id(identity)
     assert "private-identity" not in repr(caught.value)
     assert "739182640517" not in repr(caught.value)
+
+
+def test_ingress_uses_exact_domain_separated_json_pair():
+    chat, message = ' trò chuyện:" ', '訊息,\\"1'
+    prefix = "zalo-bot:ingress:v1:"
+    pair = json.dumps([chat, message], ensure_ascii=False, separators=(",", ":"))
+    expected = prefix + hmac.digest(_KEY.encode(), (prefix + pair).encode(), "sha256").hex()
+    assert ingress_key(chat, message, _KEY) == expected
+    assert ingress_key(chat, message, _KEY) != opaque_identity(pair, _KEY)
+    assert ingress_key(chat, message, _KEY) != ingress_key(chat, message, _KEY + "-other")
+
+
+@pytest.mark.parametrize("first,second", [
+    (("a:b", "c"), ("a", "b:c")),
+    (("a", "message"), ("b", "message")),
+    (("a ", "message"), ("a", "message")),
+    (("a", "message "), ("a", "message")),
+    (("A", "message"), ("a", "message")),
+    (("é", "message"), ("e\u0301", "message")),
+    (("a", "é"), ("a", "e\u0301")),
+])
+def test_ingress_pairs_never_normalize_or_join_with_delimiters(first, second):
+    assert ingress_key(*first, _KEY) != ingress_key(*second, _KEY)
+
+
+@pytest.mark.parametrize("chat,message,secret", [
+    (None, "message", _KEY),
+    ("", "message", _KEY),
+    (_CHAT, 123, _KEY),
+    (_CHAT, "", _KEY),
+    (_CHAT, "private-message-\ud800", _KEY),
+    (_CHAT, "message", "short-secret"),
+    (_CHAT, "message", "secret-\ud800" * 5),
+])
+def test_invalid_ingress_inputs_fail_safely(chat, message, secret):
+    with pytest.raises(ValueError) as caught:
+        ingress_key(chat, message, secret)
+    assert _CHAT not in str(caught.value)
+    assert _KEY not in str(caught.value)
+    assert "private-message" not in str(caught.value)
+
+
+def test_identity_and_session_contracts_remain_unchanged():
+    identity = _PREFIX + hmac.digest(_KEY.encode(), (_PREFIX + _CHAT).encode(), "sha256").hex()
+    session = str(uuid5(uuid5(NAMESPACE_URL, "zalo-bot:session:v1:"), identity))
+    ingress_key(_CHAT, "message", _KEY)
+    assert opaque_identity(_CHAT, _KEY) == identity
+    assert global_session_id(identity) == session

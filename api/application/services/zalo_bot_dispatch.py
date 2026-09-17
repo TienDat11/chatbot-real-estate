@@ -45,6 +45,12 @@ def set_scheduler(fn: SchedulerFn) -> None:
     _scheduler = fn
 
 
+def reset_scheduler() -> None:
+    """Disable local dispatch before runtime installation and shutdown."""
+    global _scheduler
+    _scheduler = _default_noop_scheduler
+
+
 def get_scheduler() -> SchedulerFn:
     return _scheduler
 

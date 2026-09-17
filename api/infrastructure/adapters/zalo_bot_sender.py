@@ -19,7 +19,7 @@ class HttpxZaloBotSender:
 
     def __init__(self, token: str, *, transport: httpx.AsyncBaseTransport | None = None):
         if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_:~.\-]+", token):
-            raise ZaloSendError("Invalid Zalo Bot token")
+            raise ZaloSendError(code="INVALID_TOKEN", retryable=False)
         self._token = token
         self._transport = transport
 
@@ -30,10 +30,22 @@ class HttpxZaloBotSender:
         can cause duplicate delivery on retry. This adapter does not retry.
         """
         if not isinstance(chat_id, str) or not chat_id.strip():
-            raise ZaloSendError("Invalid Zalo Bot recipient")
+            raise ZaloSendError(code="INVALID_RECIPIENT", retryable=False)
         if not isinstance(text, str) or not text.strip() or len(text) > 2000:
-            raise ZaloSendError("Invalid Zalo Bot text")
+            raise ZaloSendError(code="INVALID_TEXT", retryable=False)
+        invalid_code = None
+        try:
+            chat_id.encode("utf-8")
+        except UnicodeError:
+            invalid_code = "INVALID_RECIPIENT"
+        try:
+            text.encode("utf-8")
+        except UnicodeError:
+            invalid_code = "INVALID_TEXT"
+        if invalid_code is not None:
+            raise ZaloSendError(code=invalid_code, retryable=False)
 
+        code, retryable = "SEND_UNAVAILABLE", True
         try:
             request = httpx.Request(
                 "POST",
@@ -49,14 +61,19 @@ class HttpxZaloBotSender:
             async with context as transport:
                 response = await transport.handle_async_request(request)
                 try:
-                    if not 200 <= response.status_code < 300:
-                        raise ZaloSendError("Zalo Bot delivery failed")
+                    status = response.status_code
+                    if not 200 <= status < 300:
+                        if status in (401, 403):
+                            code, retryable = "PROVIDER_AUTH_REJECTED", False
+                        elif 300 <= status < 500 and status not in (408, 429):
+                            code, retryable = "PROVIDER_REJECTED", False
+                        raise ZaloSendError()
                     await response.aread()
                     payload = response.json()
                 finally:
                     await response.aclose()
             if not isinstance(payload, dict) or payload.get("ok") is not True:
-                raise ZaloSendError("Zalo Bot delivery failed")
+                raise ZaloSendError()
             result = payload.get("result")
             message_id = result.get("message_id") if isinstance(result, dict) else None
             if (
@@ -64,10 +81,10 @@ class HttpxZaloBotSender:
                 or not message_id.strip()
                 or not message_id.isprintable()
             ):
-                raise ZaloSendError("Zalo Bot delivery failed")
+                raise ZaloSendError()
             return message_id
         except Exception:
             # Provider failures may carry the token URL, response body, or chat id.
             # Raise outside the handler to discard even implicit exception context.
             pass
-        raise ZaloSendError("Zalo Bot delivery failed") from None
+        raise ZaloSendError(code=code, retryable=retryable) from None

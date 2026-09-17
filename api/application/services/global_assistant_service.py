@@ -268,6 +268,19 @@ class GlobalAssistantService:
             )
         return None
 
+    async def recover_source_event(
+        self, request: GlobalAssistantInput
+    ) -> GlobalAssistantOutcome | None:
+        """Read owned history only; a miss never grants execution permission."""
+        if request.source_event_key is None:
+            raise ValueError("source_event_key is required for recovery")
+        messages = await self._history.global_messages(
+            session_id=request.session_id,
+            device_id=request.device_id,
+            identity_key=request.identity_key,
+        )
+        return self._find_replay(messages, request.source_event_key)
+
     async def prepare_turn(self, request: GlobalAssistantInput) -> PreparedTurn:
         """Resolve project, build server-side history, and check replay.
 

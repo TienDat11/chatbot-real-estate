@@ -107,6 +107,10 @@ Kiểm tra: `gcloud secrets list` phải thấy đủ 8 secret.
 
 Chạy **từ repo root** (Dockerfile BE nằm ở root).
 
+**Zalo Bot:** lệnh tiết kiệm dưới đây chỉ dùng khi `ZALO_BOT_ENABLED=false`.
+Nếu được duyệt bật Zalo, bắt buộc thêm `--no-cpu-throttling`, giữ `--min-instances=1`
+hoặc cao hơn, và hoàn tất mục 8. Cron ping `/ready` không thay thế CPU nền.
+
 ```bash
 gcloud run deploy ragre-api \
   --source . \
@@ -283,3 +287,137 @@ gcloud run services update-traffic ragre-web --region asia-southeast1 --to-revis
 - `--cpu-always-allocated`: tên flag cũ, không còn trên reference hiện hành — dùng `--no-cpu-throttling` thay thế (runbook mặc định ĐÃ BỎ flag này để tiết kiệm; thêm lại nếu muốn always-CPU).
 - R2 prod: `IMAGE_CDN_PROJECT_MAP`, `R2_ACCOUNT_ID`, `R2_ENDPOINT`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, `R2_PUBLIC_URL` chưa có trong lệnh deploy BE — ảnh trả về sẽ thiếu nếu không set. Copy giá trị JSON từ `.env` local vào `--set-env-vars` (không phải secret trừ `R2_ACCESS_KEY_ID` — có thể thêm vào Secret Manager nếu muốn).
 - Giá tier-2 chính xác cho `asia-southeast1` chưa verify (trang pricing chỉ render bảng Iowa) — xem Google Cloud pricing calculator trước khi chốt ngân sách.
+
+## 8. ZB-03 — cổng phê duyệt Zalo Bot (chưa triển khai)
+
+Trạng thái: ACCEPT-WITH-FINDINGS. Mặc định `ZALO_BOT_ENABLED=false`.
+Các giá trị dưới đây là **khuyến nghị cấu hình**, không phải giá trị production đã duyệt.
+Tài liệu này không cấp phép migration, backfill, cấp sales, xoay secret, gọi provider hoặc deploy.
+
+### 8.1. Phê duyệt trước khi bật
+
+| Biến | Khuyến nghị | Ràng buộc |
+|---|---:|---|
+| `ZALO_BOT_BURST_WINDOW_SECONDS` | 60 | Số nguyên 1..300 |
+| `ZALO_BOT_BURST_MAX_EVENTS` | 60 | Số nguyên 1..10000, theo opaque actor |
+| `ZALO_BOT_POLL_SECONDS` | 5 | Số nguyên >=1 |
+| `ZALO_BOT_BATCH_SIZE` | 20 | Số nguyên 1..100 |
+| `ZALO_BOT_MAX_ATTEMPTS` | 8 | Số nguyên 1..100 |
+| `ZALO_BOT_LEASE_SECONDS` | 120 | Số nguyên >=30; lớn hơn timeout + margin |
+| `ZALO_BOT_CORE_TIMEOUT_SECONDS` | 90 | Số nguyên >0 |
+| `ZALO_BOT_LEASE_MARGIN_SECONDS` | 15 | Số nguyên >5 (deadline DB 5 giây) |
+| `ZALO_BOT_RETRY_MAX_AGE_HOURS` | 24 | Số nguyên >0 |
+| `ZALO_BOT_TERMINAL_RETENTION_DAYS` | 7 | Số nguyên >0 |
+
+Người vận hành phải duyệt giá trị dựa trên lưu lượng thực tế. Mọi replica dùng cùng
+cấu hình; thay cửa sổ cần rollout đã drain, không chạy cấu hình trộn. Fixed window
+có thể nhận 2 lần trần ở biên hai cửa sổ (khuyến nghị 120 nguồn mới); không phải
+rolling window hay giới hạn năng lực toàn provider. Đây chỉ là phanh kỹ thuật,
+không quota ngày/đời, staff credit, tiền, lead bonus hoặc số lượt còn lại. Sales ACTIVE
+đã có binding vẫn dùng nghiệp vụ bình thường; unknown/revoked/inactive bị từ chối.
+
+Giữ `ZALO_BOT_IDENTITY_SECRET` ổn định, riêng biệt với webhook secret và provider token;
+không ghi secret vào SQL, command/report hoặc log. Mất/đổi key có thể phá binding,
+session và dedupe; cần quy trình riêng đã duyệt. Bật runtime đòi secret identity
+32..256 ký tự, webhook 8..256 và token không rỗng; kiểm tra local, không gọi provider.
+
+### 8.2. Trình tự cutover offline bắt buộc
+
+1. Ghi nhận **đích DB được người có thẩm quyền duyệt rõ ràng** (project/host/database,
+   môi trường, quyền thay đổi), không suy ra quyền từ tên DB hoặc ambient DSN.
+   Xác nhận pooler dùng transaction mode với bằng chứng endpoint/mode đã che credentials.
+   Direct PostgreSQL test không chứng minh transaction-pooler; không dùng session advisory lock.
+2. Tắt ingress/processor Zalo và drain toàn bộ revision/worker cũ. Không có mixed writer
+   hoặc processor ZB-02 chạy cạnh receipt fence mới. Giữ web hoạt động.
+3. Sau phê duyệt DB riêng, áp dụng schema `db/migrations/2026-09-17-zalo-bot-hardening.sql`.
+   DB rỗng vẫn cần migrations events rồi roundtrip và prerequisites sales/extension.
+   Không sửa migration đã chấp nhận; incompatibility phải dừng, không tự repair.
+4. Chạy `scripts/backfill_zalo_bot_hardening.py` offline với đích DB được duyệt và
+   identity SecretStr được cấp an toàn trong bộ nhớ. Batch 100, commit mỗi batch,
+   repeat-safe, chỉ log counts/codes; không provider/core/history rewrite.
+   Xác minh mỗi event có ingress/identity/source, source đúng `zalo-bot:event:v1:{id}`,
+   tombstone khớp event/source chính xác và không trùng/conflict. Mọi row có nguồn cũ,
+   cache hoặc outbound ID từ trước phải có immutable started receipt; không reset receipt.
+   Status/cache/identity sai phải dừng. Backfill completed_at cho done/dead/rejected.
+5. Áp dụng `2026-09-17-zalo-bot-hardening-indexes.sql` **ngoài transaction**.
+   Xác minh các index ticket có đúng định nghĩa và `indisvalid=true`/`indisready=true`.
+   `IF NOT EXISTS` không chứng minh index hợp lệ; chỉ drop/rebuild index ticket bị invalid
+   dưới thủ tục migration đã duyệt. Không enable khi index lỗi.
+6. Khi mapping/receipt gate đạt, áp dụng `2026-09-17-zalo-bot-hardening-finalize.sql`
+   để ingress/identity/source NOT NULL. Xác minh schema gate gồm actor leases và
+   tables/constraints/indexes/mapping. DB rỗng vẫn đi qua backfill zero-row và finalize.
+   Event đã bị xóa trước cutover không thể dựng lại: historical dedupe NOT-VERIFIED,
+   cần quyết định riêng; bảo đảm chỉ áp dụng receipt đã lập tại cutover và ingress mới.
+7. Deploy code vẫn disabled sau phép deploy riêng; chạy kiểm chứng local/disposable
+   PostgreSQL, restart/duplicate/purge và transaction-pooler bằng hai worker pools.
+   Không chạy test vào DB production. Không dùng FakePool để tuyên bố chứng minh locking.
+8. Xác minh Cloud Run instance-based CPU (`--no-cpu-throttling`), min >=1, secret bindings,
+   trusted ACTIVE sales, runtime-installed evidence, và drain revision enabled cũ.
+   Request CPU/min0 hoặc ping không được duyệt cho autonomous recovery; nếu từ chối
+   chi phí always-on, cần thiết kế worker/trigger bền riêng trước enablement.
+9. Chỉ sau quyết định F5/F7/privacy bên dưới và phê duyệt enable/live smoke riêng mới
+   rollout enabled. Quan sát `ZALO_RUNTIME_INSTALLED`, idle startup/missed-wake recovery,
+   restart, kill switch. `/ready` chỉ giữ PostgreSQL/LightRAG, không probe provider.
+   `ZALO_RUNTIME_UNAVAILABLE` nghĩa fail-closed, không chứng minh đã cài worker.
+
+### 8.3. F5/F7 và đánh đổi mất câu trả lời
+
+Immutable STARTED receipt cho phép tối đa một `core.run` theo cùng source. Crash sau
+receipt nhưng trước call/outcome có thể mất câu trả lời. Recovery chỉ đọc owned history;
+không thấy kết quả không cấp quyền chạy lại, hết giới hạn thành CORE_OUTCOME_UNCERTAIN.
+Không reset marker/receipt vì muốn trả lời đủ. Cached retry không tính phanh thêm lần nữa.
+
+**F5:** provider có thể nhận send trước khi commit provider ID + done. Retry cache có thể
+gửi trùng mà không chạy core lại. Không có idempotency key provider đã xác minh;
+không tuyên bố exactly-once delivery. Human phải chấp nhận cả nguy cơ trùng/mất send.
+
+**F7:** một owner DB còn lease không đồng nghĩa một core vật lý luôn chạy độc quyền.
+Heartbeat cập nhật actor rồi event trong **một transaction ngắn**, chỉ commit nếu cả hai
+trả một row; mất ownership/renewal acknowledgement phải cancel bounded và bỏ kết quả.
+Non-cancellable core hoặc process treo có thể chạy chồng source KHÁC cùng actor sau expiry;
+không release sớm nếu core chưa xác nhận dừng. Shared ConvContext/history nội bộ có thể race.
+
+Ngay cả core cancel hợp tác, **DB wall-clock nhảy tới trước vượt lease còn lại hoặc failover
+sang clock đi trước** có thể cho worker khác claim source KHÁC trước heartbeat phát hiện.
+Local monotonic deadline **không phát hiện/bao phủ bước nhảy DB clock**. Clock lùi trì hoãn
+takeover hoặc khiến local deadline bảo thủ bỏ ownership. Receipt bất biến vẫn bảo vệ
+cùng source khỏi core chạy lại, không dựa vào lease/clock. Không reset receipt khi inject clock.
+
+Human phải duyệt bằng chứng cancellation và forward-clock/ahead-failover failure injection,
+và chấp nhận rủi ro này rõ ràng trước bật. Nếu từ chối, giữ production disabled đến khi có
+execution isolation/termination mạnh hơn đã được thiết kế riêng. Các test không chứng minh
+mutual exclusion mọi failure mode. Runtime stop reset scheduler trước, cancel/stop processor,
+release token-fenced chỉ khi đã dừng rồi đóng pool; không hợp tác thì dừng consumer, để expiry.
+Cloud Run có thể terminate khoảng 10 giây sau SIGTERM; không bảo đảm latency khi DB/platform down.
+
+### 8.4. Retention, backup, quyền riêng tư
+
+Xóa toàn bộ terminal event sau TTL: raw chat_id/message_id/text/cached outcome/provider ID.
+Không xóa trực tiếp active/retryable/processing; retry policy phải terminalize trước.
+Cleanup bounded mỗi sweep thành công, không cam kết deadline xóa vật lý khi hệ thống down.
+Tombstone/admission giữ lâu dài đến decommission/erasure/key-rotation được duyệt; cleanup
+không xóa actor lease/counter. Opaque keys vẫn là dữ liệu cá nhân giả danh, không anonymous.
+Shared transcript và binding giữ chính sách riêng; không tạo transcript Zalo thứ hai.
+
+Privacy owner phải kiểm kê quyền truy cập, dump/restore, backup/PITR/WAL và retention thực tế.
+`backup_postgres.sh`, `restore_supabase.sh`, `update_6mo.sh` có thể sao chép raw rows trong
+dump toàn DB; TTL live không xóa archive. Provider retention/log/external copies và deployed
+backup policy vẫn NOT-VERIFIED. Restore phải giữ/merge immutable receipts, không replay core.
+Phê duyệt riêng cho lifetime receipt và backup, không hứa erasure ngay khỏi backup media.
+
+### 8.5. Kill switch và rollback Zalo
+
+Tắt `ZALO_BOT_ENABLED`, remove traffic và drain tất cả enabled revisions; sửa env cần rollout,
+không hot-poll `.env`. Local flag có thể stop/wake handle; không thêm admin endpoint.
+Đợi vượt lease/core timeout còn lại; nếu core không dừng phải xử lý rủi ro F7, không giả định
+lease hết nghĩa execution đã hết. Provider request đã nhận không thể thu hồi.
+
+Ưu tiên forward fix khi disabled. Rollback code cũ chỉ với Zalo disabled và giữ schema/data
+mới. Không bật old ingress sau NOT NULL finalize; cần compatibility migration/code được review
+riêng nếu thật sự cần, vẫn giữ tombstone. Không DOWN drop/truncate tables/receipts, reset attempt,
+start marker hoặc sequence. Không đưa processor ZB-02 active trở lại vì bỏ qua receipt fence.
+Raw rows đã purge không phục hồi được ngoài backup được cấp phép; restore phải merge receipt,
+không chạy core lại. Kiểm chứng real PostgreSQL restart/duplicate trước re-enable.
+
+CPU/min instances/revisions/secret bindings, DB capacity/mode, backup/privacy, provider,
+cancellation và clock-discontinuity thực tế đều **NOT-VERIFIED** cho đến khi có evidence được duyệt.

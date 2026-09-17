@@ -934,32 +934,44 @@ async def _close_persistence_pools() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup: await the Postgres rate-limit wiring first (pools are awaited
-    inside the wiring task; startup is non-fatal if it errors), then
-    conditionally launch the RAG prewarm and the lead-mirror reconciliation
-    sweep (both background tasks).
+    """Preserve web startup; install Zalo independently and stop it before pools."""
+    from api.application.services.zalo_bot_dispatch import reset_scheduler
+    from api.infrastructure.adapters.zalo_bot_runtime import start_zalo_runtime, stop_zalo_runtime
+    from api.infrastructure.config.config import get_settings
 
-    Shutdown: cancel both tasks (the prewarm only ever awaits the idempotent
-    LightRAG init; the sweep only sleeps between batches, so cancel is safe
-    for both) and close every persistence pool.
-    """
+    reset_scheduler()
     await _wire_postgres_rate_limit_port()
     prewarm_task = _maybe_start_rag_prewarm()
     reconciliation_task = _maybe_start_lead_mirror_reconciliation()
     retention_task = asyncio.create_task(_chat_history_retention_loop())
-    yield
-    if prewarm_task is not None:
-        prewarm_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await prewarm_task
-    retention_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await retention_task
-    if reconciliation_task is not None:
-        reconciliation_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await reconciliation_task
-    await _close_persistence_pools()
+    zalo_runtime = None
+    try:
+        try:
+            zalo_runtime = await start_zalo_runtime(get_settings())
+        except Exception:
+            # Zalo-only installation failures must not take the web API offline.
+            reset_scheduler()
+            logger.warning("ZALO_RUNTIME_UNAVAILABLE")
+        app.state.zalo_runtime = zalo_runtime
+        yield
+    finally:
+        reset_scheduler()
+        try:
+            await stop_zalo_runtime(zalo_runtime)
+        finally:
+            app.state.zalo_runtime = None
+            if prewarm_task is not None:
+                prewarm_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await prewarm_task
+            retention_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await retention_task
+            if reconciliation_task is not None:
+                reconciliation_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reconciliation_task
+            await _close_persistence_pools()
 
 
 def create_app() -> FastAPI:

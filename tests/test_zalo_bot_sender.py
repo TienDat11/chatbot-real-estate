@@ -66,13 +66,22 @@ def test_send_message_request_and_confirmed_id(text, caplog):
 )
 def test_invalid_response_never_confirms_delivery(payload, caplog):
     caplog.set_level(logging.DEBUG)
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
     sender = HttpxZaloBotSender(
         TOKEN,
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)),
+        transport=httpx.MockTransport(handle),
     )
     with pytest.raises(ZaloSendError) as caught:
         asyncio.run(sender.send_text(CHAT_ID, TEXT))
     _assert_private_failure(caught.value, caplog)
+    assert caught.value.code == "SEND_UNAVAILABLE"
+    assert caught.value.retryable is True
+    assert len(requests) == 1
 
 
 def test_invalid_json_is_safe(caplog):
@@ -86,10 +95,21 @@ def test_invalid_json_is_safe(caplog):
     with pytest.raises(ZaloSendError) as caught:
         asyncio.run(sender.send_text(CHAT_ID, TEXT))
     _assert_private_failure(caught.value, caplog)
+    assert caught.value.code == "SEND_UNAVAILABLE"
+    assert caught.value.retryable is True
 
 
-@pytest.mark.parametrize("status", [302, 400, 429, 500])
-def test_http_failure_and_redirect_are_not_retried(status, caplog):
+@pytest.mark.parametrize("status,code,retryable", [
+    (302, "PROVIDER_REJECTED", False),
+    (400, "PROVIDER_REJECTED", False),
+    (401, "PROVIDER_AUTH_REJECTED", False),
+    (403, "PROVIDER_AUTH_REJECTED", False),
+    (408, "SEND_UNAVAILABLE", True),
+    (429, "SEND_UNAVAILABLE", True),
+    (500, "SEND_UNAVAILABLE", True),
+    (599, "SEND_UNAVAILABLE", True),
+])
+def test_http_failure_and_redirect_are_not_retried(status, code, retryable, caplog):
     caplog.set_level(logging.DEBUG)
     requests = []
 
@@ -106,19 +126,26 @@ def test_http_failure_and_redirect_are_not_retried(status, caplog):
         asyncio.run(sender.send_text(CHAT_ID, TEXT))
     assert len(requests) == 1
     _assert_private_failure(caught.value, caplog)
+    assert caught.value.code == code
+    assert caught.value.retryable is retryable
 
 
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError, RuntimeError])
 def test_secret_transport_exception_has_no_chain_or_log(error_type, caplog):
     caplog.set_level(logging.DEBUG)
+    requests = []
 
     def handle(request):
+        requests.append(request)
         raise error_type(f"{request.url} {CHAT_ID} {TEXT}")
 
     sender = HttpxZaloBotSender(TOKEN, transport=httpx.MockTransport(handle))
     with pytest.raises(ZaloSendError) as caught:
         asyncio.run(sender.send_text(CHAT_ID, TEXT))
     _assert_private_failure(caught.value, caplog)
+    assert caught.value.code == "SEND_UNAVAILABLE"
+    assert caught.value.retryable is True
+    assert len(requests) == 1
 
 
 def test_stream_failure_closes_response_without_leaking(caplog):
@@ -145,6 +172,7 @@ def test_stream_failure_closes_response_without_leaking(caplog):
         asyncio.run(sender.send_text(CHAT_ID, TEXT))
     assert stream.closed
     _assert_private_failure(caught.value, caplog)
+    assert caught.value.retryable is True
 
 
 @pytest.mark.parametrize("token", ["", " ", "a/b", "a\\b", "a?b", "a#b", "a%2fb", "a\nb", "a\x7fb"])
@@ -153,10 +181,21 @@ def test_invalid_token_fails_without_disclosure(token, caplog):
     with pytest.raises(ZaloSendError) as caught:
         HttpxZaloBotSender(token)
     _assert_private_failure(caught.value, caplog)
+    assert caught.value.code == "INVALID_TOKEN"
+    assert caught.value.retryable is False
 
 
-@pytest.mark.parametrize("chat_id,text", [(CHAT_ID, ""), (CHAT_ID, " "), (CHAT_ID, "x" * 2001), ("", TEXT)])
-def test_invalid_message_never_reaches_transport(chat_id, text):
+@pytest.mark.parametrize("chat_id,text,code", [
+    (CHAT_ID, "", "INVALID_TEXT"),
+    (CHAT_ID, " ", "INVALID_TEXT"),
+    (CHAT_ID, "x" * 2001, "INVALID_TEXT"),
+    (CHAT_ID, "private-text-\ud800", "INVALID_TEXT"),
+    (CHAT_ID, {}, "INVALID_TEXT"),
+    ("", TEXT, "INVALID_RECIPIENT"),
+    ("chat-\ud800", TEXT, "INVALID_RECIPIENT"),
+    (123, TEXT, "INVALID_RECIPIENT"),
+])
+def test_invalid_message_never_reaches_transport(chat_id, text, code):
     requests = []
 
     def handle(request):
@@ -164,9 +203,11 @@ def test_invalid_message_never_reaches_transport(chat_id, text):
         return httpx.Response(200, json={"ok": True, "result": {"message_id": "bad"}})
 
     sender = HttpxZaloBotSender(TOKEN, transport=httpx.MockTransport(handle))
-    with pytest.raises(ZaloSendError):
+    with pytest.raises(ZaloSendError) as caught:
         asyncio.run(sender.send_text(chat_id, text))
     assert requests == []
+    assert caught.value.code == code
+    assert caught.value.retryable is False
 
 
 def _assert_private_failure(error, caplog):
@@ -177,3 +218,16 @@ def _assert_private_failure(error, caplog):
         assert private not in str(error)
         assert private not in rendered
         assert private not in caplog.text
+
+
+def test_cancellation_is_not_wrapped_or_retried():
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        raise asyncio.CancelledError()
+
+    sender = HttpxZaloBotSender(TOKEN, transport=httpx.MockTransport(handle))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(sender.send_text(CHAT_ID, TEXT))
+    assert len(requests) == 1

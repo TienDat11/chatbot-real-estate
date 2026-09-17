@@ -1,12 +1,34 @@
-"""Outbound Zalo Bot delivery contract, independent of provider libraries."""
+"""Small Zalo transport contracts, independent of provider libraries."""
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Protocol
 
 
+class ZaloAdmissionDecision(Enum):
+    STARTED = "started"
+    BRAKED = "braked"
+    ALREADY_STARTED = "already_started"
+    ALREADY_BRAKED = "already_braked"
+    LOST_CLAIM = "lost_claim"
+
+
+class ZaloAdmissionUnavailable(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("Zalo Bot admission unavailable")
+
+
 class ZaloSendError(RuntimeError):
-    """Delivery failed; messages must never contain provider or credential data."""
+    """Only fixed codes cross the provider boundary; no payload or URL."""
+
+    def __init__(self, *, code: str = "SEND_UNAVAILABLE", retryable: bool = True) -> None:
+        self.code = code if code in {
+            "INVALID_TOKEN", "INVALID_RECIPIENT", "INVALID_TEXT",
+            "PROVIDER_AUTH_REJECTED", "PROVIDER_REJECTED", "SEND_UNAVAILABLE",
+        } else "SEND_UNAVAILABLE"
+        self.retryable = retryable if self.code == code else True
+        super().__init__("Zalo Bot delivery failed")
 
 
 class ZaloBotSender(Protocol):
