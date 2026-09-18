@@ -44,7 +44,8 @@ async def backfill(pool, identity_secret: str) -> int:
                             or row["ingress_key"] not in (None, key)
                             or row["attempt_count"] < 0):
                         raise ZaloStorageError("BACKFILL_CONFLICT")
-                    _decode_outcome(row["assistant_outcome"])
+                    if row["assistant_outcome"] is not None:
+                        _decode_outcome(row["assistant_outcome"])
                     if row["outbound_message_id"] is not None and (
                             not isinstance(row["outbound_message_id"], str)
                             or not row["outbound_message_id"].strip()):

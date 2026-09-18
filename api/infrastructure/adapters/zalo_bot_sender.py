@@ -50,7 +50,7 @@ class HttpxZaloBotSender:
             request = httpx.Request(
                 "POST",
                 f"https://bot-api.zaloplatforms.com/bot{self._token}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
+                json={"chat_id": chat_id, "text": text, "parse_mode": "markdown"},
                 extensions={"timeout": httpx.Timeout(10.0).as_dict()},
             )
             context = (

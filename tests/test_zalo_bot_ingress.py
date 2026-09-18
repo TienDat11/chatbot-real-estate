@@ -52,10 +52,11 @@ class RecordingScheduler:
 
 class _SettingsProxy:
     def __init__(self, *, zalo_bot_enabled=True, zalo_bot_webhook_secret=VALID_SECRET,
-                 zalo_bot_max_body_bytes=65536):
+                 zalo_bot_max_body_bytes=65536, zalo_bot_open_demo_access=False):
         self.zalo_bot_enabled = zalo_bot_enabled
         self.zalo_bot_webhook_secret = SecretStr(zalo_bot_webhook_secret)
         self.zalo_bot_max_body_bytes = zalo_bot_max_body_bytes
+        self.zalo_bot_open_demo_access = zalo_bot_open_demo_access
 
 
 async def _finish_tasks(cancel=False):
@@ -121,6 +122,17 @@ def client(monkeypatch, store, scheduler):
 @pytest.mark.parametrize("headers", [{}, {"X-Bot-Api-Secret-Token": "wrong-secret"},
                                       {b"X-Bot-Api-Secret-Token": b"\xe9"}])
 def test_missing_wrong_and_non_ascii_secret_fail_closed(client, store, scheduler, headers):
+    response = client.post(WEBHOOK_PATH, json=_private_text_event(), headers=headers)
+    assert response.status_code == 403
+    assert store.inserted == []
+    assert scheduler.scheduled == []
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-Bot-Api-Secret-Token": "wrong-secret"},
+                                      {b"X-Bot-Api-Secret-Token": b"\xe9"}])
+def test_open_demo_wrong_or_missing_secret_still_403(client, store, scheduler, headers):
+    """Req 6: open-demo mode never bypasses the constant-time webhook secret gate."""
+    client.app.state.settings.zalo_bot_open_demo_access = True
     response = client.post(WEBHOOK_PATH, json=_private_text_event(), headers=headers)
     assert response.status_code == 403
     assert store.inserted == []

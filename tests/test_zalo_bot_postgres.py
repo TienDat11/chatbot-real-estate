@@ -112,6 +112,7 @@ def _settings(url):
         postgres_database=target["database"], postgres_user=target["user"],
         postgres_password=unquote(urlsplit(url).password or ""),
         zalo_bot_identity_secret=SecretStr(SECRET), zalo_bot_enabled=True,
+        zalo_bot_open_demo_access=False,
         zalo_bot_lease_seconds=120, zalo_bot_core_timeout_seconds=90,
         zalo_bot_lease_margin_seconds=15, zalo_bot_poll_seconds=1,
         zalo_bot_batch_size=100, zalo_bot_max_attempts=8,
@@ -297,7 +298,7 @@ async def test_actual_migrations_backfill_repeat_and_final_constraints(database,
                 row = await conn.fetchrow("""INSERT INTO zalo_bot_events(chat_id,message_id,event_name,text,status,assistant_outcome)
                     VALUES($1,$2,'message.text.received','legacy text',$3,$4::jsonb) RETURNING *""",
                     "legacy-" + status + ("-cached" if cached else ""), status, status,
-                    json.dumps({"answer": "persisted", "resolution_status": "answered", "project_key": None, "meta": {}}) if cached else None)
+                    json.dumps({"answer": "persisted", "resolution_status": "resolved", "project_key": None, "meta": {}}) if cached else None)
                 if entered:
                     await conn.execute("UPDATE zalo_bot_events SET source_event_key=$2 WHERE id=$1", row["id"], f'zalo-bot:event:v1:{row["id"]}')
                 old.append((dict(row), entered or cached))
@@ -408,6 +409,26 @@ async def test_backfill_conflict_rolls_back_batch_and_finalize_refuses_nulls(dat
             await conn.execute((MIGRATIONS / "2026-09-17-zalo-bot-hardening-finalize.sql").read_text(encoding="utf-8"))
         await conn.execute("ROLLBACK")
         assert await conn.fetchval("SELECT count(*) FROM zalo_bot_events") == 2
+
+
+async def test_sql_null_assistant_outcome_survives_backfill(database):
+    """Req 9: legacy SQL NULL assistant_outcome must survive backfill without raising."""
+    from scripts.backfill_zalo_bot_hardening import backfill
+    db = database
+    await _cutover(db.pool)
+    await _insert("sql-null-survivor")
+    # Backfill must complete without raising INVALID_CACHE for SQL NULL rows.
+    # _insert already sets ingress_key/identity_key/source_event_key, so backfill
+    # processes one eligible row (sql-null-survivor) with zero column changes needed.
+    changed = await backfill(db.pool, SECRET)
+    assert changed == 0  # Row inserted with all keys already set; no update needed.
+    await db.store.validate_schema()
+    async with db.pool.acquire() as conn:
+        outcome = await conn.fetchval(
+            "SELECT assistant_outcome FROM zalo_bot_events WHERE chat_id=$1",
+            "sql-null-survivor",
+        )
+        assert outcome is None
 
 
 async def test_index_preflight_rejects_incompatible_existing_index(database):
@@ -536,6 +557,22 @@ async def test_jsonb_null_cache_claim_is_permanently_dead_before_authorization(d
     sender.send_text.assert_not_called()
 
 
+async def test_cache_outcome_none_rejected_before_db_mutation(database):
+    """Req 11: cache_outcome(None) raises INVALID_CACHE before any DB write."""
+    from api.infrastructure.adapters.postgres_zalo_events import ZaloStorageError
+    db = database
+    await _cutover(db.pool)
+    event = await _claim(db, "none-outcome")
+    with pytest.raises(ZaloStorageError) as caught:
+        await db.store.cache_outcome(event, None)
+    assert caught.value.code == "INVALID_CACHE"
+    async with db.pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT assistant_outcome FROM zalo_bot_events WHERE id=$1",
+            event.id,
+        ) is None
+
+
 async def test_concurrent_ingress_rollback_and_purge_redelivery(database):
     from api.infrastructure.adapters.postgres_zalo_events import ZaloStorageError
     db = database
@@ -597,7 +634,7 @@ async def test_dual_lease_stale_fencing_renew_rollback_and_recovery(database):
     assert await db.store.check_ownership(old) is None
     assert await db.store.renew_lease(old) is None
     assert not await db.store.release(old)
-    assert not await db.store.cache_outcome(old, {"answer": "stale", "resolution_status": "answered", "project_key": None, "meta": {}})
+    assert not await db.store.cache_outcome(old, {"answer": "stale", "resolution_status": "resolved", "project_key": None, "meta": {}})
     assert not await db.store.complete(old, message_id="stale-provider")
     assert not await db.store.fail(old, "STALE")
     assert not await db.store.reject(old)
@@ -820,7 +857,7 @@ def _pooler_worker(url, channel):
                 elif command == "release":
                     channel.send(("release", await store.release(payload)))
                 elif command == "cache":
-                    outcome = {"answer": "stale", "resolution_status": "answered", "project_key": None, "meta": {}}
+                    outcome = {"answer": "stale", "resolution_status": "resolved", "project_key": None, "meta": {}}
                     channel.send(("cache", await store.cache_outcome(payload, outcome)))
                 elif command == "complete":
                     channel.send(("complete", await store.complete(payload, message_id="stale-provider")))

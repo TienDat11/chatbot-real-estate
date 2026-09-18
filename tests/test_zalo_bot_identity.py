@@ -223,3 +223,13 @@ def test_identity_and_session_contracts_remain_unchanged():
     ingress_key(_CHAT, "message", _KEY)
     assert opaque_identity(_CHAT, _KEY) == identity
     assert global_session_id(identity) == session
+
+
+def test_two_chat_ids_have_distinct_opaque_identity_and_session():
+    """Req 7: distinct chat IDs yield distinct identity_key and session_id."""
+    first = opaque_identity("chat-a", _KEY)
+    second = opaque_identity("chat-b", _KEY)
+    assert first != second
+    assert global_session_id(first) != global_session_id(second)
+    assert opaque_identity("chat-a", _KEY) == first
+    assert global_session_id(first) == global_session_id(first)

@@ -31,7 +31,11 @@ def test_send_message_request_and_confirmed_id(text, caplog):
             f"https://bot-api.zaloplatforms.com/bot{TOKEN}/sendMessage"
         )
         assert request.headers["content-type"] == "application/json"
-        assert json.loads(request.content) == {"chat_id": CHAT_ID, "text": text}
+        assert json.loads(request.content) == {
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "markdown",
+        }
         timeout = request.extensions["timeout"]
         assert set(timeout) == {"connect", "read", "write", "pool"}
         assert all(math.isfinite(value) and value > 0 for value in timeout.values())

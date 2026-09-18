@@ -1,6 +1,7 @@
 """Offline runtime gates and actual application lifespan; no provider or DB I/O."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -112,6 +113,31 @@ async def test_start_schema_gate_installation_and_failure_are_safe(monkeypatch, 
     assert order == ["schema", "build"]
     assert "private-db-url-token" not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_open_demo_access_emits_safe_warning(monkeypatch, caplog):
+    from api.infrastructure.adapters import postgres_zalo_events
+    processor = SimpleNamespace(halted=False, process=AsyncMock(), stop=AsyncMock())
+    store = SimpleNamespace(
+        maintain=AsyncMock(return_value=(0, 0)),
+        due_candidates=AsyncMock(return_value=[]),
+        validate_schema=AsyncMock(),
+    )
+    monkeypatch.setattr(postgres_zalo_events, "PostgresZaloEventStore", lambda **kwargs: store)
+    monkeypatch.setattr(runtime, "build_zalo_processor", lambda **kwargs: processor)
+    caplog.set_level(logging.WARNING)
+    with caplog.at_level(logging.WARNING, logger="api.zalo_bot_runtime"):
+        handle = await runtime.start_zalo_runtime(settings(zalo_bot_open_demo_access=True))
+    try:
+        assert handle is not None
+        assert "ZALO_OPEN_DEMO_ACCESS_ENABLED" in caplog.text
+        for secret in ("runtime-identity-independent-key-123456",
+                       "zalotest", "127.0.0.1"):
+            assert secret not in caplog.text
+    finally:
+        await runtime.stop_zalo_runtime(handle)
+    assert handle.task.done()
 
 
 @pytest.mark.asyncio

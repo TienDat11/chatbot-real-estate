@@ -593,6 +593,10 @@ class Settings(BaseSettings):
     zalo_bot_lease_margin_seconds: SkipValidation[int] = 15
     zalo_bot_retry_max_age_hours: SkipValidation[int] = 24
     zalo_bot_terminal_retention_days: SkipValidation[int] = 7
+    # Open-demo bypass: when True, every chat is admitted without a sales
+    # binding (postgres zalo_bot_bindings.authorize is never consulted).
+    # Defaults to False; enable only for an explicitly authorized demo window and disable afterward.
+    zalo_bot_open_demo_access: bool = Field(default=False, repr=False)
 
     @field_validator("trusted_proxy_ips", mode="before")
     @classmethod

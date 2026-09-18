@@ -70,6 +70,8 @@ async def start_zalo_runtime(settings: Settings) -> ZaloRuntime | None:
         handle.task = asyncio.create_task(handle.run(), name="zalo-bot-reconciliation")
         handle.task.add_done_callback(_observe_task)
         set_scheduler(handle.wake)
+        if settings.zalo_bot_open_demo_access:
+            logger.warning("ZALO_OPEN_DEMO_ACCESS_ENABLED")
         logger.info("ZALO_RUNTIME_INSTALLED")
         return handle
     except asyncio.CancelledError:

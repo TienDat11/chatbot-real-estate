@@ -13,7 +13,6 @@ from api.application.services.global_assistant_service import GlobalAssistantInp
 from api.application.services.zalo_bot_identity import global_session_id, opaque_identity
 
 logger = logging.getLogger(__name__)
-_TRUNCATION_SUFFIX = "\n[Đã rút gọn]"
 _BRAKE = "Hệ thống đang nhận quá nhiều tin nhắn liên tiếp. Vui lòng chờ một lát rồi gửi lại."
 
 
@@ -163,6 +162,16 @@ class ZaloBotProcessor:
         return (isinstance(value["resolution_status"], str) and value["resolution_status"] in ZALO_OUTCOME_STATUSES
                 and (value["project_key"] is None or isinstance(value["project_key"], str))
                 and value["meta"] == {})
+    async def _access_allowed(self, event: ZaloEvent) -> bool:
+        """Authorize via open-demo bypass or durable sales binding.
+
+        Open-demo mode short-circuits before any sales/binding lookup, so
+        postgres zalo_bot_bindings.authorize is never called and no sales_id
+        is synthesized.
+        """
+        if self._settings.zalo_bot_open_demo_access:
+            return True
+        return bool(await self._store.authorize(event.identity_key))
 
     async def _failure(self, event: ZaloEvent, code: str, *, retryable: bool = True) -> str:
         logger.warning("Zalo Bot processing: %s", code)
@@ -198,7 +207,7 @@ class ZaloBotProcessor:
             if cached is not None and not self._valid_cache(cached):
                 return await self._failure(event, "CACHE_INVALID", retryable=False)
             code = "AUTH_UNAVAILABLE"
-            if not await self._store.authorize(event.identity_key):
+            if not await self._access_allowed(event):
                 return "rejected" if self._owned() and await self._store.reject(event) else "lost_claim"
             if not self._owned():
                 return "lost_claim"
@@ -223,15 +232,13 @@ class ZaloBotProcessor:
                         return "skipped"
                     request = GlobalAssistantInput(query=event.text,
                         session_id=global_session_id(event.identity_key), identity_key=event.identity_key,
-                        source_event_key=event.source_event_key)
+                        source_event_key=event.source_event_key, max_visible_chars=2000)
                     code = "CORE_OUTCOME_UNCERTAIN"
                     operation = self._core.run if decision is ZaloAdmissionDecision.STARTED else self._core.recover_source_event
                     outcome = await self._execute(operation, request)
                     if outcome is None:
                         raise _CoreUncertain
                     answer = outcome.answer
-                    if len(answer) > 2000:
-                        answer = answer[:2000 - len(_TRUNCATION_SUFFIX)] + _TRUNCATION_SUFFIX
                     cached = {"answer": answer, "resolution_status": outcome.resolution_status,
                               "project_key": outcome.project_key, "meta": {}}
                     if not self._valid_cache(cached):
@@ -244,7 +251,7 @@ class ZaloBotProcessor:
             code = "AUTH_UNAVAILABLE"
             if not self._owned():
                 return "lost_claim"
-            if not await self._store.authorize(event.identity_key):
+            if not await self._access_allowed(event):
                 return "rejected" if self._owned() and await self._store.reject(event) else "lost_claim"
             if not self._enabled():
                 await self._store.release(event)

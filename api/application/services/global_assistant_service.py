@@ -102,6 +102,7 @@ class GlobalAssistantInput:
     selected_project_key: str | None = None
     source_event_key: str | None = None
     on_event: EventCallback | None = None
+    max_visible_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,35 @@ class PreparedTurn:
             if self.resolution.candidates
             else tuple(key for key, _ in self.known_projects)
         )
+
+
+_TRUNCATION_SUFFIX = " …[truncated]"
+
+
+def _bound_visible(answer: str, max_visible_chars: int | None) -> str:
+    """Truncate ``answer`` to at most ``max_visible_chars`` preserving whole units.
+
+    Returns the input unchanged when ``max_visible_chars`` is None or the answer
+    is already within the limit. When truncation is required, prefers cutting at a
+    paragraph break, then a sentence end, then whitespace, then code-point
+    boundary (Python str slicing is code-point safe). Appends a short suffix
+    after truncation. Fully deterministic: no randomness, no locale dependence.
+    """
+    if max_visible_chars is None or len(answer) <= max_visible_chars:
+        return answer
+    limit = max_visible_chars - len(_TRUNCATION_SUFFIX)
+    if limit <= 0:
+        # Suffix alone would fill/exceed the budget; emit a bare suffix clipped to budget.
+        return _TRUNCATION_SUFFIX[:max_visible_chars]
+    # Prefer paragraph break, then sentence end, then whitespace, then hard cut.
+    for delimiter in ("\n\n", "\n", ". ", "? ", "! "):
+        idx = answer.rfind(delimiter, 0, limit)
+        if idx > 0:
+            return answer[:idx] + _TRUNCATION_SUFFIX
+    idx = answer.rfind(" ", 0, limit)
+    if idx > 0:
+        return answer[:idx] + _TRUNCATION_SUFFIX
+    return answer[:limit] + _TRUNCATION_SUFFIX
 
 
 class GlobalAssistantService:
@@ -375,6 +405,7 @@ class GlobalAssistantService:
                 if candidates
                 else "Bạn muốn hỏi dự án nào? Vui lòng cho biết dự án."
             )
+            answer = _bound_visible(answer, prepared.request.max_visible_chars)
             outcome = GlobalAssistantOutcome(
                 answer=answer,
                 resolution_status=prepared.resolution.status.value,
@@ -417,6 +448,7 @@ class GlobalAssistantService:
                 )
 
         answer = str(payload.get("answer") or "")
+        answer = _bound_visible(answer, prepared.request.max_visible_chars)
         meta = {key: payload[key] for key in ("sources", "facts", "images", "places", "routing") if key in payload}
         outcome = GlobalAssistantOutcome(
             answer=answer,

@@ -18,7 +18,7 @@ from api.application.ports.zalo_bot import ZaloAdmissionDecision
 import pytest
 
 from api.application.services import anon_identity, lead_service, quota_service
-from api.application.services.global_assistant_service import GlobalAssistantService
+from api.application.services.global_assistant_service import GlobalAssistantService, _bound_visible
 from api.application.services.query_quota_gate import QueryQuotaGate
 from api.application.services.zalo_bot_identity import global_session_id, opaque_identity
 from api.application.services.zalo_bot_processor import ZaloBotProcessor, ZaloEvent
@@ -237,7 +237,8 @@ def rig(monkeypatch):
     )
     admission = DeduplicatingAdmission()
     settings = SimpleNamespace(zalo_bot_enabled=True, zalo_bot_core_timeout_seconds=90,
-                               zalo_bot_lease_seconds=120, zalo_bot_lease_margin_seconds=15)
+                               zalo_bot_lease_seconds=120, zalo_bot_lease_margin_seconds=15,
+                               zalo_bot_open_demo_access=False)
     processor = ZaloBotProcessor(store=store, core=core, sender=sender,
                                  identity_secret=SECRET, admit=admission, settings=settings)
     result = SimpleNamespace(store=store, history=history, pipeline=pipeline,
@@ -461,11 +462,23 @@ def test_bounded_answer_stable_on_retry(rig, size):
     rig.pipeline.run.return_value = {"answer": answer}
     rig.sender.send_text.side_effect = RuntimeError("private")
     assert asyncio.run(rig.processor.process(1)) == "retryable"
-    expected = answer if size == 2000 else answer[:2000 - len("\n[Đã rút gọn]")] + "\n[Đã rút gọn]"
+    expected = _bound_visible(answer, 2000)
     rig.sender.send_text.side_effect = None
     assert asyncio.run(rig.processor.process(1)) == "done"
     assert [call.args[1] for call in rig.sender.send_text.call_args_list] == [expected, expected]
-    assert rig.history.persisted[0]["assistant_content"] == answer
+    assert rig.history.persisted[0]["assistant_content"] == expected
+
+
+def test_byte_identity_persisted_returned_sent_matches_bound(rig):
+    """For an answer exceeding 2000 chars, persisted == returned == sent are byte-identical."""
+    answer = "ấ" * 2001
+    rig.pipeline.run.return_value = {"answer": answer}
+    assert asyncio.run(rig.processor.process(1)) == "done"
+    persisted = rig.history.persisted[0]["assistant_content"]
+    sent = rig.sender.send_text.call_args.args[1]
+    cached = rig.store.events[1].assistant_outcome["answer"]
+    expected = _bound_visible(answer, 2000)
+    assert persisted == sent == cached == expected
 
 
 @pytest.mark.parametrize("authorization", ["active", "revoked", "outage"])
@@ -544,3 +557,64 @@ def test_private_failures_only_log_fixed_codes(rig, caplog, failure):
     assert TOKEN not in caplog.text and CHAT not in caplog.text
     assert "provider.invalid" not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_strict_mode_unknown_user_rejected_zero_core(rig):
+    """Req 1: strict mode (binding revoked) rejects unknown user without core work."""
+    rig.store.binding_active = False
+    assert asyncio.run(rig.processor.process(1)) == "rejected"
+    assert rig.store.authorization_calls == [rig.store.events[1].identity_key]
+    assert_no_core_work(rig)
+
+
+def test_open_demo_unknown_user_bypasses_authorize_core_and_sender(rig):
+    """Req 2: open-demo mode permits unknown user; authorize() NOT called; core + sender execute."""
+    rig.settings.zalo_bot_open_demo_access = True
+    rig.store.binding_active = False
+    assert asyncio.run(rig.processor.process(1)) == "done"
+    assert rig.store.authorization_calls == []
+    assert rig.core.run.await_count == 1
+    rig.sender.send_text.assert_awaited_once_with(CHAT, ANSWER)
+    assert rig.history.persisted[0]["assistant_content"] == ANSWER
+
+
+def test_open_demo_auth_store_outage_does_not_call_authorize(rig):
+    """Req 3: open-demo outage — authorize() MUST NOT be called (no binding lookup)."""
+    rig.settings.zalo_bot_open_demo_access = True
+    rig.store.authorization_error = TimeoutError("private")
+    assert asyncio.run(rig.processor.process(1)) == "done"
+    assert rig.store.authorization_calls == []
+    assert rig.core.run.await_count == 1
+    rig.sender.send_text.assert_awaited_once_with(CHAT, ANSWER)
+
+
+def test_open_demo_cached_retry_skips_authorize_and_core(rig):
+    """Req 4: open-demo cached outcome — authorize() NOT called, no core,
+    sender sends cached answer."""
+    rig.settings.zalo_bot_open_demo_access = True
+    cached = {"answer": ANSWER, "resolution_status": "resolved", "project_key": None, "meta": {}}
+    rig.store.events[1].assistant_outcome = cached
+    rig.store.binding_active = False
+    assert asyncio.run(rig.processor.process(1)) == "done"
+    assert rig.store.authorization_calls == []
+    rig.core.run.assert_not_called()
+    rig.sender.send_text.assert_awaited_once_with(CHAT, ANSWER)
+
+
+def test_zalo_bot_disabled_overrides_open_demo(rig):
+    """Req 5: ZALO_BOT_ENABLED=false overrides open-demo=True: skipped, zero work."""
+    rig.settings.zalo_bot_open_demo_access = True
+    rig.settings.zalo_bot_enabled = False
+    assert asyncio.run(rig.processor.process(1)) == "skipped"
+    assert rig.store.authorization_calls == []
+    assert_no_core_work(rig)
+
+
+def test_open_demo_technical_brake_still_works(rig):
+    """Req 8: technical brake fires through open-demo — cached brake answer, no core."""
+    rig.settings.zalo_bot_open_demo_access = True
+    rig.admission.allowed = False
+    assert asyncio.run(rig.processor.process(1)) == "done"
+    assert rig.store.authorization_calls == []
+    assert rig.history.persisted == []
+    assert rig.store.events[1].assistant_outcome["resolution_status"] == "technical_brake"
