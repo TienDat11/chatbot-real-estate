@@ -6,7 +6,9 @@ Only injected memory stores/pipelines are used; no provider, DB, or factory choi
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -41,8 +43,10 @@ class MemoryStore:
 
     @staticmethod
     def event(event_id, text):
-        return ZaloEvent(event_id, CHAT, text, identity_key=opaque_identity(CHAT, SECRET),
-                         source_event_key=f"zalo-bot:event:v1:{event_id}", ingress_key="ingress")
+        event = ZaloEvent(event_id, CHAT, text, identity_key=opaque_identity(CHAT, SECRET),
+                          source_event_key=f"zalo-bot:event:v1:{event_id}", ingress_key="ingress")
+        event.completed_at = None
+        return event
 
     def _write(self, operation):
         if self.fail_once == operation:
@@ -92,6 +96,7 @@ class MemoryStore:
         live = self.events[event.id]
         live.outbound_message_id = message_id or live.outbound_message_id
         live.status, live.claim_token = "done", None
+        live.completed_at = datetime.now(timezone.utc)
         return True
 
     async def fail(self, event, code, *, retryable=True):
@@ -108,6 +113,7 @@ class MemoryStore:
             return False
         self.events[event.id].status = "rejected"
         self.events[event.id].claim_token = None
+        self.events[event.id].completed_at = datetime.now(timezone.utc)
         return True
 
     async def release(self, event):
@@ -243,6 +249,7 @@ def rig(monkeypatch):
 
 def assert_no_core_work(rig):
     rig.core.run.assert_not_called()
+    rig.core.recover_source_event.assert_not_called()
     rig.core.prepare_turn.assert_not_called()
     rig.factory.assert_not_called()
     rig.pipeline.run.assert_not_called()
@@ -365,19 +372,66 @@ def test_provider_acceptance_before_commit_can_duplicate_send_not_core(rig):
     assert rig.core.run.await_count == 1
 
 
-def test_provider_id_recovery_needs_authorization_but_no_send(rig):
-    rig.store.events[1].outbound_message_id = "persisted"
+@pytest.mark.parametrize("authorization", ["active", "revoked", "outage"])
+@pytest.mark.parametrize("cached", [None, {"answer": ANSWER, "resolution_status": "resolved", "project_key": None, "meta": {}}, "null"])
+@pytest.mark.parametrize("provider_id", ["persisted", "", 0])
+def test_provider_id_retry_does_not_resend_or_reclassify(rig, authorization, cached, provider_id):
+    event = rig.store.events[1]
+    event.status = "failed"
+    event.outbound_message_id = provider_id
+    event.assistant_outcome = cached
+    rig.store.binding_active = authorization != "revoked"
+    rig.store.authorization_error = TimeoutError("private") if authorization == "outage" else None
     assert asyncio.run(rig.processor.process(1)) == "done"
-    assert rig.store.events[1].outbound_message_id == "persisted"
+    assert event.status == "done"
+    assert event.completed_at is not None
+    assert event.outbound_message_id == provider_id
+    assert event.assistant_outcome == cached
+    assert rig.store.authorization_calls == []
+    assert rig.store.codes == []
     assert_no_core_work(rig)
 
 
-@pytest.mark.parametrize("phase", ["cache", "history", "provider"])
+def test_done_event_does_not_require_authorization(rig):
+    event = rig.store.events[1]
+    event.status = "done"
+    event.completed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    before = deepcopy(vars(event))
+    rig.store.authorization_error = TimeoutError("private")
+    assert asyncio.run(rig.processor.process(1)) == "missing"
+    assert vars(event) == before
+    assert rig.store.authorization_calls == []
+    assert_no_core_work(rig)
+
+
+def test_rejected_event_does_not_require_authorization(rig):
+    event = rig.store.events[1]
+    event.status = "rejected"
+    event.completed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    before = deepcopy(vars(event))
+    rig.store.authorization_error = TimeoutError("private")
+    assert asyncio.run(rig.processor.process(1)) == "missing"
+    assert vars(event) == before
+    assert rig.store.authorization_calls == []
+    assert_no_core_work(rig)
+
+
+def test_done_event_remains_done_after_sales_revoked(rig):
+    event = rig.store.events[1]
+    event.status = "done"
+    event.completed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    before = deepcopy(vars(event))
+    rig.store.binding_active = False
+    assert asyncio.run(rig.processor.process(1)) == "missing"
+    assert vars(event) == before
+    assert rig.store.authorization_calls == []
+    assert_no_core_work(rig)
+
+
+@pytest.mark.parametrize("phase", ["cache", "history"])
 def test_revoked_recovery_does_not_read_or_send(rig, phase):
     if phase == "cache":
         rig.store.events[1].assistant_outcome = {"answer": ANSWER, "resolution_status": "resolved", "project_key": "camellia", "meta": {}}
-    elif phase == "provider":
-        rig.store.events[1].outbound_message_id = "existing"
     else:
         rig.admission.admitted[(rig.store.events[1].identity_key, rig.store.events[1].source_event_key)] = True
     rig.store.binding_active = False
@@ -414,11 +468,64 @@ def test_bounded_answer_stable_on_retry(rig, size):
     assert rig.history.persisted[0]["assistant_content"] == answer
 
 
-@pytest.mark.parametrize("cached", [{}, {"answer": "x", "resolution_status": "resolved", "project_key": None, "meta": {"secret": TOKEN}}, []])
-def test_invalid_cache_is_permanent_and_never_reruns(rig, cached):
+@pytest.mark.parametrize("authorization", ["active", "revoked", "outage"])
+@pytest.mark.parametrize("cached", [
+    {}, [], "null",
+    {"answer": "x", "resolution_status": "resolved", "project_key": None, "meta": {"secret": TOKEN}},
+    *({"answer": answer, "resolution_status": "resolved", "project_key": None, "meta": {}}
+      for answer in ("", " \n", "x" * 2001, 42, "\ud800")),
+    *({"answer": "x", "resolution_status": status, "project_key": None, "meta": {}}
+      for status in ("<script>", "unknown", " resolved ", " ", "", None, [])),
+    {"answer": "x", "resolution_status": "resolved", "project_key": 42, "meta": {}},
+    {"answer": "x", "resolution_status": "resolved", "project_key": None, "meta": {}, "source_event_key": "private"},
+])
+def test_invalid_cache_is_permanent_and_never_reruns(rig, cached, authorization):
     rig.store.events[1].assistant_outcome = cached
+    rig.store.binding_active = authorization != "revoked"
+    rig.store.authorization_error = TimeoutError("private") if authorization == "outage" else None
     assert asyncio.run(rig.processor.process(1)) == "dead"
+    assert rig.store.events[1].status == "dead"
     assert rig.store.codes == ["CACHE_INVALID"]
+    assert rig.store.authorization_calls == []
+    assert asyncio.run(rig.processor.process(1)) == "missing"
+    assert rig.store.codes == ["CACHE_INVALID"]
+    assert_no_core_work(rig)
+
+
+@pytest.mark.parametrize("authorization", ["active", "revoked", "outage"])
+def test_json_null_claim_is_permanent_before_authorization(rig, monkeypatch, authorization):
+    from api.infrastructure.adapters import postgres_zalo_events as events
+
+    memory_claim = rig.store.claim_event
+
+    async def claim(event_id):
+        claimed = await memory_claim(event_id)
+        row = vars(claimed) | {"assistant_outcome": "null"}
+        conn = SimpleNamespace(
+            fetchval=AsyncMock(side_effect=[claimed.identity_key, 120.0]),
+            fetchrow=AsyncMock(side_effect=[
+                {"holder_token": claimed.claim_token}, row,
+                {"event_id": claimed.id, "source_event_key": claimed.source_event_key},
+            ]),
+        )
+
+        @asynccontextmanager
+        async def transaction():
+            yield conn
+
+        monkeypatch.setattr(events, "_transaction", transaction)
+        monkeypatch.setattr(events, "uuid4", lambda: claimed.claim_token)
+        settings = SimpleNamespace(zalo_bot_enabled=True, zalo_bot_lease_seconds=120,
+                                   zalo_bot_max_attempts=3, zalo_bot_retry_max_age_hours=24)
+        return await events.PostgresZaloEventStore(settings=settings).claim_event(event_id)
+
+    monkeypatch.setattr(rig.store, "claim_event", claim)
+    rig.store.binding_active = authorization != "revoked"
+    rig.store.authorization_error = TimeoutError("private") if authorization == "outage" else None
+    assert asyncio.run(rig.processor.process(1)) == "dead"
+    assert rig.store.events[1].status == "dead"
+    assert rig.store.codes == ["CACHE_INVALID"]
+    assert rig.store.authorization_calls == []
     assert_no_core_work(rig)
 
 

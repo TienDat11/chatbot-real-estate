@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from api.application.ports.zalo_bot import ZaloAdmissionDecision, ZaloBotSender, ZaloSendError
+from api.application.ports.zalo_bot import ZALO_OUTCOME_STATUSES, ZaloAdmissionDecision, ZaloBotSender, ZaloSendError
 from api.application.services.global_assistant_service import GlobalAssistantInput, GlobalAssistantService
 from api.application.services.zalo_bot_identity import global_session_id, opaque_identity
 
@@ -160,7 +160,7 @@ class ZaloBotProcessor:
             answer.encode("utf-8")
         except UnicodeError:
             return False
-        return (isinstance(value["resolution_status"], str) and bool(value["resolution_status"])
+        return (isinstance(value["resolution_status"], str) and value["resolution_status"] in ZALO_OUTCOME_STATUSES
                 and (value["project_key"] is None or isinstance(value["project_key"], str))
                 and value["meta"] == {})
 
@@ -192,16 +192,16 @@ class ZaloBotProcessor:
                     or event.source_event_key != f"zalo-bot:event:v1:{event.id}"):
                 return await self._failure(event, "IDENTITY_INTEGRITY", retryable=False)
             self._heartbeat = asyncio.create_task(self._renew(event))
+            if event.outbound_message_id is not None:
+                return "done" if await self._store.complete(event) else "lost_claim"
+            cached = event.assistant_outcome
+            if cached is not None and not self._valid_cache(cached):
+                return await self._failure(event, "CACHE_INVALID", retryable=False)
             code = "AUTH_UNAVAILABLE"
             if not await self._store.authorize(event.identity_key):
                 return "rejected" if self._owned() and await self._store.reject(event) else "lost_claim"
             if not self._owned():
                 return "lost_claim"
-            if event.outbound_message_id:
-                return "done" if await self._store.complete(event) else "lost_claim"
-            cached = event.assistant_outcome
-            if cached is not None and not self._valid_cache(cached):
-                return await self._failure(event, "CACHE_INVALID", retryable=False)
             if cached is None:
                 code = "ACTOR_LEASE_LOST"
                 if not self._enabled() or not await self._check(event, self._timeout + self._margin):

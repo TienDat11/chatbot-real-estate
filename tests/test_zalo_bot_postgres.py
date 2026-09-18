@@ -41,6 +41,7 @@ from pathlib import Path
 import re
 from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -444,6 +445,95 @@ async def test_binding_foreign_keys_restrict_conflicts_and_revocation(database):
     async with db.pool.acquire() as conn:
         await conn.execute("UPDATE sales SET is_active=false WHERE id=$1", sales)
     assert await db.store.authorize(identity) is None
+
+
+@pytest.mark.parametrize("status", ["done", "rejected"])
+@pytest.mark.parametrize("auth_state", ["revoked", "outage"])
+async def test_terminal_rows_unchanged_after_revocation_or_auth_outage(database, monkeypatch, status, auth_state):
+    from api.application.services.zalo_bot_processor import ZaloBotProcessor
+    from api.infrastructure.adapters import postgres_zalo_bindings as bindings
+
+    db = database
+    await _cutover(db.pool)
+    event = await _claim(db, "terminal")
+    async with db.pool.acquire() as conn:
+        sales = await conn.fetchval("INSERT INTO sales(full_name) VALUES('terminal sales') RETURNING id")
+    assert await bindings.provision_binding(event.chat_id, sales, SECRET, ownership_verified=True)
+    assert await db.store.authorize(event.identity_key) == sales
+    if status == "done":
+        assert await db.store.complete(event, message_id="terminal-provider")
+    else:
+        assert await db.store.reject(event)
+    async with db.pool.acquire() as conn:
+        before = await conn.fetchrow("SELECT status,completed_at FROM zalo_bot_events WHERE id=$1", event.id)
+    assert before["status"] == status and before["completed_at"] is not None
+
+    if auth_state == "revoked":
+        assert await bindings.revoke_binding(event.identity_key)
+        assert await db.store.authorize(event.identity_key) is None
+        authorize = AsyncMock(wraps=bindings.authorize)
+    else:
+        authorize = AsyncMock(side_effect=TimeoutError("authorization unavailable"))
+    monkeypatch.setattr(bindings, "authorize", authorize)
+    core = SimpleNamespace(run=AsyncMock(), recover_source_event=AsyncMock())
+    sender = SimpleNamespace(send_text=AsyncMock())
+    processor = ZaloBotProcessor(store=db.store, core=core, sender=sender,
+                                 identity_secret=SECRET, settings=db.settings, admit=db.admission.admit)
+
+    assert await processor.process(event.id) == "missing"
+    assert await db.store.claim_event(event.id) is None
+    assert not await db.store.reject(event)
+    assert not await db.store.fail(event, "AUTH_UNAVAILABLE")
+    async with db.pool.acquire() as conn:
+        after = await conn.fetchrow("SELECT status,completed_at FROM zalo_bot_events WHERE id=$1", event.id)
+    assert after == before
+    authorize.assert_not_called()
+    core.run.assert_not_called()
+    core.recover_source_event.assert_not_called()
+    sender.send_text.assert_not_called()
+
+
+async def test_jsonb_null_cache_claim_is_permanently_dead_before_authorization(database, monkeypatch):
+    from api.application.services.zalo_bot_processor import ZaloBotProcessor
+    from api.infrastructure.adapters import postgres_zalo_bindings as bindings
+
+    db = database
+    await _cutover(db.pool)
+    absent = await _claim(db, "sql-null")
+    assert absent.assistant_outcome is None
+    async with db.pool.acquire() as conn:
+        assert await conn.fetchval("SELECT assistant_outcome IS NULL FROM zalo_bot_events WHERE id=$1", absent.id)
+    assert await db.store.reject(absent)
+    event_id = await _insert("json-null")
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE zalo_bot_events SET assistant_outcome='null'::jsonb WHERE id=$1", event_id)
+        assert await conn.fetchval("SELECT assistant_outcome IS NOT NULL FROM zalo_bot_events WHERE id=$1", event_id)
+    claimed = await db.store.claim_event(event_id)
+    assert claimed is not None and claimed.assistant_outcome is not None
+    await _expire(db.pool, claimed)
+
+    authorize = AsyncMock(side_effect=AssertionError("invalid cache must precede authorization"))
+    monkeypatch.setattr(bindings, "authorize", authorize)
+    admit = AsyncMock(wraps=db.admission.admit)
+    core = SimpleNamespace(run=AsyncMock(), recover_source_event=AsyncMock())
+    sender = SimpleNamespace(send_text=AsyncMock())
+    processor = ZaloBotProcessor(store=db.store, core=core, sender=sender,
+                                 identity_secret=SECRET, settings=db.settings, admit=admit)
+
+    assert await processor.process(event_id) == "dead"
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status,completed_at,last_error_code,attempt_count FROM zalo_bot_events WHERE id=$1", event_id)
+        assert await conn.fetchval("SELECT count(*) FROM zalo_bot_admissions WHERE source_event_key=$1", f"zalo-bot:event:v1:{event_id}") == 0
+    assert row["status"] == "dead"
+    assert row["completed_at"] is not None
+    assert row["last_error_code"] == "CACHE_INVALID"
+    assert row["attempt_count"] == 2
+    assert await db.store.claim_event(event_id) is None
+    authorize.assert_not_called()
+    admit.assert_not_called()
+    core.run.assert_not_called()
+    core.recover_source_event.assert_not_called()
+    sender.send_text.assert_not_called()
 
 
 async def test_concurrent_ingress_rollback_and_purge_redelivery(database):

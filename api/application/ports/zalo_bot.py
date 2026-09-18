@@ -5,6 +5,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Protocol
 
+# Core ProjectResolutionStatus values, source-event replay fallback, transport brake.
+ZALO_OUTCOME_STATUSES = frozenset({"resolved", "unresolved", "ambiguous", "replayed", "technical_brake"})
+
 
 class ZaloAdmissionDecision(Enum):
     STARTED = "started"

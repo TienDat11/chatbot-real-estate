@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import asyncpg
 
+from api.application.ports.zalo_bot import ZALO_OUTCOME_STATUSES
 from api.application.services.zalo_bot_identity import ingress_key, opaque_identity
 from api.infrastructure.adapters import postgres_zalo_bindings
 from api.infrastructure.adapters.postgres_leads import get_lead_pool
@@ -58,8 +59,6 @@ async def _transaction(pool=None):
 
 
 def _decode_outcome(value):
-    if value is None:
-        return None
     try:
         value = json.loads(value) if isinstance(value, str) else value
         if (not isinstance(value, dict)
@@ -67,7 +66,7 @@ def _decode_outcome(value):
                 or not isinstance(value["answer"], str)
                 or not value["answer"].strip() or len(value["answer"]) > 2000
                 or not isinstance(value["resolution_status"], str)
-                or not value["resolution_status"]
+                or value["resolution_status"] not in ZALO_OUTCOME_STATUSES
                 or (value["project_key"] is not None and not isinstance(value["project_key"], str))
                 or value["meta"] != {}):
             raise ValueError
@@ -198,11 +197,13 @@ class PostgresZaloEventStore:
                 "id", "chat_id", "text", "status", "identity_key", "source_event_key",
                 "assistant_outcome", "outbound_message_id", "ingress_key", "claim_token", "attempt_count",
             )}
-            # Processor validates cache after authorization; corruption is not an uncached miss.
+            # Preserve malformed non-NULL cache for permanent processor classification.
             outcome = values["assistant_outcome"]
             if isinstance(outcome, str):
                 try:
-                    values["assistant_outcome"] = json.loads(outcome)
+                    decoded = json.loads(outcome)
+                    # SQL NULL is absent; JSONB null retains 'null' so it is invalid, not absent.
+                    values["assistant_outcome"] = outcome if decoded is None else decoded
                 except ValueError:
                     pass
             values["lease_remaining"] = max(0.0, float(remaining or 0) - (monotonic() - started))

@@ -153,7 +153,23 @@ async def test_store_authorization_rechecks_current_sales_and_binding(monkeypatc
         await store.authorize(IDENTITY)
 
 
-@pytest.mark.parametrize("outcome", ["invalid-json", "[]", [], {"answer": "cached"}])
-def test_corrupt_cache_never_becomes_uncached(outcome):
-    with pytest.raises(events.ZaloStorageError):
-        events._decode_outcome(outcome)
+@pytest.mark.parametrize("outcome", [
+    None, "null", "invalid-json", "[]", [], {}, {"answer": "cached"},
+    *({"answer": answer, "resolution_status": "resolved", "project_key": None, "meta": {}}
+      for answer in ("", " \n", "x" * 2001, 42, "\ud800")),
+    *({"answer": "x", "resolution_status": status, "project_key": None, "meta": {}}
+      for status in ("<script>", "unknown", " resolved ", " ", "", None, [])),
+    {"answer": "x", "resolution_status": "resolved", "project_key": 42, "meta": {}},
+    {"answer": "x", "resolution_status": "resolved", "project_key": None, "meta": {"secret": "private"}},
+    {"answer": "x", "resolution_status": "resolved", "project_key": None, "meta": {}, "source_event_key": "private"},
+])
+@pytest.mark.asyncio
+async def test_corrupt_cache_write_is_rejected_before_mutation(monkeypatch, outcome):
+    store = events.PostgresZaloEventStore(settings=SimpleNamespace(zalo_bot_enabled=True))
+    mutate = AsyncMock(return_value=True)
+    monkeypatch.setattr(store, "_mutate", mutate)
+    event = SimpleNamespace(id=1, identity_key=IDENTITY, claim_token=uuid4())
+    with pytest.raises(events.ZaloStorageError) as caught:
+        await store.cache_outcome(event, outcome)
+    assert caught.value.code == "INVALID_CACHE"
+    mutate.assert_not_awaited()
