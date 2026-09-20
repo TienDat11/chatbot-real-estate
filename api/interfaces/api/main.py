@@ -941,9 +941,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     reset_scheduler()
     await _wire_postgres_rate_limit_port()
-    prewarm_task = _maybe_start_rag_prewarm()
-    reconciliation_task = _maybe_start_lead_mirror_reconciliation()
-    retention_task = asyncio.create_task(_chat_history_retention_loop())
+    prewarm_task = None
+    reconciliation_task = None
+    retention_task = None
     zalo_runtime = None
     try:
         try:
@@ -953,6 +953,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             reset_scheduler()
             logger.warning("ZALO_RUNTIME_UNAVAILABLE")
         app.state.zalo_runtime = zalo_runtime
+        # Background warmers start only after the Zalo cutover gate has run:
+        # they share this event loop and the lead pool, and a concurrent cold
+        # RAG init starves the loop long enough to blow the bounded (5s)
+        # startup transaction. Sequential start costs one boot window.
+        prewarm_task = _maybe_start_rag_prewarm()
+        reconciliation_task = _maybe_start_lead_mirror_reconciliation()
+        retention_task = asyncio.create_task(_chat_history_retention_loop())
         yield
     finally:
         reset_scheduler()
@@ -964,9 +971,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 prewarm_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await prewarm_task
-            retention_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await retention_task
+            if retention_task is not None:
+                retention_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await retention_task
             if reconciliation_task is not None:
                 reconciliation_task.cancel()
                 with suppress(asyncio.CancelledError):
