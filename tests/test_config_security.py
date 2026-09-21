@@ -122,3 +122,29 @@ def test_llm_reasoning_effort_accepts_valid_values(value: str) -> None:
 def test_llm_reasoning_effort_rejects_invalid_values(value: str) -> None:
     with pytest.raises(ValueError, match="LLM_REASONING_EFFORT"):
         Settings(_env_file=None, llm_reasoning_effort=value)
+
+
+# --- Outbound SSRF allowlist canonical-host regression (CFG-01) ---
+
+
+def test_default_outbound_allowlist_contains_canonical_provider_hosts() -> None:
+    """Canonical Settings default must cover every deployed provider host.
+
+    Regression for CFG-01: staging configures the Jina reranker
+    (RERANK_BINDING=aibox -> https://api.jina.ai/v1/rerank) and the validator
+    rejects any host absent from this list BEFORE network I/O. A drift here
+    silently degrades rerank in every environment that relies on the default.
+    """
+    settings = Settings(_env_file=None)
+    assert "api.jina.ai" in settings.outbound_allowed_hosts
+    assert "openrouter.ai" in settings.outbound_allowed_hosts
+    assert "generativelanguage.googleapis.com" in settings.outbound_allowed_hosts
+
+
+def test_default_outbound_allowlist_is_exact_hostnames_only() -> None:
+    """No wildcard/suffix entries may sneak into the canonical allowlist."""
+    settings = Settings(_env_file=None)
+    for host in settings.outbound_allowed_hosts:
+        assert "*" not in host
+        assert not host.startswith(".")
+        assert "/" not in host

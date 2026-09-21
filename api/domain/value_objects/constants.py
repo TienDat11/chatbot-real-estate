@@ -94,11 +94,6 @@ RERANK_RETRY_ATTEMPTS = 1  # rerank is fail-degraded; a single retry at most
 # Only these statuses justify a retry — retrying 4xx validation/auth failures
 # would just burn the latency budget on a permanently rejected request.
 RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
-# SSRF guard: outbound embedding/rerank calls may only target allowlisted
-# public hosts (exact hostname match, case-insensitive). The Gemini [OI]-compat
-# host is added for the Google embedding route.
-OUTBOUND_URL_ALLOWED_HOSTS = ("openrouter.ai", "generativelanguage.googleapis.com")
-
 # --- RAG leg token budgets ---
 DEFAULT_MAX_ENTITY_TOKENS = 2000
 DEFAULT_MAX_RELATION_TOKENS = 2000
