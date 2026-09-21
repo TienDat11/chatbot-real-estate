@@ -32,6 +32,19 @@ def _private_text_event(text="hello world", chat_id="chat-123", message_id="msg-
     }}}
 
 
+def _flat_private_text_event(text="hello world", chat_id="chat-123", message_id="msg-456",
+                             chat_type="PRIVATE", event_name="message.text.received"):
+    """The wire form the Zalo Bot Platform actually delivers: the envelope's
+    `result` object at the root, with no `ok`/`result` wrapper."""
+    return {"event_name": event_name, "message": {
+        "from": {"id": "from-789", "display_name": "Tester", "is_bot": False},
+        "chat": {"id": chat_id, "chat_type": chat_type},
+        "text": text,
+        "message_id": message_id,
+        "date": 1750316131602,
+    }}
+
+
 class FakeEventStore:
     def __init__(self):
         self.inserted = []
@@ -834,6 +847,85 @@ def test_duplicate_json_keys_rejected_without_work(client, store, scheduler, mon
     pytest.param(lambda: _private_text_event(text="x" * 2001), "text_too_long", id="text-too-long"),
     pytest.param(lambda: _private_text_event(text="x" * 2000), "accepted", id="text-exact-max"),
     pytest.param(lambda: {"ok": True, "result": {"event_name": "message.text.received", "message": []}}, "missing_message", id="message-not-dict"),
+    pytest.param(lambda: _flat_private_text_event(), "accepted", id="flat-wire-sample"),
+    pytest.param(
+        lambda: _flat_private_text_event(chat_type="GROUP"), "non_private_chat",
+        id="flat-group-chat",
+    ),
+    pytest.param(
+        lambda: _flat_private_text_event(event_name="message.image.received"),
+        "unsupported_event", id="flat-image-event",
+    ),
+    pytest.param(lambda: _flat_private_text_event(text=""), "missing_text", id="flat-empty-text"),
+    pytest.param(lambda: _flat_private_text_event(text=123), "missing_text", id="flat-int-text"),
+    pytest.param(
+        lambda: _flat_private_text_event(message_id=""), "missing_message_id",
+        id="flat-empty-message-id",
+    ),
+    pytest.param(
+        lambda: _flat_private_text_event(chat_id=""), "missing_chat_id",
+        id="flat-empty-chat-id",
+    ),
+    pytest.param(
+        lambda: _flat_private_text_event(text="x" * 2001), "text_too_long",
+        id="flat-text-too-long",
+    ),
+    pytest.param(
+        lambda: _flat_private_text_event(text="x" * 2000), "accepted",
+        id="flat-text-exact-max",
+    ),
+    pytest.param(
+        lambda: {"event_name": "message.text.received", "message": []},
+        "missing_message", id="flat-message-not-dict",
+    ),
+    pytest.param(lambda: {}, "missing_result", id="empty-object"),
+    pytest.param(
+        lambda: {"ok": False, "event_name": "message.text.received",
+                 "message": {"from": {"id": "1"}, "chat": {"id": "1", "chat_type": "PRIVATE"},
+                             "text": "x", "message_id": "1", "date": 1}},
+        "ok_not_true", id="envelope-key-wins-over-flat",
+    ),
+    pytest.param(
+        lambda: {"ok": True,
+                 "result": {"event_name": "message.text.received",
+                            "message": {"from": {"id": "1"},
+                                        "chat": {"id": "1", "chat_type": "PRIVATE"},
+                                        "text": "x", "message_id": "1", "date": 1}},
+                 "message": []},
+        "accepted", id="envelope-result-wins-over-root-message",
+    ),
+    pytest.param(lambda: {"ok": True}, "missing_result", id="envelope-ok-without-result"),
+    pytest.param(lambda: {"ok": True, "result": []},
+                 "missing_result", id="envelope-result-not-dict"),
+    pytest.param(
+        lambda: {"ok": "true",
+                 "result": {"event_name": "message.text.received",
+                            "message": {"from": {"id": "1"},
+                                        "chat": {"id": "1", "chat_type": "PRIVATE"},
+                                        "text": "x", "message_id": "1", "date": 1}}},
+        "ok_not_true", id="envelope-ok-string-true-is-not-true",
+    ),
+    pytest.param(
+        lambda: {"ok": 1,
+                 "result": {"event_name": "message.text.received",
+                            "message": {"from": {"id": "1"},
+                                        "chat": {"id": "1", "chat_type": "PRIVATE"},
+                                        "text": "x", "message_id": "1", "date": 1}}},
+        "ok_not_true", id="envelope-ok-int-one-is-not-true",
+    ),
+    pytest.param(lambda: [], "not_object", id="root-list"),
+    pytest.param(
+        lambda: {"event_name": 123,
+                 "message": {"chat": {"id": "1", "chat_type": "PRIVATE"},
+                             "text": "x", "message_id": "1"}},
+        "unsupported_event", id="flat-event-name-not-str",
+    ),
+    pytest.param(
+        lambda: _flat_private_text_event(chat_type="private"), "non_private_chat",
+        id="flat-chat-type-case-sensitive",
+    ),
+    pytest.param(lambda: {"event_name": "message.text.received"},
+                 "missing_message", id="flat-missing-message-key"),
 ])
 def test_projector_reason_codes(payload_fn, expected_reason):
     from api.application.services.zalo_bot_projection import project_zalo_private_text_event
@@ -857,6 +949,41 @@ def test_marker_accepted(client, store, scheduler, caplog):
     client.portal.call(_finish_tasks)
     assert response.json() == {"ok": True, "accepted": True}
     assert any("ZALO_INGRESS_ACCEPTED event_id=" in r.getMessage() for r in caplog.records)
+
+
+def test_marker_accepted_flat_wire_payload(client, store, scheduler, caplog):
+    """The real Zalo Bot Platform wire shape (no `ok`/`result` envelope) must
+    be accepted, persisted and dispatched, not silently rejected."""
+    import logging
+    caplog.set_level(logging.INFO)
+    response = client.post(WEBHOOK_PATH, json=_flat_private_text_event(
+        text="flat-wire-4c81b7", chat_id="chat-flat-2ea9", message_id="message-flat-7d10"
+    ), headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    assert response.json() == {"ok": True, "accepted": True}
+    assert len(store.inserted) == 1
+    assert store.inserted[0]["chat_id"] == "chat-flat-2ea9"
+    assert store.inserted[0]["message_id"] == "message-flat-7d10"
+    assert store.inserted[0]["event_name"] == "message.text.received"
+    assert scheduler.scheduled == [1]
+    assert any("ZALO_INGRESS_ACCEPTED event_id=" in r.getMessage() for r in caplog.records)
+
+
+def test_flat_wire_payload_duplicate_is_not_persisted_twice(client, store, scheduler):
+    payload = _flat_private_text_event(
+        chat_id="chat-flat-dup", message_id="message-flat-dup", text="dup")
+    first = client.post(
+        WEBHOOK_PATH, json=payload,
+        headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    second = client.post(
+        WEBHOOK_PATH, json=payload,
+        headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    assert first.json() == {"ok": True, "accepted": True}
+    assert second.json() == {"ok": True, "accepted": False}
+    assert len(store.inserted) == 1
+    assert scheduler.scheduled == [1]
 
 
 def test_marker_duplicate_json_keys(client, store, scheduler, monkeypatch, caplog):
@@ -932,6 +1059,24 @@ def test_values_free_log_invariant(client, store, scheduler, caplog, chat_type, 
     else:
         assert response.json() == {"ok": True, "accepted": False}
         assert any("ZALO_INGRESS_REJECT reason=non_private_chat" in r.getMessage() for r in caplog.records)
+
+
+def test_flat_wire_payload_logs_no_values(client, store, scheduler, caplog):
+    """A flat-form REJECT must stay values-free in logs, same as the envelope."""
+    import logging
+    caplog.set_level(logging.WARNING)
+    response = client.post(WEBHOOK_PATH, json=_flat_private_text_event(
+        chat_type="GROUP", text="flat-private-9b2c4d", chat_id="chat-flat-private-51fa",
+        message_id="message-flat-private-83e7",
+    ), headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    assert response.json() == {"ok": True, "accepted": False}
+    text = caplog.text
+    assert "flat-private-9b2c4d" not in text
+    assert "chat-flat-private-51fa" not in text
+    assert "message-flat-private-83e7" not in text
+    assert "ZALO_INGRESS_REJECT reason=non_private_chat" in text
+    assert "event_name:str" in text
 
 
 # Hostile key redaction in payload shape logging

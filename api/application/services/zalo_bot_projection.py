@@ -1,4 +1,8 @@
-"""Pure projection of supported Zalo private text events; no I/O."""
+"""Pure projection of supported Zalo private text events; no I/O.
+
+Accepts both the documented enveloped payload ({"ok": true, "result": {...}})
+and the flat production wire payload ({"event_name": ..., "message": {...}}).
+"""
 
 from __future__ import annotations
 
@@ -39,10 +43,19 @@ class ZaloInboundTextEvent:
 def project_zalo_private_text_event(parsed: object) -> ProjectionResult:
     if not isinstance(parsed, dict):
         return ProjectionResult(None, InboundReason.NOT_OBJECT)
-    if parsed.get("ok") is not True:
-        return ProjectionResult(None, InboundReason.OK_NOT_TRUE)
-    result = parsed.get("result")
-    if not isinstance(result, dict):
+    if "ok" in parsed:
+        # Documented Zalo envelope: {"ok": true, "result": {...}}.
+        if parsed.get("ok") is not True:
+            return ProjectionResult(None, InboundReason.OK_NOT_TRUE)
+        result = parsed.get("result")
+        if not isinstance(result, dict):
+            return ProjectionResult(None, InboundReason.MISSING_RESULT)
+    else:
+        # Observed production wire form: the envelope's `result` object is
+        # delivered at the root, with no `ok`/`result` wrapper. The webhook
+        # secret header is the authenticity boundary for both forms.
+        result = parsed
+    if "event_name" not in result:
         return ProjectionResult(None, InboundReason.MISSING_RESULT)
     event_name = result.get("event_name")
     if event_name != "message.text.received":

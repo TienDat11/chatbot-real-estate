@@ -6,7 +6,9 @@ The route performs strict ordering:
   3. JSON parse (400 on malformed).
   4. Disabled flag -> 2xx zero work.
   5. Project to a (chat_id, message_id, event_name, text) tuple only
-     when ok is True, event_name == "message.text.received", chat type is
+     when the payload is either the documented envelope ({"ok": true,
+     "result": {...}}) or the flat production wire form ({"event_name": ...,
+     "message": {...}}), event_name == "message.text.received", chat type is
      PRIVATE, chat.id / message_id / text are non-empty, and len(text) <=
      MAX_QUERY_LENGTH.
   6. Persist via the event store; on NEW event, fire-and-forget dispatch
