@@ -29,8 +29,10 @@ from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
 
 from api.application.services.zalo_bot_dispatch import schedule
-from api.application.services.zalo_bot_projection import project_zalo_private_text_event
-from api.domain.value_objects.constants import MAX_QUERY_LENGTH
+from api.application.services.zalo_bot_projection import (
+    InboundReason,
+    project_zalo_private_text_event,
+)
 from api.infrastructure.config.config import get_settings
 
 logger = logging.getLogger("api.zalo_bot_routes")
@@ -72,6 +74,102 @@ def _log_task_exception(task: asyncio.Task) -> None:
     # Log the failure type only: exception text can carry provider payloads,
     # chat text, or secrets. ZB-01 logs safe fields only.
     logger.warning("Zalo event dispatch failed: %s", type(exc).__name__)
+
+_SHAPE_MAX_ENTRIES = 40
+_SHAPE_MAX_DEPTH = 8
+_SHAPE_MAX_KEY_LEN = 64
+# Official Zalo webhook schema keys (from the payload contract this route is
+# built against). Only these may be logged by name; any other key is
+# attacker/caller-controlled and MUST be redacted to a structural placeholder.
+_KNOWN_SCHEMA_KEYS = frozenset({
+    "ok", "result", "event_name", "message", "from", "to", "id",
+    "display_name", "is_bot", "chat", "chat_type", "text", "message_id", "date",
+    "sender", "recipient",
+})
+_REDACTED_KEY = "<key>"
+_SAFE_KEY_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+)
+
+def _safe_key_path(path: str) -> str:
+    """Sanitize one dotted key path; caller-controlled segments are redacted.
+
+    Segments are logged by name only if they are in the official Zalo schema
+    key set (never attacker-controlled). The only structural marker is the
+    exact list-index suffix `[0]` emitted by the shape walker; the segment
+    name before it is still allowlist-checked. Everything else becomes a
+    placeholder: structure (presence, depth, type, length) stays diagnosable,
+    values and unknown key names never reach logs.
+    """
+    out = []
+    for segment in path[:_SHAPE_MAX_KEY_LEN].split("."):
+        name, index = segment, ""
+        if segment.endswith("[0]"):
+            name, index = segment[:-3], "[0]"
+        if name in _KNOWN_SCHEMA_KEYS:
+            out.append("".join(ch for ch in name if ch in _SAFE_KEY_CHARS) + index)
+        else:
+            out.append(_REDACTED_KEY + index)
+    return ".".join(out)
+
+
+def _payload_shape(parsed: object) -> str:
+    """Values-free structural skeleton of a parsed payload.
+
+    Emits dotted key paths with VALUE TYPES ONLY (never values). Strings add a
+    length only. Lists report their length and expand index 0 at most. Capped at
+    _SHAPE_MAX_ENTRIES entries and _SHAPE_MAX_DEPTH depth. This is the only
+    mechanism that may inspect the payload for logging; it must never return or
+    log a value.
+    """
+    entries: list[str] = []
+
+    def walk(node: object, path: str, depth: int) -> None:
+        if len(entries) >= _SHAPE_MAX_ENTRIES:
+            return
+        key = _safe_key_path(path)
+        if isinstance(node, dict):
+            entries.append(f"{key}:dict" if key else "dict")
+            if depth >= _SHAPE_MAX_DEPTH:
+                return
+            for name in sorted(node.keys(), key=str)[: _SHAPE_MAX_ENTRIES]:
+                walk(node[name], f"{path}.{name}" if path else str(name), depth + 1)
+            return
+        if isinstance(node, list):
+            entries.append(f"{key}:list(len={len(node)})")
+            if node and depth < _SHAPE_MAX_DEPTH:
+                walk(node[0], f"{path}[0]", depth + 1)
+            return
+        if isinstance(node, str):
+            entries.append(f"{key}:str(len={len(node)})")
+            return
+        if isinstance(node, bool):
+            entries.append(f"{key}:bool")
+            return
+        if isinstance(node, int):
+            entries.append(f"{key}:int")
+            return
+        if isinstance(node, float):
+            entries.append(f"{key}:float")
+            return
+        if node is None:
+            entries.append(f"{key}:none")
+            return
+        entries.append(f"{key}:{type(node).__name__}")
+
+    walk(parsed, "", 0)
+    if len(entries) > _SHAPE_MAX_ENTRIES:
+        entries = entries[:_SHAPE_MAX_ENTRIES] + ["+more"]
+    return ",".join(entries)
+
+
+def _log_ingress_reject(reason: InboundReason, parsed: object) -> None:
+    """Log a projection rejection with a reason code and a values-free shape."""
+    logger.warning(
+        "ZALO_INGRESS_REJECT reason=%s shape=%s",
+        reason.value,
+        _payload_shape(parsed),
+    )
 
 
 def get_zalo_event_store():
@@ -169,6 +267,7 @@ async def zalo_webhook(
     try:
         parsed = json.loads(raw_body, object_pairs_hook=_unique_object)
     except _DuplicateKeyError:
+        logger.warning("ZALO_INGRESS_REJECT reason=duplicate_json_keys")
         return JSONResponse(
             status_code=status.HTTP_200_OK, content={"ok": True, "accepted": False}
         )
@@ -179,16 +278,19 @@ async def zalo_webhook(
 
     # 4. Disabled but authenticated + valid -> 2xx zero work.
     if not settings.zalo_bot_enabled:
+        logger.warning("ZALO_INGRESS_REJECT reason=bot_disabled")
         return JSONResponse(
             status_code=status.HTTP_200_OK, content={"ok": True, "accepted": False}
         )
 
     # 5. Project: extract a work tuple only for the supported event shape.
-    event = project_zalo_private_text_event(parsed)
-    if event is None or len(event.text) > MAX_QUERY_LENGTH:
+    projection = project_zalo_private_text_event(parsed)
+    if projection.event is None:
+        _log_ingress_reject(projection.reason, parsed)
         return JSONResponse(
             status_code=status.HTTP_200_OK, content={"ok": True, "accepted": False}
         )
+    event = projection.event
 
     # 6. Persist; on NEW event, fire-and-forget dispatch so the ACK never waits
     #    for RAG or provider outbound. The task is retained in _background_tasks
@@ -215,11 +317,13 @@ async def zalo_webhook(
             _spawn(schedule(event_id))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Zalo event dispatch setup failed: %s", type(exc).__name__)
+        logger.info("ZALO_INGRESS_ACCEPTED event_id=%s", event_id)
         return JSONResponse(
             status_code=status.HTTP_200_OK, content={"ok": True, "accepted": True}
         )
 
     # Duplicate event -> 2xx, scheduler NOT called a second time.
+    logger.info("ZALO_INGRESS_DUPLICATE")
     return JSONResponse(
         status_code=status.HTTP_200_OK, content={"ok": True, "accepted": False}
     )

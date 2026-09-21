@@ -24,9 +24,12 @@ _SECRET_MARKER = "chat-text-must-not-be-logged-9f3a7b2c"
 def _private_text_event(text="hello world", chat_id="chat-123", message_id="msg-456",
                         chat_type="PRIVATE", event_name="message.text.received", ok=True):
     return {"ok": ok, "result": {"event_name": event_name, "message": {
-        "message_id": message_id, "text": text,
+        "from": {"id": "from-789", "display_name": "Tester", "is_bot": False},
         "chat": {"id": chat_id, "chat_type": chat_type},
-    }, "from": {"id": "from-789"}}}
+        "text": text,
+        "message_id": message_id,
+        "date": 1750316131602,
+    }}}
 
 
 class FakeEventStore:
@@ -411,10 +414,11 @@ def test_projector_returns_frozen_event_without_mutating_payload():
     payload = _private_text_event(text=" Căn 2PN đẹp ")
     before = json.dumps(payload)
     projected = project_zalo_private_text_event(payload)
-    assert projected == ZaloInboundTextEvent("chat-123", "msg-456", " Căn 2PN đẹp ", "message.text.received")
+    assert projected.reason.value == "accepted"
+    assert projected.event == ZaloInboundTextEvent("chat-123", "msg-456", " Căn 2PN đẹp ", "message.text.received")
     assert json.dumps(payload) == before
     with pytest.raises(FrozenInstanceError):
-        projected.text = "changed"
+        projected.event.text = "changed"
 
 
 @pytest.mark.parametrize("path,value", [
@@ -440,7 +444,9 @@ def test_projector_rejects_unsupported_shapes(path, value):
         container[path[-1]] = value
     else:
         payload = value
-    assert project_zalo_private_text_event(payload) is None
+    result = project_zalo_private_text_event(payload)
+    assert result.event is None
+    assert result.reason is not None
 
 
 @pytest.mark.parametrize("extra,accepted", [(0, True), (1, False)])
@@ -806,3 +812,147 @@ def test_duplicate_json_keys_rejected_without_work(client, store, scheduler, mon
     assert store.inserted == []
     assert scheduler.scheduled == []
     assert attempts == []
+
+
+# Golden contract tests for projector reason codes
+@pytest.mark.parametrize("payload_fn,expected_reason", [
+    pytest.param(lambda: _private_text_event(), "accepted", id="official-sample"),
+    pytest.param(lambda: _private_text_event(chat_type="GROUP"), "non_private_chat", id="group-chat"),
+    pytest.param(lambda: _private_text_event(event_name="message.image.received"), "unsupported_event", id="image-event"),
+    pytest.param(lambda: _private_text_event(text=""), "missing_text", id="empty-text"),
+    pytest.param(lambda: _private_text_event(text=123), "missing_text", id="int-text"),
+    pytest.param(lambda: _private_text_event(message_id=""), "missing_message_id", id="empty-message-id"),
+    pytest.param(lambda: _private_text_event(message_id=123), "missing_message_id", id="int-message-id"),
+    pytest.param(lambda: _private_text_event(chat_id=""), "missing_chat_id", id="empty-chat-id"),
+    pytest.param(lambda: _private_text_event(chat_id=123), "missing_chat_id", id="int-chat-id"),
+    pytest.param(lambda: {"ok": True, "result": {"event_name": "message.text.received", "message": {"from": {"id": "1"}, "chat": {"id": "1", "chat_type": "PRIVATE"}, "text": "x", "message_id": "1", "date": 1}}}, "accepted", id="minimal-valid"),
+    pytest.param(lambda: {"ok": True}, "missing_result", id="missing-result"),
+    pytest.param(lambda: {"ok": False}, "ok_not_true", id="ok-false"),
+    pytest.param(lambda: [], "not_object", id="not-object-list"),
+    pytest.param(lambda: "x", "not_object", id="not-object-str"),
+    pytest.param(lambda: None, "not_object", id="not-object-none"),
+    pytest.param(lambda: _private_text_event(text="x" * 2001), "text_too_long", id="text-too-long"),
+    pytest.param(lambda: _private_text_event(text="x" * 2000), "accepted", id="text-exact-max"),
+    pytest.param(lambda: {"ok": True, "result": {"event_name": "message.text.received", "message": []}}, "missing_message", id="message-not-dict"),
+])
+def test_projector_reason_codes(payload_fn, expected_reason):
+    from api.application.services.zalo_bot_projection import project_zalo_private_text_event
+
+    payload = payload_fn()
+    result = project_zalo_private_text_event(payload)
+    assert result.reason.value == expected_reason, f"payload={payload} expected={expected_reason} got={result.reason.value}"
+    if expected_reason == "accepted":
+        assert result.event is not None
+    else:
+        assert result.event is None
+
+
+# Route-level marker tests
+def test_marker_accepted(client, store, scheduler, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    response = client.post(WEBHOOK_PATH, json=_private_text_event(
+        text="text-private-763ea2", chat_id="chat-private-f6e321", message_id="message-private-91d376"
+    ), headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    assert response.json() == {"ok": True, "accepted": True}
+    assert any("ZALO_INGRESS_ACCEPTED event_id=" in r.getMessage() for r in caplog.records)
+
+
+def test_marker_duplicate_json_keys(client, store, scheduler, monkeypatch, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    body = '{"ok": true, "ok": false, "result": {"event_name": "message.text.received", "message": {"from": {"id": "1"}, "chat": {"id": "1", "chat_type": "PRIVATE"}, "text": "x", "message_id": "1", "date": 1}}}'
+    response = client.post(WEBHOOK_PATH, content=body, headers={
+        "X-Bot-Api-Secret-Token": VALID_SECRET, "Content-Type": "application/json",
+    })
+    client.portal.call(_finish_tasks)
+    assert response.json() == {"ok": True, "accepted": False}
+    assert any("ZALO_INGRESS_REJECT reason=duplicate_json_keys" in r.getMessage() for r in caplog.records)
+
+
+def test_marker_bot_disabled(client, store, scheduler, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    client.app.state.settings.zalo_bot_enabled = False
+    response = client.post(WEBHOOK_PATH, json=_private_text_event(), headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    assert response.json() == {"ok": True, "accepted": False}
+    assert any("ZALO_INGRESS_REJECT reason=bot_disabled" in r.getMessage() for r in caplog.records)
+
+
+def test_marker_projector_reject(client, store, scheduler, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    response = client.post(WEBHOOK_PATH, json=_private_text_event(chat_type="GROUP"), headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    assert response.json() == {"ok": True, "accepted": False}
+    assert any("ZALO_INGRESS_REJECT reason=non_private_chat" in r.getMessage() for r in caplog.records)
+
+
+def test_marker_duplicate_event(client, store, scheduler, caplog):
+    import logging
+    caplog.set_level(logging.INFO)
+    payload = _private_text_event(chat_id="chat-dup", message_id="msg-dup", text="dup")
+    response1 = client.post(WEBHOOK_PATH, json=payload, headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    response2 = client.post(WEBHOOK_PATH, json=payload, headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    assert response1.json() == {"ok": True, "accepted": True}
+    assert response2.json() == {"ok": True, "accepted": False}
+    assert any("ZALO_INGRESS_DUPLICATE" in r.getMessage() for r in caplog.records)
+    # Ensure it's NOT a reject marker
+    assert not any("ZALO_INGRESS_REJECT" in r.getMessage() for r in caplog.records if "ZALO_INGRESS_DUPLICATE" not in r.getMessage())
+
+
+# Values-free invariant: no raw identifiers leak in logs
+@pytest.mark.parametrize("chat_type,expected_accepted", [
+    ("PRIVATE", True),
+    ("GROUP", False),
+])
+def test_values_free_log_invariant(client, store, scheduler, caplog, chat_type, expected_accepted):
+    import logging
+    caplog.set_level(logging.DEBUG)
+    payload = _private_text_event(
+        text="text-private-763ea2",
+        chat_id="chat-private-f6e321",
+        message_id="message-private-91d376",
+        chat_type=chat_type,
+    )
+    response = client.post(WEBHOOK_PATH, json=payload, headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    log_text = caplog.text
+    # These unique markers must NEVER appear in any log record
+    assert "text-private-763ea2" not in log_text
+    assert "chat-private-f6e321" not in log_text
+    assert "message-private-91d376" not in log_text
+    if expected_accepted:
+        assert response.json() == {"ok": True, "accepted": True}
+        assert any("ZALO_INGRESS_ACCEPTED" in r.getMessage() for r in caplog.records)
+    else:
+        assert response.json() == {"ok": True, "accepted": False}
+        assert any("ZALO_INGRESS_REJECT reason=non_private_chat" in r.getMessage() for r in caplog.records)
+
+
+# Hostile key redaction in payload shape logging
+@pytest.mark.parametrize("hostile_key", [
+    "phone0912345678",          # long digit run (phone-like)
+    "sk_live_abc123foobar",     # alphanumeric credential-like
+    "adv[evil]",                # bracket bypass attempt
+    "x" * 70,                   # over-length key
+])
+def test_payload_shape_redacts_hostile_keys(client, store, scheduler, caplog, hostile_key):
+    import logging
+    caplog.set_level(logging.WARNING)
+    payload = _private_text_event(chat_type="GROUP")   # -> reject reason=non_private_chat
+    payload[hostile_key] = "private-value-abc"
+    response = client.post(WEBHOOK_PATH, json=payload,
+                           headers={"X-Bot-Api-Secret-Token": VALID_SECRET})
+    client.portal.call(_finish_tasks)
+    assert response.json() == {"ok": True, "accepted": False}
+    text = caplog.text
+    assert hostile_key not in text
+    assert "private-value-abc" not in text
+    assert "<key>:str" in text
+    assert "result.event_name:str" in text
+    assert "ZALO_INGRESS_REJECT reason=non_private_chat" in text
