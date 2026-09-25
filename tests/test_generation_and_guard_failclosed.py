@@ -44,6 +44,8 @@ from api.domain.services.guard_output import GuardResult as OutputGuardResult
 from api.domain.services.guard_output import guard_output
 from api.domain.services.rewrite import RoutedResult
 from api.workflow import VERIFICATION_FALLBACK_MESSAGE
+from api.application.services import merge as merge_module
+from api.application.services.rag_leg import RagLegResult
 
 # --------------------------------------------------------------------------
 # stream_answer: typed failure instead of a fake textual answer
@@ -150,6 +152,10 @@ def _run_wf(
     output_guard_timeout=None,
     log=None,
     audits=None,
+    project_key=None,
+    query=None,
+    rag_chunks=None,
+    registry_record=None,
 ) -> tuple[dict, list[tuple[str, dict]]]:
     """Run the real RagQueryWorkflow with all externals patched.
 
@@ -170,7 +176,11 @@ def _run_wf(
         return InputGuardResult(clean=raw, rejected=False, degraded=True)
 
     async def fake_rewrite(clean, history, as_of_iso):
-        return _make_routed("giá căn CH-03")
+        rewritten = clean if rag_chunks is not None else "giá căn CH-03"
+        routed = _make_routed(rewritten)
+        if rag_chunks is not None:
+            routed.routing["needs_rag"] = True
+        return routed
 
     async def fake_audit(entry):
         if audits is not None:
@@ -188,6 +198,31 @@ def _run_wf(
     monkeypatch.setattr(workflow_module, "stream_answer", stream)
     monkeypatch.setattr(workflow_module, "guard_output", output_guard)
     monkeypatch.setattr(workflow_module, "write_audit", fake_audit)
+    if rag_chunks is not None:
+        async def fake_rag(*args):
+            return RagLegResult(chunks=rag_chunks)
+
+        class RegistryConnection:
+            async def fetch(self, sql, ids):
+                return [registry_record] if registry_record is not None else []
+
+        class RegistryAcquire:
+            async def __aenter__(self):
+                return RegistryConnection()
+
+            async def __aexit__(self, *args):
+                return None
+
+        class RegistryPool:
+            def acquire(self):
+                return RegistryAcquire()
+
+        async def fake_pool():
+            return RegistryPool()
+
+        monkeypatch.setattr(workflow_module, "run_rag_leg", fake_rag)
+        monkeypatch.setattr(merge_module, "get_ro_pool", fake_pool)
+        monkeypatch.setattr(workflow_module, "search_images", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
     if output_guard_timeout is not None:
         monkeypatch.setitem(
             workflow_module.STEP_TIMEOUTS, "output_guard", output_guard_timeout
@@ -195,7 +230,10 @@ def _run_wf(
 
     async def go():
         wf = RagQueryWorkflow(on_event=_cb)
-        return await wf.run(query="giá căn CH-03", session_id=None, history=[])
+        return await wf.run(
+            query=query if query is not None else "giá căn CH-03",
+            session_id=None, history=[], project_key=project_key
+        )
 
     return asyncio.run(go()), events
 
@@ -736,3 +774,59 @@ def test_orphan_citation_workflow_fails_closed(monkeypatch):
     assert guard_verdicts["orphan_numbers"] == []
     assert guard_verdicts["citation_grounding"]["status"] == "fail"
     assert guard_verdicts["citation_grounding"]["missing"] == ["fe-999"]
+
+
+def test_camellia_amenity_rag_area_publishes_without_sql_facts(monkeypatch):
+    """A selected, current project document can ground its own amenity area only."""
+    from datetime import date, timedelta
+    source = "Hồ sơ tiện ích Camellia"
+
+    content = (
+        "Tiện ích dự án Camellia: nha_tre diện tích 434.2 m2; "
+        "shcd_tang2 157.4 m2; be_boi 381.6 m2; gym 134.3 m2; "
+        "yoga 43.6 m2; shcd_tang3 232.1 m2."
+    )
+    chunk = {"id": "camellia-amenities", "content": content, "score": 0.91}
+    today = date.today()
+    record = {
+        "chunk_id": chunk["id"], "registry_content": content, "doc_id": "camellia-doc",
+        "title": source, "section": "Tiện ích", "kind": "project",
+        "project_key": "camellia", "status": "published",
+        "effective_from": today - timedelta(days=1),
+        "effective_to": today + timedelta(days=1),
+    }
+    approved = f"Nhà trẻ rộng 434,2 m² theo {source}."
+    cases = [
+        (approved, record, True),
+        (f"Nhà trẻ rộng 434.2 m² theo {source}.", record, True),
+        (f"Nhà trẻ rộng 434,2 m². Theo {source}.", record, False),
+        (f"Nhà trẻ rộng 434,2 m². Giá căn 99 tỷ theo {source}.", record, False),
+        (f"Nhà trẻ giá 99 tỷ theo {source}.", record, False),
+        (f"Nhà trẻ rộng 434,3 m² theo {source}.", record, False),
+        (f"Gym rộng 434,2 m² theo {source}.", record, False),
+        (approved, {**record, "project_key": "soleil"}, False),
+        (approved, {**record, "effective_to": today - timedelta(days=1)}, False),
+    ]
+    for answer, selected_record, allowed in cases:
+        with monkeypatch.context() as scope:
+            async def stream(merged, history, high_stakes):
+                yield answer
+
+            audits = []
+            result, events = _run_wf(
+                scope, stream=stream, output_guard=guard_output,
+                query="Dự án camellia tiện ích gì?", project_key="camellia",
+                rag_chunks=[chunk], registry_record=selected_record, audits=audits,
+            )
+            token_text = "".join(
+                data.get("text", "")
+                for event, data in events if event == workflow_module.SSE_EVENT_TOKEN
+            )
+            verdict = audits[-1]["guard_verdicts"]["numeric_grounding"]
+            if allowed:
+                assert verdict == "pass"
+                assert token_text == result["answer"] == answer
+            else:
+                assert token_text != answer
+                assert result["answer"] != answer
+                assert verdict == "fail"

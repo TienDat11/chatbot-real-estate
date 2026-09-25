@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ingest.placeholder import FACT_TOKEN_START, extract_placeholders, resolve_placeholders
@@ -21,6 +23,54 @@ from .sql_leg import get_ro_pool
 logger = logging.getLogger("api.merge")
 
 DELIMITER = "=" * 60
+
+_RAG_AREA_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<label>nha_tre|shcd_tang2|shcd_tang3|be_boi|gym|yoga)"
+    r"(?![A-Za-z0-9_])\s*(?:[:=]\s*)?(?:diện\s+tích\s*)?(?P<area>\d+(?:[.,]\d+)?)\s*m(?:2|²)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _rag_area_evidence(chunk: dict, record: dict, project_key: str | None, as_of: date | None) -> list[tuple[Decimal, str, str, str, str]]:
+    """Return registry-backed amenity areas only for an exact selected chunk match."""
+    content = chunk.get("content")
+    registry_content = record.get("registry_content")
+    effective_on = as_of or date.today()
+    start, end = record.get("effective_from"), record.get("effective_to")
+    try:
+        trusted = (
+            isinstance(project_key, str)
+            and bool(project_key)
+            and record.get("project_key") == project_key
+            and record.get("status") == "published"
+            and start is not None
+            and start <= effective_on
+            and (end is None or end > effective_on)
+            and record.get("section", "").strip().casefold() == "tiện ích"
+            and isinstance(content, str)
+            and isinstance(registry_content, str)
+            and content == registry_content
+            and isinstance(record.get("doc_id"), str)
+            and isinstance(record.get("title"), str)
+            and isinstance(chunk.get("id"), str)
+        )
+    except (AttributeError, TypeError):
+        return []
+    if not trusted:
+        return []
+
+    evidence = []
+    for match in _RAG_AREA_PATTERN.finditer(registry_content):
+        try:
+            area = Decimal(match.group("area").replace(",", "."))
+        except InvalidOperation:
+            continue
+        if area > 0:
+            evidence.append(
+                (area, match.group("label").lower(), record["doc_id"], record["title"], chunk["id"])
+            )
+    return evidence
+
 
 
 @dataclass
@@ -136,11 +186,13 @@ async def hydrate_chunks(
     ids = [c.get("id") for c in chunks if c.get("id")]
     if not ids:
         return [{**c} for c in chunks]
-    pool = await get_ro_pool()
-    sql = """SELECT c.chunk_id, c.section, d.doc_id, d.title, d.kind, d.effective_from, d.effective_to
-             FROM document_chunks c JOIN documents d ON d.doc_id = c.doc_id
-             WHERE c.chunk_id = ANY($1)"""  # noqa: E501
     try:
+        pool = await get_ro_pool()
+        sql = """SELECT c.chunk_id, c.content AS registry_content, c.section,
+                        d.doc_id, d.title, d.kind, d.project_key, d.status,
+                        d.effective_from, d.effective_to
+                 FROM document_chunks c JOIN documents d ON d.doc_id = c.doc_id
+                 WHERE c.chunk_id = ANY($1)"""  # noqa: E501
         async with pool.acquire() as conn:
             recs = await conn.fetch(sql, ids)
             lookup = {r["chunk_id"]: r for r in recs}
@@ -156,6 +208,7 @@ async def hydrate_chunks(
                         "kind": r.get("kind"),
                         "effective_from": _iso(r.get("effective_from")),
                         "effective_to": _iso(r.get("effective_to")),
+                        "_rag_area_evidence": _rag_area_evidence(c, r, project_key, as_of),
                     }
                 )
             try:
@@ -187,8 +240,9 @@ def build_rag_context(chunks: list[dict]) -> str:
 
 
 def build_evidence_context(evidence: list[dict]) -> str:
-    """FACT_EVIDENCE block — JSON-encode the fe blocks (the sole numeric source).
+    """FACT_EVIDENCE block — the sole source for business/financial numbers.
 
+    Amenity-area claims have a separate, narrow RAG registry-evidence exception.
     Entries gain additive ``subject_display`` / ``policy_display`` legends (D4) so
     the model names units and payment methods in prose instead of echoing machine
     keys. Backfilling here covers every producer (SQL leg, affordability, NL2SQL);
@@ -196,7 +250,7 @@ def build_evidence_context(evidence: list[dict]) -> str:
     ``fields`` and citations on ``fe_id``.
     """
     enriched = [enrich_evidence_entry(e) for e in evidence or []]
-    return f"{DELIMITER}\nFACT_EVIDENCE (số liệu từ hệ thống dữ liệu — nguồn số DUY NHẤT, LLM không tự tính; khi gọi tên căn hay phương án thanh toán CHỈ dùng subject_display/policy_display, KHÔNG viết subject/policy_key nội bộ):\n{json.dumps(enriched, ensure_ascii=False)}\n{DELIMITER}"  # noqa: E501
+    return f"{DELIMITER}\nFACT_EVIDENCE (số liệu từ hệ thống dữ liệu — nguồn duy nhất cho số liệu kinh doanh/tài chính, LLM không tự tính; khi gọi tên căn hay phương án thanh toán CHỈ dùng subject_display/policy_display, KHÔNG viết subject/policy_key nội bộ):\n{json.dumps(enriched, ensure_ascii=False)}\n{DELIMITER}"  # noqa: E501
 
 
 def build_sources(chunks: list[dict]) -> list[dict]:
@@ -251,9 +305,15 @@ async def merge_context(
     evidence_blocks = build_evidence_context(evidence or [])
     sources = build_sources(hydrated)
     facts = build_facts(evidence or [])
+    rag_area_evidence = [
+        item
+        for chunk in hydrated
+        for item in chunk.get("_rag_area_evidence", [])
+    ]
     return Merged(
         rag_blocks=rag_blocks,
         evidence_blocks=evidence_blocks,
         sources=sources,
         facts=facts,
+        meta={"_rag_area_evidence": rag_area_evidence},
     )

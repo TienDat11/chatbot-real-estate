@@ -1,7 +1,8 @@
-"""L4 output guard (plan §4.7): numeric grounding, orphan detection, citations, confidence.
+"""L4 output guard: numeric grounding, orphan detection, citations, confidence.
 
-Financial numbers must byte-match a normalized FACT_EVIDENCE value; orphans force LOW
-and review, citation grounding is best-effort, and LOW/high-stakes set requires_review.
+Business and financial numbers must byte-match normalized FACT_EVIDENCE; RAG
+may ground only an amenity area when its label and exact source title share a clause.
+Orphans force LOW and review, citation grounding is best-effort.
 Plain async — testable without a framework.
 """
 
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -103,7 +105,7 @@ def _to_decimal(v: Any) -> Decimal | None:
 
 
 def _normalize_amount_text(text: str) -> Decimal | None:
-    """Normalize one numeric match: '2,85 tỷ' -> 2850000000; '25%' -> 25; '2.000.000.000' -> int."""
+    """Normalize Vietnamese numeric notation, preserving short dot decimals."""
     t = (text or "").strip().lower()
     unit = None
     for u in _VN_UNITS:
@@ -118,8 +120,12 @@ def _normalize_amount_text(text: str) -> Decimal | None:
         t = t.replace(".", "").replace(",", ".")
     elif "," in t:
         t = t.replace(",", ".")
-    else:
+    elif t.count(".") > 1:
         t = t.replace(".", "")
+    elif "." in t:
+        whole, fraction = t.split(".")
+        if len(fraction) not in {1, 2}:
+            t = whole + fraction
     try:
         d = Decimal(t)
     except InvalidOperation:
@@ -129,23 +135,89 @@ def _normalize_amount_text(text: str) -> Decimal | None:
     return d
 
 
-def extract_amounts(text: str) -> list[Decimal]:
-    """All normalized financial numbers in the answer, for the orphan check.
-
-    Keeps figures with a money/%/area unit or magnitude >= 1M to avoid false positives
-    on laws, years, floors.
-    """
-    out: list[Decimal] = []
-    for m in _NUMBER_RE.finditer(text or ""):
-        d = _normalize_amount_text(m.group(0))
+def _extract_amount_matches(text: str) -> list[tuple[Decimal, str | None, int, int]]:
+    """Extract normalized values with units and answer spans."""
+    answer = text or ""
+    out: list[tuple[Decimal, str | None, int, int]] = []
+    for match in _NUMBER_RE.finditer(answer):
+        d = _normalize_amount_text(match.group(0))
         if d is None:
             continue
-        unit = m.group(2)
+        unit = match.group(2)
         if unit is None and abs(d) < _FINANCIAL_MIN:
             continue
-        out.append(d)
+        out.append((d, unit.lower() if unit else None, match.start(), match.end()))
     return out
 
+
+def extract_amounts(text: str) -> list[Decimal]:
+    """Extract normalized financial amounts from the answer."""
+    return [amount for amount, _, _, _ in _extract_amount_matches(text)]
+
+
+_AMENITY_LABELS = {
+    "nha_tre": re.compile(r"(?<!\w)nha\s+tre(?!\w)"),
+    "shcd_tang2": re.compile(r"(?<!\w)(?:shcd|sinh\s+hoat\s+cong\s+dong)\s+tang\s*2(?!\w)"),
+    "shcd_tang3": re.compile(r"(?<!\w)(?:shcd|sinh\s+hoat\s+cong\s+dong)\s+tang\s*3(?!\w)"),
+    "be_boi": re.compile(r"(?<!\w)be\s+boi(?!\w)"),
+    "gym": re.compile(r"(?<!\w)gym(?!\w)"),
+    "yoga": re.compile(r"(?<!\w)yoga(?!\w)"),
+}
+_CLAUSE_PUNCTUATION = ".;:!?。；！？—–\r\n"
+
+
+def _normalize_clause_text(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def _normalize_label_text(text: str) -> str:
+    text = "".join(
+        char for char in unicodedata.normalize("NFD", text)
+        if not unicodedata.combining(char)
+    ).replace("đ", "d").replace("Đ", "D")
+    return " ".join(text.casefold().split())
+
+
+def _clause_for_span(text: str, start: int, end: int) -> str:
+    """Return the punctuation-bounded clause containing a numeric span."""
+    left = start
+    while left:
+        char = text[left - 1]
+        if char in _CLAUSE_PUNCTUATION:
+            break
+        left -= 1
+    right = end
+    while right < len(text):
+        char = text[right]
+        if char in _CLAUSE_PUNCTUATION:
+            break
+        right += 1
+    return _normalize_clause_text(text[left:right])
+
+
+def _rag_area_match(
+    amount: Decimal, unit: str | None, clause: str, rag_area_evidence: list[tuple],
+) -> bool:
+    """Match only an explicitly labelled, same-source amenity-area claim."""
+    if unit not in {"m2", "m²"} or not isinstance(rag_area_evidence, (list, tuple)):
+        return False
+    labels = [label for label, pattern in _AMENITY_LABELS.items() if pattern.search(_normalize_label_text(clause))]
+    if len(labels) != 1:
+        return False
+    label = labels[0]
+    for evidence in rag_area_evidence:
+        if not isinstance(evidence, (tuple, list)) or len(evidence) != 5:
+            continue
+        evidence_amount, evidence_label, _, source_title, _ = evidence
+        if evidence_label != label or _to_decimal(evidence_amount) != amount or not isinstance(source_title, str):
+            continue
+        title = _normalize_clause_text(source_title)
+        if title and re.search(
+            r"(?<!\w)" + r"\s*[,;:]?\s*".join(re.escape(part) for part in title.split()) + r"(?!\w)",
+            clause,
+        ):
+            return True
+    return False
 
 def evidence_values(facts: list[dict]) -> list[Decimal]:
     """Normalized field values from FACT_EVIDENCE blocks."""
@@ -316,10 +388,21 @@ async def guard_output(
     meta = meta or {}
     verdicts: dict[str, Any] = {}
 
-    # (a) numeric grounding — every number in the answer matches FACT_EVIDENCE
+    # (a) numeric grounding — SQL facts remain authoritative for all numbers;
+    # RAG can ground only a labelled amenity area tied to its exact source title.
     evidence = evidence_values(facts)
-    amounts = extract_amounts(answer)
-    orphan = [a for a in amounts if not _byte_match(a, evidence)]
+    amount_matches = _extract_amount_matches(answer)
+    orphan = [
+        amount
+        for amount, unit, start, end in amount_matches
+        if not _byte_match(amount, evidence)
+        and not _rag_area_match(
+            amount,
+            unit,
+            _clause_for_span(answer, start, end),
+            meta.get("_rag_area_evidence", []),
+        )
+    ]
     verdicts["numeric_grounding"] = "pass" if not orphan else "fail"
     verdicts["orphan_numbers"] = str(orphan[:10]) if orphan else []
     numeric_pass = not orphan
