@@ -17,6 +17,7 @@ from ingest.config import settings
 from ingest.fact_extract import ExtractedFact, extract_facts
 from ingest.parser import ParsedDoc, parse_document
 from ingest.placeholder import replace_fact_with_placeholder, sanitize_forged_tokens
+from ingest.subject_key import normalize_subject_key
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +36,6 @@ class LoadResult:
     fact_count: int
     lightrag_doc_id: str | None
     ingest_status: str
-
-
-def _normalize_subject_key(key: str) -> str:
-    """Dedupe subject_key: strip dots/dashes and lowercase before the UNIQUE constraint."""
-    return key.strip().lower().replace(".", "").replace("-", "")
 
 
 def _sha256(text: str) -> str:
@@ -109,7 +105,7 @@ async def _upsert_subject(conn, fact: ExtractedFact) -> int:
               project_key  = COALESCE(EXCLUDED.project_key, fact_subjects.project_key)
         RETURNING id
         """,
-        _normalize_subject_key(fact.subject_key),
+        normalize_subject_key(fact.subject_key),
         fact.subject_type,
         display,
         project_key,
@@ -264,7 +260,7 @@ async def load_document(
             for i, chunk in enumerate(chunks):
                 for fact in facts or []:
                     key = (
-                        _normalize_subject_key(fact.subject_key),
+                        normalize_subject_key(fact.subject_key),
                         fact.fact_key,
                         fact.policy_key,
                         eff_from,

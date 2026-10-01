@@ -1,5 +1,4 @@
 """Conversation engine shell (Story 4.5, §6.1).
-
 RagRgreConvWorkflow wraps RagQueryWorkflow WITHOUT forking its 8 steps: the
 conv layer (ConvContext load -> slot extract -> transition -> routing SSE
 event -> CTA hint) runs as a thin LlamaIndex Workflow with 2 steps; the inner
@@ -37,8 +36,9 @@ from api.application.pipelines.workflow import (
     EventCallback,
     QueryRejected,
     RagQueryWorkflow,
-    training_retrieval_scope,
 )
+from api.application.services.project_context import ProjectContext
+from api.application.services.project_config import brand_token
 from api.application.services.conv_state import (
     conv_directive,
     get_context,
@@ -50,10 +50,7 @@ from api.application.services.output_sanitizer import (
     StreamingSanitizer,
     sanitize_answer_text,
 )
-from api.application.services.project_config import brand_token, default_known_projects
-from api.application.services.project_scope import is_training_scope
 from api.domain.services.conv_slots import extract_slots, lead_prefill_note
-from api.domain.services.project_redirect import detect_foreign_project, redirect_message
 from api.domain.services.route_intent import Intent, classify_intent
 from api.domain.value_objects.constants import SSE_EVENT_TOKEN
 
@@ -109,12 +106,9 @@ class ConvRunEv(Event):
     session_id: str | None
     as_of: str | None
     history: list[dict] | None
-    project_key: str | None
+    project_context: ProjectContext
     device_id: str | None
-    # G3-r6: named context project for training turns (default None keeps
-    # every existing construction site and normal-mode behavior unchanged).
-    training_context_project_key: str | None = None
-    known_projects: list[tuple[str, str]] | None = None
+    visible_limit: int | None = None
 
 
 class RagRgreConvWorkflow(Workflow):
@@ -178,8 +172,12 @@ class RagRgreConvWorkflow(Workflow):
         self._stream_released = []
         history = getattr(ev, "history", None) or []
         as_of = getattr(ev, "as_of", None)
-        project_key = getattr(ev, "project_key", None)
+        project_context: ProjectContext = getattr(ev, "project_context", None)
+        if not isinstance(project_context, ProjectContext):
+            raise ValueError("project_context is required")
+        project_key = project_context.project_key
         device_id = getattr(ev, "device_id", None)
+        visible_limit = getattr(ev, "visible_limit", None)
         conv = await _extract_and_transition(query, session_id, history, project_key, device_id)
         await ctx.store.set("conv", conv)
         # CTA hint gated §6.5: (d) uses the PREVIOUS answer review status
@@ -190,74 +188,22 @@ class RagRgreConvWorkflow(Workflow):
         )
         conv["lead_cta_hint"] = cta
         t0 = time.perf_counter()
-        # Cross-project guardrail (project-awareness wave): a question naming
-        # another KNOWN project must never be answered from this project's
-        # corpus, so detection runs BEFORE the inner (retrieval) workflow and
-        # short-circuits it below. The facade passes the live registry list;
-        # direct callers degrade to the static seed mirror without any I/O.
-        known_projects = getattr(ev, "known_projects", None)
-        if known_projects is None:
-            # Legacy /query path: no caller-supplied catalogue — degrade to the
-            # static seed mirror without any I/O. The GA core always supplies a
-            # fail-closed list (possibly empty), which is preserved as-is so an
-            # unresolved catalogue never triggers seed-based redirect detection.
-            known_projects = default_known_projects()
-        current_key = project_key or get_context(session_id, device_id).project_key
-        # FR-25 (revised): the cross-project redirect is a CUSTOMER funnel
-        # guardrail — a training lookup legitimately names real projects, and
-        # its answer is already scoped to the context project by the retrieval
-        # layer, so a redirect template must never short-circuit the search.
-        redirect = (
-            None
-            if is_training_scope(project_key)
-            else detect_foreign_project(query, current_key, known_projects)
-        )
         payload = {
             "intent": conv["intent"],
             "conv_state": conv["conv_state"],
             "panel_hint": _panel_hint(Intent(conv["intent"])),
             "lead_cta_hint": cta,
         }
-        if redirect is not None:
-            payload["project_redirect"] = redirect
         await self._emit(SSE_EVENT_ROUTING, payload)
-        if redirect is not None:
-            # Redirect turn: deterministic guidance replaces retrieval — no RAG
-            # leg ever runs, so sources/citations are empty by construction and
-            # no other project's data can leak into the answer.
-            sctx = get_context(session_id, device_id)
-            sctx.slots["last_answer_reviewed"] = False
-            note_useful_turn(sctx)
-            return StopEvent(
-                result={
-                    "answer": redirect_message(redirect["display_name"]),
-                    "sources": [],
-                    "facts": [],
-                    "images": [],
-                    "places": [],
-                    # Deterministic template with zero corpus claims: fully
-                    # trusted, so it neither needs review nor blocks the funnel.
-                    "confidence": "HIGH",
-                    "requires_review": False,
-                    "routing": {},
-                    "trace_id": "",
-                    "latency_ms": int((time.perf_counter() - t0) * 1000),
-                    "conv_state": conv["conv_state"],
-                    "conversation_directive": conv["directive"],
-                    "slots_prefill": conv["prefill_note"],
-                    "project_redirect": redirect,
-                }
-            )
         return ConvRunEv(
             conv=conv,
             query=query,
             session_id=session_id,
             as_of=as_of,
             history=history,
-            project_key=project_key,
+            project_context=project_context,
             device_id=device_id,
-            training_context_project_key=getattr(ev, "training_context_project_key", None),
-            known_projects=getattr(ev, "known_projects", None),
+            visible_limit=visible_limit,
         )
 
     @step()
@@ -276,10 +222,9 @@ class RagRgreConvWorkflow(Workflow):
             session_id=ev.session_id,
             as_of=ev.as_of,
             history=ev.history or [],
-            project_key=ev.project_key,
+            project_context=ev.project_context,
             device_id=ev.device_id,
-            training_context_project_key=getattr(ev, "training_context_project_key", None),
-            known_projects=getattr(ev, "known_projects", None),
+            visible_limit=getattr(ev, "visible_limit", None),
         )
         result: Any = None
         run_error: Exception | None = None
@@ -354,7 +299,7 @@ class RagRgreConvWorkflow(Workflow):
             # FR-25 (revised): the sales funnel metadata (persona directive +
             # slot prefill + CTA hint) must never decorate a training payload
             # (lookup assistant voice) — normal turns are byte-unchanged.
-            if is_training_scope(ev.project_key):
+            if ev.project_context.answer_mode == "training":
                 result["conversation_directive"] = None
                 result["slots_prefill"] = None
                 result["lead_cta_hint"] = None
@@ -379,32 +324,18 @@ class RagQueryPipelineConv:
         session_id: str | None = None,
         as_of: str | None = None,
         history: list[dict] | None = None,
-        project_key: str | None = None,
+        *,
+        project_context: ProjectContext,
         device_id: str | None = None,
         on_event: EventCallback | None = None,
-        training_context_project_key: str | None = None,
-        known_projects: list[tuple[str, str]] | None = None,
+        visible_limit: int | None = None,
     ) -> dict:
-        # One async registry read per request (B2/M1): binding the record makes
-        # the conv layer (brand_token, conv_directive) and the inner workflow
-        # (identity render, geo, media) DB-free for the whole request. A
-        # training turn binds the REAL context project (shared corpus), never
-        # the mode marker.
         from api.application.services.project_config import (  # noqa: PLC0415
             bound_request_project,
-            load_known_projects,
             load_project_registry_record,
         )
 
-        registry_key = training_retrieval_scope(project_key, training_context_project_key)
-        record = await load_project_registry_record(registry_key)
-        # Authoritative known-project list for the cross-project guardrail (M1).
-        # A caller-supplied catalogue (the GA core's fail-closed list, including
-        # an explicit empty one) MUST be reused verbatim; only legacy /query
-        # callers that pass None trigger the live registry read, which itself
-        # degrades to the seed mirror inside `load_known_projects`.
-        if known_projects is None:
-            known_projects = await load_known_projects()
+        record = await load_project_registry_record(project_context.project_key)
         with bound_request_project(record):
             wf = RagRgreConvWorkflow(on_event=on_event if on_event is not None else self._on_event)
             return await wf.run(
@@ -412,11 +343,74 @@ class RagQueryPipelineConv:
                 session_id=session_id,
                 as_of=as_of,
                 history=history or [],
-                project_key=project_key,
+                project_context=project_context,
                 device_id=device_id,
-                known_projects=known_projects,
-                training_context_project_key=training_context_project_key,
+                visible_limit=visible_limit,
             )
+
+async def build_project_redirect_payload(
+    query: str,
+    session_id: str | None,
+    history: list[dict] | None,
+    *,
+    project_context: ProjectContext,
+    device_id: str | None,
+    project_redirect: dict[str, str],
+) -> tuple[dict, dict]:
+    """Build the existing redirect result without invoking retrieval.
+
+    `/query` owns detection and calls this only after resolving its pinned
+    project but before quota reservation. Keeping the conversation transition
+    here preserves the session state/CTA behavior of a normal redirect turn.
+    """
+    if not isinstance(project_context, ProjectContext):
+        raise ValueError("project_context is required")
+    from api.application.services.project_config import (  # noqa: PLC0415
+        bound_request_project,
+        load_project_registry_record,
+    )
+    from api.domain.services.project_redirect import redirect_message  # noqa: PLC0415
+
+    record = await load_project_registry_record(project_context.project_key)
+    session_key = session_id or "anon"
+    with bound_request_project(record):
+        conv = await _extract_and_transition(
+            query, session_key, history or [], project_context.project_key, device_id
+        )
+    context = get_context(session_key, device_id)
+    requires_review = bool(conv["slots"].get("last_answer_reviewed"))
+    cta = maybe_lead_cta_hint(context, requires_review=requires_review)
+    note_useful_turn(context)
+    routing = {
+        "intent": conv["intent"],
+        "conv_state": conv["conv_state"],
+        "panel_hint": _panel_hint(Intent(conv["intent"])),
+        "lead_cta_hint": cta,
+        "project_redirect": project_redirect,
+    }
+    payload = {
+        "answer": redirect_message(project_redirect["display_name"]),
+        "sources": [],
+        "facts": [],
+        "images": [],
+        "videos": [],
+        "places": [],
+        "confidence": "HIGH",
+        "requires_review": False,
+        "routing": {"intent": conv["intent"]},
+        "trace_id": "",
+        "latency_ms": 0,
+        "conv_state": conv["conv_state"],
+        "conversation_directive": conv["directive"],
+        "slots_prefill": conv["prefill_note"],
+        "lead_cta_hint": cta,
+        "project_redirect": project_redirect,
+        "status": "completed",
+        "history_persisted": False,
+        "quota": None,
+    }
+    return payload, routing
+
 
 
 __all__ = [

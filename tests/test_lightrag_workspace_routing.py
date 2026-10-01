@@ -1,8 +1,7 @@
 """Unit tests for LightRAG per-workspace routing across ingest, query, and init.
 
-Requirements:
-- project_workspace('soleil') returns the configured soleil workspace;
-  'camellia' and None return None.
+- project_workspace('soleil') returns the configured workspace;
+  camellia and None use the default; other active keys are isolated deterministically.
 - get_lightrag(workspace) builds and caches one instance per workspace:
   same workspace twice -> same object; different workspaces -> distinct objects;
   LightRAG constructor receives the workspace kwarg when provided.
@@ -43,21 +42,15 @@ def _reset_lightrag_instances():
 
 
 def test_project_workspace_routing(monkeypatch):
-    """project_workspace('soleil') returns the configured soleil workspace;
-
-    'camellia' and None return None.
-    """
+    """Real non-default keys receive deterministic isolated workspaces."""
     from ingest.lightrag_init import project_workspace
     from api.infrastructure.config.config import get_settings
 
-    # Verify default config value
     settings = get_settings()
     assert project_workspace("soleil") == settings.lightrag_workspace_soleil
     assert project_workspace("camellia") is None
     assert project_workspace(None) is None
-    assert project_workspace("random_project") is None
-
-    # Verify dynamic/monkeypatched config value
+    assert project_workspace("random_project") == "project_random_project"
     monkeypatch.setattr(settings, "lightrag_workspace_soleil", "custom_soleil_ws", raising=False)
     assert project_workspace("soleil") == "custom_soleil_ws"
 
@@ -83,6 +76,29 @@ def test_project_workspace_rejects_default_namespace_value(monkeypatch, bad_ws):
     monkeypatch.setattr(settings, "lightrag_workspace_soleil", bad_ws, raising=False)
     with pytest.raises(ValueError, match="shared default namespace"):
         project_workspace("soleil")
+
+
+def test_project_workspace_generic_colliding_with_soleil_workspace_fails_closed(monkeypatch):
+    """project_<key> colliding with the configured Soleil workspace must fail closed."""
+    from ingest.lightrag_init import project_workspace
+    from api.infrastructure.config.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "lightrag_workspace_soleil", "project_collide", raising=False)
+    with pytest.raises(ValueError, match="collides with configured workspace"):
+        project_workspace("collide")
+
+
+def test_project_workspace_generic_colliding_with_working_dir_fails_closed(monkeypatch):
+    """Opposite control + second reserved namespace: working-dir collision also fails closed."""
+    from ingest.lightrag_init import project_workspace
+    from api.infrastructure.config.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "lightrag_workspace", "project_other", raising=False)
+    with pytest.raises(ValueError, match="collides with configured workspace"):
+        project_workspace("other")
+    assert project_workspace("unrelated_key") == "project_unrelated_key"
 
 
 # ==============================================================================

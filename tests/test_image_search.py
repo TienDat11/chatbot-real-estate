@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+from api.domain.services.unit_code import extract_unit_codes, is_unit_price_query, normalize_unit_code, unit_code_from_subject_suffix
 import api.application.services.image_search as img
 
 
@@ -50,6 +51,7 @@ def _row(unit=None, unit_type=None, image_id="img-1", score=0.8, **overrides):
         "width": 1200,
         "height": 900,
         "linked_subject_key": f"unit:{unit}" if unit else None,
+        "project_key": "camellia",
         "metadata": {"type": unit_type} if unit_type else {},
         "score": score,
     }
@@ -93,28 +95,68 @@ async def _fake_rls(rows=()):
     ],
 )
 def test_normalize_unit_code(raw, expected):
-    assert img._normalize_unit_code(raw) == expected
+    assert normalize_unit_code(raw) == expected
 
 
 def test_normalize_unit_code_does_not_collapse_ch12_and_ch12a():
-    assert img._normalize_unit_code("CH-12") == "CH-12"
-    assert img._normalize_unit_code("CH-12A") == "CH-12A"
-    assert img._normalize_unit_code("CH-12") != img._normalize_unit_code("CH-12A")
+    assert normalize_unit_code("CH-12") == "CH-12"
+    assert normalize_unit_code("CH-12A") == "CH-12A"
+    assert normalize_unit_code("CH-12") != normalize_unit_code("CH-12A")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("ch03", "CH-03"),
+        ("ch11", "CH-11"),
+        ("ch-3", "CH-03"),
+        ("CH-03", "CH-03"),
+        ("ch13a", "CH-13A"),
+        ("2pn", None),
+        ("", None),
+    ],
+)
+def test_unit_code_from_subject_suffix(raw, expected):
+    assert unit_code_from_subject_suffix(raw) == expected
+
+
+def test_normalize_unit_code_rejects_dash_stripped_suffix():
+    assert normalize_unit_code("ch03") is None
+    assert normalize_unit_code("CH-03") == "CH-03"
+    assert normalize_unit_code("CH-3") == "CH-03"
 
 
 def test_extract_unit_codes_is_case_insensitive_and_pads():
-    assert img._extract_unit_codes("căn CH-3 view biển") == ["CH-03"]
-    assert img._extract_unit_codes("căn ch-3a view biển") == ["CH-03A"]
+    assert extract_unit_codes("căn CH-3 view biển") == ["CH-03"]
+    assert extract_unit_codes("căn ch-3a view biển") == ["CH-03A"]
 
 
 def test_extract_unit_codes_no_unit_returns_empty():
-    assert img._extract_unit_codes("dự án view biển 2PN") == []
+    assert extract_unit_codes("dự án view biển 2PN") == []
 
 
 def test_extract_unit_codes_does_not_conflate_ch12_and_ch12a():
-    assert img._extract_unit_codes("căn CH-12 view biển") == ["CH-12"]
-    assert img._extract_unit_codes("căn CH-12A view biển") == ["CH-12A"]
-    assert "CH-12A" not in img._extract_unit_codes("căn CH-12 view biển")
+    assert extract_unit_codes("căn CH-12 view biển") == ["CH-12"]
+    assert extract_unit_codes("căn CH-12A view biển") == ["CH-12A"]
+    assert "CH-12A" not in extract_unit_codes("căn CH-12 view biển")
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("Giá căn CH-13A?", True),
+        ("Gia căn CH-13A?", True),
+        ("Bao nhiêu tiền căn CH-13A?", True),
+        ("Bảng giá CH-13A", True),
+        ("Diện tích căn CH-13A?", False),
+        ("Giá trị căn CH-13A?", False),
+        ("Tỷ lệ căn CH-13A?", False),
+        ("công ty căn CH-13A?", False),
+        ("Bao nhiêu đồng căn CH-13A?", True),
+    ],
+)
+def test_is_unit_price_query_recognizes_only_money_price_intent(query, expected):
+    assert is_unit_price_query(query) is expected
 
 
 # --- row shaping helpers ------------------------------------------------------
@@ -135,12 +177,30 @@ def test_row_to_image_contract_shape():
         "score",
         "match",
         "reason",
+        "project_key",
+        "unit_code",
     }
     assert out["image_id"] == "x"
     assert out["kind"] == "matbang"
     assert out["score"] == 0.9
     assert out["match"] == "exact"
     assert out["reason"] == "Đúng căn CH-03 bạn hỏi"
+    assert out["project_key"] == "camellia"
+    assert out["unit_code"] == "CH-03"
+
+
+def test_row_to_image_uses_database_project_and_normalized_unit_provenance():
+    row = _row(
+        unit="CH-3a",
+        image_id="scoped-row",
+        project_key="soleil",
+        metadata={"unit": "CH-3A"},
+    )
+
+    out = img._row_to_image(row, 0.9, "exact", None, project_key="camellia")
+
+    assert out["project_key"] == "soleil"
+    assert out["unit_code"] == "CH-03A"
 
 
 def test_meta_of_parses_json_string_and_tolerates_garbage():
@@ -881,6 +941,7 @@ def _board_row(page: int) -> dict:
         "width": 1200,
         "height": 900,
         "linked_subject_key": None,
+        "project_key": "camellia",
         "metadata": {"page": page},
     }
 
@@ -894,7 +955,8 @@ def test_project_scoped_sql_contracts_never_fallback_cross_project():
         img.PRICE_BOARD_BY_PROJECT_QUERY,
     ):
         assert "i.project_key =" in sql
-
+        assert "i.project_key," in sql
+        assert "i.linked_subject_key, i.project_key, i.metadata" in sql
 
 def test_image_query_project_scoped_sql_contract_embedding_identity():
     """The scoped vector pass must filter on the embedding identity (model, dims).
@@ -978,6 +1040,8 @@ def test_fetch_price_board_images_returns_all_pages_shaped(monkeypatch):
         "score",
         "match",
         "reason",
+        "project_key",
+        "unit_code",
     }
     assert all(i["match"] == "semantic" for i in out)
     assert all(i["score"] == 1.0 for i in out)

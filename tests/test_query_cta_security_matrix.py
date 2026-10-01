@@ -7,6 +7,8 @@ import secrets
 import pytest
 from fastapi.testclient import TestClient
 
+from api.application.ports.project_registry import ProjectRegistryRecord
+
 from api.application.services.anon_identity import (
     AnonymousIdentityService,
     mint_anonymous_identity_token,
@@ -82,6 +84,21 @@ def route_harness(monkeypatch):
 
     async def resolve(project_key, *, active_projects=None):
         return project_key or "camellia"
+
+    async def _active_records():
+        return [
+            ProjectRegistryRecord(
+                project_key=key, ten_thuong_mai=name, ten_phap_ly=None,
+                vi_tri=None, hotline=None, location=None, geo_center_lat=None,
+                geo_center_lng=None, is_hot=False, status="active",
+            )
+            for key, name in (("camellia", "The Camellia Son Tra - Da Nang"), ("soleil", "The Soleil Đà Nẵng"))
+        ]
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _active_records,
+    )
 
     async def get_cta_state(**scope):
         calls.append(scope)

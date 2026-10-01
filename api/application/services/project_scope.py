@@ -15,21 +15,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from api.application.ports.project_registry import ProjectRegistryRecord
 
-# Story 8.5/G3: publish endpoint validates the same pattern — path-traversal
 # guard plus a bounded, URL-safe namespace shape.
 PROJECT_KEY_PATTERN = re.compile(r"^[a-z0-9_]{2,40}$")
 
-# --- FR-25 (revised): training rides the SHARED project corpus -----------------
-# ``answer_mode="training"`` resolves (in main.py) to this reserved marker.
-# It is NEVER a data scope: retrieval/facts always ride the real context
-# project (``training_context_project_key`` — e.g. 'camellia'), so project
-# isolation stays absolute. The marker only selects the detailed project
-# prompt profile and suppresses the customer sales funnel (persona/CTA).
-# Every downstream component detects training mode ONLY through
-# ``is_training_scope`` — no module may re-spell the literal or invent a
-# parallel flag, so the routing and the prompt profile can never disagree
-# about what "training" means.
+# Training prompts use ProjectContext.answer_mode; the reserved marker remains
+# rejected as a client-supplied project key.
 TRAINING_PROJECT_KEY = "_training"
 
 # Reserved keys (D5, ISSUE-01): ``_legacy`` (untagged corpus awaiting review)
@@ -47,15 +39,13 @@ class ProjectScopeError(ValueError):
     """Raised when a project_key is invalid or the active-project rule fails."""
 
 
-def is_training_scope(project_key: str | None) -> bool:
-    """True when a resolved scope is the training mode marker namespace."""
-    return project_key == TRAINING_PROJECT_KEY
+
+
+
 
 
 @dataclass(frozen=True)
 class ActiveProject:
-    """One row of project_config where status='active'."""
-
     project_key: str
     ten_thuong_mai: str
 
@@ -75,18 +65,17 @@ def validate_project_key(project_key: str) -> None:
         raise ProjectScopeError(f"project_key '{project_key}' là key dành riêng")
 
 
-async def fetch_active_projects() -> list[ActiveProject]:
-    """Return all active project_config rows; empty on any failure (degraded).
-
-    Reads through the async ProjectRegistryPort (one adapter for every
-    registry read, M1; asyncpg kwargs connect, m8). Best-effort with a short
-    timeout: a dead DB must not take down /query or /api/lead — the caller
-    applies the default-rule on whatever comes back.
-    """
+async def fetch_active_project_records() -> list[ProjectRegistryRecord]:
+    """Fetch full active rows for request snapshots needing picker metadata."""
     from api.infrastructure.dependencies import get_project_registry  # noqa: PLC0415
 
-    records = await get_project_registry().fetch_active_projects()
-    return [ActiveProject(r.project_key, r.ten_thuong_mai or "") for r in records]
+    return await get_project_registry().fetch_active_projects()
+
+
+async def fetch_active_projects() -> list[ActiveProject]:
+    """Return active project identities used by scope resolution."""
+    records = await fetch_active_project_records()
+    return [ActiveProject(row.project_key, row.ten_thuong_mai or "") for row in records]
 
 
 async def resolve_project_key(
@@ -124,9 +113,8 @@ __all__ = [
     "PROJECT_CHOICE_REQUIRED",
     "TRAINING_PROJECT_KEY",
     "ProjectScopeError",
-    "is_training_scope",
     "ActiveProject",
     "validate_project_key",
     "fetch_active_projects",
-    "resolve_project_key",
+    "fetch_active_project_records",
 ]

@@ -331,6 +331,95 @@ def test_before_cache_crash_uses_replay_only(rig):
     assert len(rig.history.persisted) == 1
 
 
+@pytest.mark.parametrize("query,status,project,rag_calls", [
+    ("Camellia giá bao nhiêu?", "resolved", "camellia", 1),
+    ("Dự án nào có hồ bơi?", "unresolved", None, 0),
+    ("Camellia Soleil", "ambiguous", None, 0),
+])
+def test_replay_outcome_bytes_and_scope_match_first_outcome(
+        rig, monkeypatch, query, status, project, rag_calls):
+    """Level-B: the replay served on the retry is the SAME outcome as the first pass.
+
+    Pass 1 runs the core and persists history, then dies before the event row is
+    cached. Pass 2 therefore has no cached outcome and no provider receipt, so the
+    processor MUST go through `recover_source_event`. This asserts the replay is
+    byte-identical and scope-identical to the first outcome, is reconstructed from
+    the persisted envelope, and never re-runs resolution, pipeline, or persistence.
+    """
+    ran, replayed = [], []
+
+    async def run_spy(request):
+        outcome = await GlobalAssistantService.run(rig.core, request)
+        ran.append(outcome)
+        return outcome
+
+    async def recover_spy(request):
+        outcome = await GlobalAssistantService.recover_source_event(rig.core, request)
+        replayed.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(rig.core, "run", AsyncMock(side_effect=run_spy))
+    monkeypatch.setattr(rig.core, "recover_source_event", AsyncMock(side_effect=recover_spy))
+    rig.store.events[1].text = query
+
+    rig.store.fail_once = "cache"
+    assert asyncio.run(rig.processor.process(1)) == "retryable"
+    assert len(ran) == 1 and replayed == []
+    # Nothing reached the provider and no outcome reached the event row.
+    assert rig.store.events[1].assistant_outcome is None
+    assert rig.store.events[1].outbound_message_id is None
+    rig.sender.send_text.assert_not_called()
+
+    first = ran[0]
+    first_bytes = first.answer.encode("utf-8")
+    assert first.resolution_status == status
+    assert first.project_key == project
+    assert first.replayed is False
+    # What pass 1 emitted is exactly what it persisted.
+    assert rig.history.persisted[0]["assistant_content"] == first.answer
+    envelope = rig.history.persisted[0]["assistant_meta"]["ga_outcome"]
+    assert envelope["answer"].encode("utf-8") == first_bytes
+    assert envelope["resolution_status"] == status
+    assert envelope["project_key"] == project
+
+    assert asyncio.run(rig.processor.process(1)) == "done"
+    assert len(ran) == 1, "core re-ran on the replayed pass"
+    assert len(replayed) == 1
+    replay = replayed[0]
+    replay_bytes = replay.answer.encode("utf-8")
+
+    assert replay.replayed is True
+    assert replay.rag_ran is False
+    assert first_bytes == replay_bytes
+    assert first.resolution_status == replay.resolution_status == status
+    assert first.project_key == replay.project_key == project
+    assert first.resolution_source == replay.resolution_source
+    assert first.candidates == replay.candidates
+
+    # Served from cache/history: no second resolution, pipeline, or persistence.
+    assert rig.core.run.await_count == 1
+    assert rig.core.recover_source_event.await_count == 1
+    assert rig.core.prepare_turn.await_count == 1
+    assert rig.catalogue.await_count == 1
+    assert rig.factory.call_count == rag_calls
+    assert rig.pipeline.run.await_count == rag_calls
+    assert len(rig.history.persisted) == 1
+    assert rig.admission.calls == [
+        (rig.store.events[1].identity_key, rig.store.events[1].source_event_key)] * 2
+
+    # Envelope written on the replay pass is the first outcome, byte for byte.
+    event = rig.store.events[1]
+    assert event.assistant_outcome == {"answer": first.answer, "resolution_status": status,
+                                       "project_key": project, "meta": {}}
+    assert event.assistant_outcome["answer"].encode("utf-8") == replay_bytes
+    assert event.status == "done"
+    assert event.outbound_message_id == "provider-1"
+
+    # The single outbound send carried the replayed bytes, not a re-generated answer.
+    rig.sender.send_text.assert_awaited_once_with(CHAT, first.answer)
+    assert rig.sender.send_text.call_args.args[1].encode("utf-8") == replay_bytes
+
+
 def test_lost_receipt_ack_never_runs_on_retry(rig):
     original = rig.admission
 
@@ -458,27 +547,30 @@ def test_brake_is_transport_only_and_cached(rig):
 
 @pytest.mark.parametrize("size", [2000, 2001])
 def test_bounded_answer_stable_on_retry(rig, size):
-    answer = "ấ" * size
+    """P0-05: the pipeline now applies the visible budget itself, so the mocked
+    facade returns an ALREADY bounded answer. The processor's own `_bound_visible`
+    is a no-op and the retry still sees the identical bytes."""
+    answer = _bound_visible("ấ" * size, 2000)
     rig.pipeline.run.return_value = {"answer": answer}
     rig.sender.send_text.side_effect = RuntimeError("private")
     assert asyncio.run(rig.processor.process(1)) == "retryable"
-    expected = _bound_visible(answer, 2000)
     rig.sender.send_text.side_effect = None
     assert asyncio.run(rig.processor.process(1)) == "done"
-    assert [call.args[1] for call in rig.sender.send_text.call_args_list] == [expected, expected]
-    assert rig.history.persisted[0]["assistant_content"] == expected
+    assert [call.args[1] for call in rig.sender.send_text.call_args_list] == [answer, answer]
+    assert rig.history.persisted[0]["assistant_content"] == answer
 
 
 def test_byte_identity_persisted_returned_sent_matches_bound(rig):
-    """For an answer exceeding 2000 chars, persisted == returned == sent are byte-identical."""
-    answer = "ấ" * 2001
+    """For an answer the pipeline truncated to the visible budget, persisted ==
+    returned == sent are byte-identical, and that string is the bounded one."""
+    answer = _bound_visible("ấ" * 2001, 2000)
     rig.pipeline.run.return_value = {"answer": answer}
     assert asyncio.run(rig.processor.process(1)) == "done"
     persisted = rig.history.persisted[0]["assistant_content"]
     sent = rig.sender.send_text.call_args.args[1]
     cached = rig.store.events[1].assistant_outcome["answer"]
-    expected = _bound_visible(answer, 2000)
-    assert persisted == sent == cached == expected
+    assert persisted == sent == cached == answer
+    assert len(answer) <= 2000
 
 
 @pytest.mark.parametrize("authorization", ["active", "revoked", "outage"])
@@ -618,3 +710,5 @@ def test_open_demo_technical_brake_still_works(rig):
     assert rig.store.authorization_calls == []
     assert rig.history.persisted == []
     assert rig.store.events[1].assistant_outcome["resolution_status"] == "technical_brake"
+
+

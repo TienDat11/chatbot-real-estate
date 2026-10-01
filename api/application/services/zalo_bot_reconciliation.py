@@ -29,10 +29,12 @@ class ZaloRuntime:
         while not self.stopping and not self.processor.halted and self.settings.zalo_bot_enabled:
             # A wake during the sweep remains set for the following wait.
             self.signal.clear()
+
             try:
-                exhausted, cleaned = await self.store.maintain()
-                if exhausted or cleaned:
-                    logger.info("ZALO_MAINTENANCE exhausted=%s cleaned=%s", exhausted, cleaned)
+                if bool(getattr(self.settings, "zalo_bot_maintenance_enabled", True)):
+                    exhausted, cleaned = await self.store.maintain()
+                    if exhausted or cleaned:
+                        logger.info("ZALO_MAINTENANCE exhausted=%s cleaned=%s", exhausted, cleaned)
                 if self.stopping or self.processor.halted or not self.settings.zalo_bot_enabled:
                     break
                 candidates = await self.store.due_candidates()

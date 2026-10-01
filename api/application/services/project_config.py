@@ -57,14 +57,6 @@ _CAMELLIA_IDENTITY: dict[str, str] = {
 # time. {project} is the project_key itself (short stable namespace).
 _PLACEHOLDERS = ("ten_thuong_mai", "ten_phap_ly", "vi_tri", "hotline", "project")
 
-# Seed-mirror of the active rows in db/seed/project_config.sql (same pattern as
-# _CAMELLIA_IDENTITY): zero-I/O detection vocabulary for the cross-project
-# guardrail when the registry read degrades, and the default for direct
-# workflow callers/tests that never touch the DB.
-_SEED_ACTIVE_PROJECTS: tuple[tuple[str, str], ...] = (
-    ("camellia", "The Camellia Son Tra - Da Nang"),
-    ("soleil", "The Soleil Đà Nẵng"),
-)
 
 
 # --- per-request registry snapshot (B2: one async read, zero sync reads) -----
@@ -147,12 +139,12 @@ def bound_request_project(
 
 
 def identity_from_record(record: ProjectRegistryRecord) -> dict[str, str]:
-    """Identity fields of a record with per-field Camellia fallback (NULL col)."""
+    """Return only identity claims explicitly present in the registry row."""
+    fields = ("ten_thuong_mai", "ten_phap_ly", "vi_tri", "hotline")
     return {
-        "ten_thuong_mai": record.ten_thuong_mai or _CAMELLIA_IDENTITY["ten_thuong_mai"],
-        "ten_phap_ly": record.ten_phap_ly or _CAMELLIA_IDENTITY["ten_phap_ly"],
-        "vi_tri": record.vi_tri or _CAMELLIA_IDENTITY["vi_tri"],
-        "hotline": record.hotline or _CAMELLIA_IDENTITY["hotline"],
+        field: value
+        for field in fields
+        if isinstance((value := getattr(record, field)), str) and value.strip()
     }
 
 
@@ -162,25 +154,19 @@ def default_identity() -> dict[str, str]:
 
 
 def fetch_project_identity(project_key: str | None = None) -> dict[str, str]:
-    """Return identity fields for a project; Camellia defaults on any failure.
-
-    ``project_key`` None resolves to DEFAULT_PROJECT_KEY so legacy callers keep
-    the Camellia identity. Inside a request-bound snapshot the registry record
-    is used directly (or the defaults when the async read degraded) and the DB
-    is never touched. Outside it, the registry row read is a short synchronous
-    psycopg2 best-effort kept for sync callers (scripts, unit-test seams).
-    """
+    """Return registry identity without cross-project Camellia substitution."""
     key = project_key or DEFAULT_PROJECT_KEY
+    fallback = default_identity() if key == DEFAULT_PROJECT_KEY else {}
     if request_project_snapshot_bound():
         record = request_project_snapshot()
         if record is not None and record.project_key == key:
             return identity_from_record(record)
-        return default_identity()
+        return fallback
     try:
         import psycopg2
     except ImportError:
-        logger.warning("psycopg2 unavailable; using default project identity")
-        return default_identity()
+        logger.warning("psycopg2 unavailable; using empty identity for %s", key)
+        return fallback
     try:
         with psycopg2.connect(settings.pg_dsn_sync, connect_timeout=2) as conn:
             with conn.cursor() as cur:
@@ -191,17 +177,18 @@ def fetch_project_identity(project_key: str | None = None) -> dict[str, str]:
                 )
                 row = cur.fetchone()
         if row is None:
-            logger.warning("project_config row missing for %s; using defaults", key)
-            return default_identity()
+            logger.warning("project_config row missing for %s", key)
+            return fallback
         return {
-            "ten_thuong_mai": row[0] or _CAMELLIA_IDENTITY["ten_thuong_mai"],
-            "ten_phap_ly": row[1] or _CAMELLIA_IDENTITY["ten_phap_ly"],
-            "vi_tri": row[2] or _CAMELLIA_IDENTITY["vi_tri"],
-            "hotline": row[3] or _CAMELLIA_IDENTITY["hotline"],
+            field: value
+            for field, value in zip(
+                ("ten_thuong_mai", "ten_phap_ly", "vi_tri", "hotline"), row
+            )
+            if isinstance(value, str) and value.strip()
         }
     except Exception as exc:  # noqa: BLE001 — registry read is best-effort
-        logger.warning("project_config identity read failed (%s); using defaults", exc)
-        return default_identity()
+        logger.warning("project_config identity read failed (%s)", exc)
+        return fallback
 
 
 def render_template(text: str, project_key: str | None = None) -> str:
@@ -334,43 +321,8 @@ def project_catalogue_from_records(
     return projects
 
 
-def default_known_projects() -> list[tuple[str, str]]:
-    """Copy of the static seed-mirror (key, name) pairs — zero-I/O vocabulary.
-
-    Used by direct workflow callers (tests, scripts) that bypass the facade's
-    per-request ``load_known_projects`` registry read; production always passes
-    the live list through so this mirror only ever serves degraded turns.
-    """
-    return list(_SEED_ACTIVE_PROJECTS)
 
 
-async def load_known_projects() -> list[tuple[str, str]]:
-    """(project_key, ten_thuong_mai) pairs feeding the cross-project guardrail.
-
-    The live registry is the single source of truth (one async port read per
-    request, same adapter as every other registry consumer); an empty or
-    failed read degrades to the static seed mirror so the guardrail never
-    silently disables when the DB blips mid-session.
-    """
-    active: list[Any] = []
-    try:
-        from api.application.services.project_scope import fetch_active_projects  # noqa: PLC0415
-
-        active = await fetch_active_projects()
-    except Exception:  # noqa: BLE001 — best-effort like every registry read
-        logger.warning("known-projects read failed; using static seed mirror", exc_info=True)
-    pairs = [(p.project_key, p.ten_thuong_mai) for p in active]
-    return pairs or list(_SEED_ACTIVE_PROJECTS)
-
-
-async def load_project_catalogue() -> list[dict[str, Any]]:
-    """Async catalogue read for the 422 PROJECT_SCOPE body (M12).
-
-    ``fetch_projects`` is the legacy sync seam (psycopg2, unit-test patched),
-    so the async caller offloads it to a worker thread: the event loop never
-    blocks on the sync driver while the monkeypatch seam stays intact.
-    """
-    return await asyncio.to_thread(fetch_projects)
 
 
 __all__ = [
@@ -383,10 +335,6 @@ __all__ = [
     "brand_token",
     "fetch_projects",
     "project_catalogue_from_records",
-    "load_project_catalogue",
-    "default_known_projects",
-    "load_known_projects",
-    "load_project_registry_record",
     "bound_request_project",
     "request_project_snapshot",
     "request_project_snapshot_bound",

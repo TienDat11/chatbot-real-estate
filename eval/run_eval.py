@@ -21,6 +21,14 @@ from typing import Any, Optional
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from api.application.services.project_context import ProjectContext  # noqa: E402
+
+# Fixed project names are eval inputs, not production authorization or routing authority.
+_DRY_EVAL_CATALOGUE = (
+    ("camellia", "The Camellia Son Tra - Da Nang"),
+    ("soleil", "The Soleil Đà Nẵng"),
+)
+
 # Settings — prefer ingest/config.py (single source of truth); fall back to raw env when it is unavailable.
 try:  # pragma: no cover
     from ingest.config import Settings as IngestSettings  # type: ignore
@@ -83,11 +91,69 @@ async def run_pipeline(
     question: str,
     as_of: Optional[str],
     settings: EvalSettings,
+    *,
+    project_context: ProjectContext,
     history: Optional[list] = None,
 ) -> dict:
     """Invoke the pipeline through the RagQueryPipeline facade's run() contract."""
-    return await pipeline.run(query=question, as_of=as_of, history=history)
+    return await pipeline.run(
+        query=question, as_of=as_of, history=history, project_context=project_context
+    )
 
+
+async def _active_catalogue(dry: bool) -> tuple[tuple[str, str], ...]:
+    if dry:
+        return _DRY_EVAL_CATALOGUE
+    from api.application.services.project_scope import fetch_active_projects
+
+    try:
+        projects = await fetch_active_projects()
+    except Exception as exc:
+        raise RuntimeError(f"active project catalogue read failed: {exc}") from exc
+    return tuple((p.project_key, p.ten_thuong_mai) for p in projects if p.ten_thuong_mai)
+
+
+def _preflight_contexts(
+    rows: list[dict[str, Any]],
+    catalogue: tuple[tuple[str, str], ...],
+    project_key: Optional[str],
+    *,
+    dataset_project_key: Optional[str] = None,
+) -> list[ProjectContext]:
+    if not catalogue:
+        raise RuntimeError("active project catalogue is empty; refusing unscoped eval")
+    contexts: list[ProjectContext] = []
+    if dataset_project_key and project_key and project_key != dataset_project_key:
+        row_id = rows[0].get("id", "?") if rows else "?"
+        raise RuntimeError(
+            f"[{row_id}] dataset project scope {dataset_project_key!r} conflicts with --project-key {project_key!r}"
+        )
+    for row in rows:
+        row_id = row.get("id", "?")
+        row_project_key = row.get("project_key")
+        if dataset_project_key and row_project_key is not None and row_project_key != dataset_project_key:
+            raise RuntimeError(
+                f"[{row_id}] row project scope {row_project_key!r} conflicts with dataset scope {dataset_project_key!r}"
+            )
+        selected_key = row_project_key if row_project_key is not None else (dataset_project_key or project_key)
+        if not selected_key:
+            raise RuntimeError(f"[{row_id}] missing project scope; pass --project-key")
+        try:
+            contexts.append(
+                ProjectContext(
+                    project_key=selected_key,
+                    answer_mode="normal",
+                    active_catalogue=catalogue,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            if isinstance(selected_key, str) and selected_key in {"tower-a", "tower-b"}:
+                raise RuntimeError(
+                    f"[{row_id}] Tower {selected_key[-1].upper()} legacy fixture is not runnable: "
+                    "the hyphenated key fails the current ProjectContext validator"
+                )
+            raise RuntimeError(f"[{row_id}] invalid project scope {selected_key!r}: {exc}") from exc
+    return contexts
 
 def _build_pipeline(settings: EvalSettings) -> RagQueryPipeline:
     """Build the real pipeline (facade takes no settings)."""
@@ -349,7 +415,14 @@ class MockPipeline:
     def __init__(self, golden: dict[str, Any]) -> None:
         self.golden = golden
 
-    async def run(self, query: str, as_of: Optional[str] = None, **_: Any) -> dict:
+    async def run(
+        self,
+        query: str,
+        as_of: Optional[str] = None,
+        *,
+        project_context: ProjectContext,
+        **_: Any,
+    ) -> dict:
         q = self._find_question(query)
         if q is None:
             # --inject --dry: mock blocks injection-shaped prompts so the harness can measure.
@@ -532,6 +605,8 @@ async def evaluate_question(
     q: dict[str, Any],
     settings: EvalSettings,
     dry: bool,
+    *,
+    project_context: ProjectContext,
 ) -> QuestionResult:
     res = QuestionResult(
         id=q.get("id", "?"),
@@ -542,7 +617,10 @@ async def evaluate_question(
     start = time.perf_counter()
     try:
         payload = await asyncio.wait_for(
-            run_pipeline(pipeline, q["question"], q.get("as_of"), settings),
+            run_pipeline(
+                pipeline, q["question"], q.get("as_of"), settings,
+                project_context=project_context,
+            ),
             timeout=settings.pipeline_timeout_s,
         )
     except Exception as exc:  # noqa: BLE001 — a pipeline failure must not crash eval
@@ -711,7 +789,12 @@ def _persona_mock_answer(q: dict) -> str:
     return a
 
 
-async def eval_persona(pipeline: Any, settings: EvalSettings, dry: bool) -> dict:
+async def eval_persona(
+    pipeline: Any,
+    settings: EvalSettings,
+    dry: bool,
+    project_contexts: list[ProjectContext],
+) -> dict:
     """Story 4.7: run golden_persona_v1.json, regex/structure checks, no judge.
 
     Gate §8.4: pass khi 15/15, hoặc 14/15 + waiver (waiver do người chạy quyết
@@ -720,7 +803,7 @@ async def eval_persona(pipeline: Any, settings: EvalSettings, dry: bool) -> dict
     path = REPO_ROOT / "eval" / "golden_persona_v1.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     rows: list[dict] = []
-    for q in data["questions"]:
+    for q, project_context in zip(data["questions"], project_contexts):
         start = time.perf_counter()
         if dry:
             payload = {"answer": _persona_mock_answer(q)}
@@ -732,6 +815,7 @@ async def eval_persona(pipeline: Any, settings: EvalSettings, dry: bool) -> dict
                         q["question"],
                         q.get("as_of"),
                         settings,
+                        project_context=project_context,
                         history=_persona_history(q),
                     ),
                     timeout=settings.pipeline_timeout_s,
@@ -792,16 +876,24 @@ def _pass_rate(results: list[QuestionResult]) -> dict[str, float]:
 
 
 # Injection eval (--inject)
-async def eval_injection(pipeline: Any, settings: EvalSettings, dry: bool) -> dict[str, Any]:
+async def eval_injection(
+    pipeline: Any,
+    settings: EvalSettings,
+    dry: bool,
+    project_contexts: list[ProjectContext],
+) -> dict[str, Any]:
     path = REPO_ROOT / "eval" / "injection_test_vn.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     ok_threshold = float(data.get("_meta", {}).get("ok_threshold_pct", 90))
     rows: list[dict[str, Any]] = []
-    for p in data["prompts"]:
+    for p, project_context in zip(data["prompts"], project_contexts):
         start = time.perf_counter()
         try:
             payload = await asyncio.wait_for(
-                run_pipeline(pipeline, p["prompt"], None, settings),
+                run_pipeline(
+                    pipeline, p["prompt"], None, settings,
+                    project_context=project_context,
+                ),
                 timeout=settings.pipeline_timeout_s,
             )
             rejected = is_rejected(payload)
@@ -900,8 +992,19 @@ def _print_failures(results: list[QuestionResult]) -> None:
 async def amain(args: argparse.Namespace, settings: EvalSettings) -> int:
     dry = args.dry
     if getattr(args, "persona", False):
+        path = REPO_ROOT / "eval" / "golden_persona_v1.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        rows = data["questions"]
+        catalogue = await _active_catalogue(dry)
+        try:
+            contexts = _preflight_contexts(
+                rows, catalogue, args.project_key,
+                dataset_project_key=data.get("project_key"),
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(f"persona preflight: {exc}") from exc
         pipeline: Any = MockPipeline({"questions": []}) if dry else _build_pipeline(settings)
-        result = await eval_persona(pipeline, settings, dry)
+        result = await eval_persona(pipeline, settings, dry, contexts)
         for row in result["rows"]:
             mark = "PASS" if row["pass"] else "FAIL"
             print(
@@ -919,8 +1022,12 @@ async def amain(args: argparse.Namespace, settings: EvalSettings) -> int:
         return 0 if result["pass"] else 1
 
     if args.inject:
+        path = REPO_ROOT / "eval" / "injection_test_vn.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        catalogue = await _active_catalogue(dry)
+        contexts = _preflight_contexts(data["prompts"], catalogue, args.project_key)
         pipeline: Any = MockPipeline({"questions": []}) if dry else _build_pipeline(settings)
-        result = await eval_injection(pipeline, settings, dry)
+        result = await eval_injection(pipeline, settings, dry, contexts)
         for row in result["rows"]:
             mark = "OK " if row["pass"] else ("FP" if row["rejected"] else "FN")
             print(
@@ -945,13 +1052,17 @@ async def amain(args: argparse.Namespace, settings: EvalSettings) -> int:
         print("không có câu nào để chạy (subset/category rỗng)")
         return 1
 
+    catalogue = await _active_catalogue(dry)
+    contexts = _preflight_contexts(questions, catalogue, args.project_key)
     judge: BaseJudge = MockJudge() if dry else LLMJudge(settings)
     pipeline = MockPipeline(golden) if dry else _build_pipeline(settings)
 
     results: list[QuestionResult] = []
     latencies_ms: list[float] = []
-    for i, q in enumerate(questions, 1):
-        res = await evaluate_question(pipeline, judge, q, settings, dry)
+    for i, (q, project_context) in enumerate(zip(questions, contexts), 1):
+        res = await evaluate_question(
+            pipeline, judge, q, settings, dry, project_context=project_context
+        )
         results.append(res)
         # latency: reuse res.latency_ms by default (one pipeline call per question);
         # n_sim > 1 reruns to make the latency measurement stable.
@@ -961,7 +1072,10 @@ async def amain(args: argparse.Namespace, settings: EvalSettings) -> int:
             for _ in range(settings.n_sim):
                 start = time.perf_counter()
                 try:
-                    await run_pipeline(pipeline, q["question"], q.get("as_of"), settings)
+                    await run_pipeline(
+                        pipeline, q["question"], q.get("as_of"), settings,
+                        project_context=project_context,
+                    )
                     latencies_ms.append((time.perf_counter() - start) * 1000.0)
                 except Exception:  # noqa: BLE001
                     latencies_ms.append(settings.pipeline_timeout_s * 1000.0)
@@ -1019,6 +1133,7 @@ def main() -> int:
     parser.add_argument("--golden", default=str(REPO_ROOT / "eval" / "golden_set_v1.json"))
     parser.add_argument("--subset", type=int, default=None, help="chỉ chạy N câu đầu")
     parser.add_argument("--only-category", default=None, help="chỉ chạy 1 category (legal/fact_affordability/...)")
+    parser.add_argument("--project-key", default=None, help="active project scope for neutral rows / injection")
     parser.add_argument("--dry", action="store_true", help="mock pipeline + mock judge (CI, định thức)")
     parser.add_argument("--inject", action="store_true", help="chạy injection_test_vn.json thay cho golden set")
     parser.add_argument("--persona", action="store_true", help="chạy golden_persona_v1.json (Story 4.7, regex/structure, ko LLM-judge)")

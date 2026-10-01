@@ -277,6 +277,68 @@ async def test_actual_lifespan_isolates_zalo_and_closes_after_stop(monkeypatch, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retention_enabled", [True, False])
+async def test_lifespan_retention_setting_controls_customer_history_cleanup(
+    monkeypatch, retention_enabled
+):
+    from fastapi import FastAPI
+    from api.infrastructure.adapters import postgres_chat_history
+    from api.infrastructure.config import config
+    from api.interfaces.api import main
+
+    cfg = settings(zalo_bot_enabled=False, chat_history_retention_enabled=retention_enabled)
+    monkeypatch.setattr(config, "get_settings", lambda: cfg)
+    monkeypatch.setattr(main, "get_cfg", lambda key, default=None: getattr(cfg, key, default))
+    monkeypatch.setattr(main, "_wire_postgres_rate_limit_port", AsyncMock())
+    monkeypatch.setattr(main, "_maybe_start_rag_prewarm", lambda: None)
+    monkeypatch.setattr(main, "_maybe_start_lead_mirror_reconciliation", lambda: None)
+    monkeypatch.setattr(main, "_close_persistence_pools", AsyncMock())
+    cleanup = AsyncMock(return_value=0)
+    monkeypatch.setattr(postgres_chat_history.repository, "cleanup", cleanup)
+
+    app = FastAPI()
+    async with main._lifespan(app):
+        await asyncio.sleep(0)
+
+    if retention_enabled:
+        cleanup.assert_awaited_once_with(retention_days=30)
+    else:
+        cleanup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("maintenance_enabled", [True, False])
+async def test_zalo_sweeps_preserve_new_events_when_maintenance_is_disabled(
+    maintenance_enabled
+):
+    processed = []
+    cfg = SimpleNamespace(
+        zalo_bot_enabled=True,
+        zalo_bot_batch_size=5,
+        zalo_bot_poll_seconds=0,
+        zalo_bot_maintenance_enabled=maintenance_enabled,
+    )
+    processor = SimpleNamespace(halted=False)
+    store = SimpleNamespace(
+        maintain=AsyncMock(return_value=(0, 0)),
+        due_candidates=AsyncMock(return_value=[42]),
+    )
+
+    async def process(event_id):
+        processed.append(event_id)
+        processor.halted = True
+
+    processor.process = process
+    await ZaloRuntime(store=store, processor=processor, settings=cfg).run()
+
+    assert processed == [42]
+    if maintenance_enabled:
+        store.maintain.assert_awaited_once()
+    else:
+        store.maintain.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_real_ready_ignores_provider_failure(monkeypatch):
     from contextlib import asynccontextmanager
     from fastapi.routing import iter_route_contexts

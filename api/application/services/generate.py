@@ -15,7 +15,6 @@ from pathlib import Path
 from api import get_cfg
 from api.application.services.conv_state import CONVERSION_STATES
 from api.application.services.project_config import brand_token, render_template
-from api.application.services.project_scope import is_training_scope
 from api.domain.services.route_intent import classify_intent
 from api.domain.services.utils import sha256_hex
 from api.domain.value_objects.constants import DEFAULT_MODEL_ANSWER, DEFAULT_MODEL_ANSWER_PRO
@@ -39,8 +38,8 @@ _SYSTEM_PATH = (
 )  # parents[2]=api/ (HF-0: canonical api/prompts/)
 
 # FR-25 (revised): detailed project-lookup prompt for sales staff — persona-
-# free, CTA-free, grounded on the SHARED project corpus (answer_mode=training
-# rides the real context project; see project_scope TRAINING_PROJECT_KEY).
+# free and CTA-free. ProjectContext.answer_mode selects this profile while
+# retrieval remains scoped to the real active project.
 _TRAINING_PATH = (
     Path(__file__).resolve().parents[2] / "prompts" / "training_policy.md"
 )
@@ -80,6 +79,24 @@ def _format_history(history: list[dict] | None) -> str:
         -MAX_HISTORY_TURNS:
     ]
     return "\n".join(f"{t['role']}: {t['content']}" for t in turns) or "(không có lịch sử)"
+def _serialized_rows(content: str, marker: str, *, header: bool = False) -> list[dict] | None:
+    try:
+        rows_text = content.split(marker, 1)[1]
+        if header:
+            rows_text = rows_text.split("\n", 1)[1]
+        rows = json.loads(rows_text.splitlines()[0])
+    except (IndexError, json.JSONDecodeError):
+        return None
+    return rows if isinstance(rows, list) and all(isinstance(row, dict) for row in rows) else None
+
+
+def _record_prompt_evidence(merged: Merged, content: str) -> None:
+    merged.meta["_prompt_rag_rows"] = _serialized_rows(
+        content, "RAG_CONTEXT (chunks từ LightRAG, đã lọc hiệu lực + rerank):\n"
+    )
+    merged.meta["_prompt_fact_rows"] = _serialized_rows(
+        content, "FACT_EVIDENCE (", header=True
+    )
 
 
 def build_messages(merged: Merged, history: list[dict] | None) -> list[dict]:
@@ -96,10 +113,11 @@ def build_messages(merged: Merged, history: list[dict] | None) -> list[dict]:
         f"{merged.rag_blocks}\n\n{merged.evidence_blocks}"
     )
     # FR-25 (revised) training profile: the shared project corpus grounds the
-    # answer; the marker only swaps in the detailed staff-lookup voice and keeps
-    # the customer sales material (sales kit, conversation directive, identity
-    # template) out by construction — normal mode below stays byte-identical.
-    if is_training_scope(project_key):
+    # answer; answer_mode selects the staff lookup voice and keeps customer
+    # sales material (persona/CTA) out by construction. Normal mode stays
+    # byte-identical.
+    if merged.meta.get("answer_mode") == "training":
+        _record_prompt_evidence(merged, data_block)
         return [
             {"role": "system", "content": _TRAINING_PROMPT},
             {"role": "user", "content": user_main},
@@ -128,6 +146,7 @@ def build_messages(merged: Merged, history: list[dict] | None) -> list[dict]:
             {"role": "user", "content": data_block},
         ]
     )
+    _record_prompt_evidence(merged, messages[-1]["content"])
     return messages
 
 
@@ -142,7 +161,7 @@ def select_answer_tier(merged: Merged, high_stakes: bool) -> str:
     # FR-25 (revised): a training lookup is a data-dense staff answer (specs,
     # layouts, price baskets, payment schedules) — always worth the pro budget
     # (6000 vs 4000 tokens). The customer matrix below stays byte-identical.
-    if is_training_scope(merged.meta.get("project_key")):
+    if merged.meta.get("answer_mode") == "training":
         return "pro"
     if high_stakes:
         return "pro"
@@ -189,10 +208,10 @@ async def stream_answer(
     max_tokens = _ANSWER_MAX_TOKENS[tier]
     messages = build_messages(merged, history)
     merged.meta["model"] = model
-    merged.meta["answer_tier"] = tier  # story 4.6 audit: which tier was used
+    merged.meta["answer_tier"] = tier  # story 4.6 audit: which model tier was used
     merged.meta["prompt_profile"] = (
-        "training" if is_training_scope(merged.meta.get("project_key")) else "customer"
-    )  # FR-25 audit: which prompt profile produced the answer
+        "training" if merged.meta.get("answer_mode") == "training" else "customer"
+    )
     merged.meta["prompt_version"] = "v2"
     merged.meta["prompt_hash"] = sha256_hex(json.dumps(messages, ensure_ascii=False))
 

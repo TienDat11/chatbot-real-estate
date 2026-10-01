@@ -61,10 +61,21 @@ async def _single_project_catalogue():
 
 def _pipeline_factory(captured, answer="42 tỷ cho căn A1-401.", trace_id="trace-1"):
     class _Pipeline:
-        async def run(self, query, session_id, as_of, history, *, project_key=None, device_id=None, on_event=None, **kwargs):
+        async def run(
+            self,
+            query,
+            session_id,
+            as_of,
+            history,
+            *,
+            project_context,
+            device_id=None,
+            on_event=None,
+            visible_limit=None,
+        ):
             captured["query"] = query
             captured["history"] = history
-            captured["project_key"] = project_key
+            captured["project_context"] = project_context
             captured["called"] = True
             return {"answer": answer, "trace_id": trace_id, "sources": [{"doc_id": "d1"}]}
 
@@ -72,6 +83,60 @@ def _pipeline_factory(captured, answer="42 tỷ cho căn A1-401.", trace_id="tra
         return _Pipeline()
 
     return factory
+
+
+@pytest.mark.asyncio
+async def test_replay_skips_catalogue_resolution_and_pipeline():
+    captured = {}
+    catalogue_calls = []
+
+    async def catalogue_loader():
+        catalogue_calls.append(True)
+        return await _catalogue()
+
+    prior_meta = {
+        "_source_event_key": "external-txn-1",
+        "ga_outcome": {"answer": "replayed answer", "resolution_status": "resolved", "project_key": "camellia", "rag_ran": True},
+    }
+    history = FakeHistory(
+        session=FakeSession(active_project_key="camellia"),
+        messages=[FakeMessage("assistant", "replayed answer", project_key="camellia", meta=prior_meta)],
+    )
+    service = GlobalAssistantService(
+        history=history,
+        pipeline_factory=_pipeline_factory(captured),
+        catalogue_loader=catalogue_loader,
+    )
+    outcome = await service.run(
+        GlobalAssistantInput(query="Camellia giá bao nhiêu?", session_id="sess-replay", identity_key="id-replay", source_event_key="external-txn-1")
+    )
+
+    assert outcome.replayed is True
+    assert outcome.rag_ran is False
+    assert catalogue_calls == []
+    assert captured.get("called") is not True
+    assert history.appended == []
+
+
+@pytest.mark.asyncio
+async def test_unresolved_context_is_none_and_pipeline_is_not_created():
+    captured = {}
+    history = FakeHistory(session=None, messages=[])
+    service = GlobalAssistantService(
+        history=history,
+        pipeline_factory=_pipeline_factory(captured),
+        catalogue_loader=_catalogue,
+    )
+
+    prepared = await service.prepare_turn(
+        GlobalAssistantInput(query="Dự án nào có hồ bơi?", session_id="sess-unresolved", identity_key="id-unresolved")
+    )
+    assert prepared.project_context is None
+    assert prepared.resolution.status.value != "resolved"
+    outcome = await service.execute_prepared_turn(prepared)
+    assert outcome.rag_ran is False
+    assert captured.get("called") is not True
+
 
 
 @pytest.mark.asyncio
@@ -97,7 +162,9 @@ async def test_resolver_before_rag_resolved():
     # Server-side history only carries neutral + camellia turns, no other project.
     assert all(t["role"] in ("user", "assistant") for t in captured["history"])
     # Resolved turn persisted centrally to global session.
-    assert any(t["resolved_project_key"] == "camellia" for t in history.appended)
+    assert captured["project_context"].project_key == outcome.project_key
+    assert captured["project_context"].active_catalogue == tuple(await _catalogue())
+    assert captured["project_context"].answer_mode == "normal"
 
 
 @pytest.mark.asyncio
@@ -329,8 +396,8 @@ def _pipeline_factory_redirect(captured, redirect_marker):
     """
 
     class _Pipeline:
-        async def run(self, query, session_id, as_of, history, *, project_key=None, device_id=None, on_event=None, **kwargs):
-            captured["query"] = query
+        async def run(self, query, session_id, as_of, history, *, project_key=None, project_context=None, device_id=None, on_event=None, **kwargs):
+            captured["project_context"] = project_context
             captured["project_key"] = project_key
             payload: dict = {"answer": "42 tỷ.", "trace_id": "trace-r"}
             if redirect_marker is not _UNSET:
@@ -372,7 +439,7 @@ async def test_redirect_invariant_matching_persists():
     )
 
     assert outcome.project_key == "soleil"
-    assert captured["project_key"] == "soleil"
+    assert captured["project_context"].project_key == "soleil"
     assert any(t["resolved_project_key"] == "soleil" for t in history.appended)
 
 
@@ -778,3 +845,273 @@ def test_outcome_as_dict_strips_source_event_key_from_meta():
     assert "routing" in serialized["meta"]
     assert serialized["meta"]["routing"] == {"intent": "catalogue"}
     assert "_source_event_key" not in json.dumps(serialized)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_conv_facade", [False, True], ids=["plain", "conv"])
+async def test_prepare_execute_preserves_context_through_real_facade_and_workflow(
+    monkeypatch, use_conv_facade
+):
+    from llama_index.core.workflow import Context
+
+    from api.application.pipelines import workflow
+    from api.application.pipelines.conv_workflow import ConvRunEv, RagQueryPipelineConv
+    from api.application.pipelines.workflow import RagQueryPipeline, RagQueryWorkflow
+    from api.application.ports.project_registry import ProjectRegistryRecord
+    from api.application.services import global_assistant_service as ga_module
+    from api.application.services.project_context import ProjectContext
+    from api.application.services.rag_leg import RagLegResult
+    from api.domain.services.guard_input import GuardResult as InputGuardResult
+    from api.domain.services.guard_output import GuardResult as OutputGuardResult
+    from api.domain.services.rewrite import RoutedResult
+
+    catalogue = [("camellia", "Camellia"), ("soleil", "Soleil")]
+    catalogue_calls = []
+    resolver_calls = []
+    resolver_results = []
+    contexts = []
+    facade_calls = []
+    workflow_runs = []
+    guard_writes = []
+    rag_project_keys = []
+    conv_events = []
+    registry_calls = []
+
+    async def load_catalogue():
+        catalogue_calls.append(True)
+        return catalogue
+
+    original_resolver = ga_module.resolve_global_project
+
+    async def observe_resolver(**kwargs):
+        resolver_calls.append(kwargs)
+        result = await original_resolver(**kwargs)
+        resolver_results.append(result)
+        return result
+
+    monkeypatch.setattr(ga_module, "resolve_global_project", observe_resolver)
+    original_context_post_init = ProjectContext.__post_init__
+
+    def observe_context(context):
+        original_context_post_init(context)
+        contexts.append(context)
+
+    monkeypatch.setattr(ProjectContext, "__post_init__", observe_context)
+
+    async def load_record(project_key):
+        registry_calls.append(project_key)
+        return ProjectRegistryRecord(
+            project_key=project_key,
+            ten_thuong_mai="The Soleil Đà Nẵng",
+            ten_phap_ly=None,
+            vi_tri=None,
+            hotline=None,
+            location=None,
+            geo_center_lat=None,
+            geo_center_lng=None,
+            is_hot=False,
+            status="active",
+        )
+
+    monkeypatch.setattr(
+        "api.application.services.project_config.load_project_registry_record",
+        load_record,
+    )
+
+    facade_type = RagQueryPipelineConv if use_conv_facade else RagQueryPipeline
+    original_facade_run = facade_type.run
+
+    async def observe_facade_run(
+        self,
+        query,
+        session_id=None,
+        as_of=None,
+        history=None,
+        *,
+        project_context,
+        device_id=None,
+        on_event=None,
+        visible_limit=None,
+    ):
+        facade_calls.append((self, query, session_id, as_of, history, project_context, device_id))
+        return await original_facade_run(
+            self,
+            query,
+            session_id,
+            as_of,
+            history,
+            project_context=project_context,
+            device_id=device_id,
+            on_event=on_event,
+            visible_limit=visible_limit,
+        )
+
+    monkeypatch.setattr(facade_type, "run", observe_facade_run)
+
+    original_workflow_run = RagQueryWorkflow.run
+
+    def observe_workflow_run(self, *args, **kwargs):
+        workflow_runs.append((self, kwargs))
+        return original_workflow_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(RagQueryWorkflow, "run", observe_workflow_run)
+
+    original_store_set = type(Context(workflow=RagQueryWorkflow()).store).set
+
+    async def observe_store_set(store, key, value):
+        result = await original_store_set(store, key, value)
+        if key == "project_context":
+            guard_writes.append(value)
+        return result
+
+    monkeypatch.setattr(type(Context(workflow=RagQueryWorkflow()).store), "set", observe_store_set)
+
+    original_conv_event_init = ConvRunEv.__init__
+
+    def observe_conv_event(event, *args, **kwargs):
+        original_conv_event_init(event, *args, **kwargs)
+        conv_events.append(event)
+
+    monkeypatch.setattr(ConvRunEv, "__init__", observe_conv_event)
+
+    async def fake_guard_input(query):
+        return InputGuardResult(clean=query, rejected=False, degraded=False)
+
+    async def fake_rewrite(query, history, as_of):
+        return RoutedResult(
+            rewritten=query,
+            routing={
+                "needs_rag": True,
+                "needs_sql": False,
+                "needs_geo": False,
+                "structured_path": "none",
+                "high_stakes": False,
+            },
+            sql_spec=None,
+            hl_keywords=[],
+            ll_keywords=[],
+            high_stakes=False,
+            as_of=as_of,
+        )
+
+    async def fake_rag(query, hl_keywords, ll_keywords, as_of, project_key):
+        rag_project_keys.append(project_key)
+        return RagLegResult([], degraded=False)
+
+    class FakeReranker:
+        async def rerank(self, query, chunks):
+            return chunks
+
+    async def fake_stream_answer(merged, history, high_stakes):
+        yield "offline answer"
+
+    async def fake_output_guard(answer, facts, sources, routing, *, meta=None):
+        return OutputGuardResult(confidence="HIGH", requires_review=False, verdicts={})
+
+    async def fake_audit(entry):
+        return None
+
+    async def _empty_images():
+        return []
+
+    monkeypatch.setattr(workflow, "guard_input", fake_guard_input)
+    monkeypatch.setattr(workflow, "rewrite_query", fake_rewrite)
+    monkeypatch.setattr(workflow, "run_rag_leg", fake_rag)
+    monkeypatch.setattr(workflow, "get_reranker", lambda: FakeReranker())
+    monkeypatch.setattr(workflow, "search_images", lambda *args, **kwargs: _empty_images())
+    monkeypatch.setattr(workflow, "stream_answer", fake_stream_answer)
+    monkeypatch.setattr(workflow, "guard_output", fake_output_guard)
+    monkeypatch.setattr(workflow, "write_audit", fake_audit)
+
+    history = FakeHistory(
+        session=FakeSession(active_project_key="camellia"),
+        messages=[
+            FakeMessage("user", "Camellia prior turn", project_key="camellia"),
+            FakeMessage("assistant", "Soleil prior turn", project_key="soleil"),
+            FakeMessage("user", "Neutral prior turn", project_key=None),
+        ],
+    )
+    pipeline_instances = []
+
+    def make_pipeline(on_event=None):
+        pipeline = facade_type(on_event=on_event)
+        pipeline_instances.append(pipeline)
+        return pipeline
+
+    service = GlobalAssistantService(
+        history=history,
+        pipeline_factory=make_pipeline,
+        catalogue_loader=load_catalogue,
+    )
+    request = GlobalAssistantInput(
+        query="Soleil?",
+        session_id="sess-ga-inner-bridge",
+        identity_key="identity-ga-inner-bridge",
+        device_id="device-ga-inner-bridge",
+    )
+
+    prepared = await service.prepare_turn(request)
+
+    assert catalogue_calls == [True]
+    assert len(resolver_calls) == len(resolver_results) == 1
+    assert resolver_calls[0]["known_projects"] is catalogue
+    assert prepared.known_projects is catalogue
+    assert resolver_calls[0]["session_project_key"] == "camellia"
+    assert resolver_results[0].project_key == "soleil"
+    assert resolver_calls[0]["query"] == "Soleil?"
+    assert resolver_calls[0]["selected_project_key"] is None
+    assert resolver_calls[0]["route_project_key"] is None
+    assert prepared.resolution.project_key == "soleil"
+    assert prepared.project_context is contexts[0]
+    assert len(contexts) == 1
+    assert prepared.project_context.active_catalogue == tuple(catalogue)
+    assert resolver_results[0].source.value == "explicit_query"
+    assert prepared.project_context.project_key == "soleil"
+    assert prepared.project_context.answer_mode == "normal"
+    assert prepared.history == [
+        {"role": "assistant", "content": "Soleil prior turn"},
+        {"role": "user", "content": "Neutral prior turn"},
+    ]
+    assert all("Camellia" not in turn["content"] for turn in prepared.history)
+    assert facade_calls == workflow_runs == guard_writes == rag_project_keys == []
+    assert conv_events == registry_calls == pipeline_instances == []
+    assert history.appended == []
+
+    outcome = await service.execute_prepared_turn(prepared)
+
+    context = prepared.project_context
+    assert outcome.project_key == "soleil"
+    assert outcome.resolution_status == "resolved"
+    assert outcome.resolution_source == "explicit_query"
+    assert outcome.rag_ran is True
+    assert outcome.replayed is False
+    assert len(pipeline_instances) == len(facade_calls) == len(workflow_runs) == 1
+    _, query, session_id, as_of, prepared_history, facade_context, device_id = facade_calls[0]
+    assert facade_context is context
+    assert (query, session_id, as_of, prepared_history, device_id) == (
+        prepared.effective_query,
+        request.session_id,
+        None,
+        prepared.history,
+        request.device_id,
+    )
+    _, workflow_kwargs = workflow_runs[0]
+    assert workflow_kwargs["project_context"] is context
+    assert workflow_kwargs["device_id"] == request.device_id
+    assert workflow_kwargs["query"] == prepared.effective_query
+    assert workflow_kwargs["session_id"] == request.session_id
+    assert workflow_kwargs["history"] == prepared.history
+    assert len(guard_writes) == 1
+    assert guard_writes[0] is context
+    assert rag_project_keys == ["soleil"]
+    assert catalogue_calls == [True]
+    assert len(resolver_calls) == len(resolver_results) == 1
+    assert len(contexts) == 1
+    assert registry_calls == ["soleil"]
+    if use_conv_facade:
+        assert len(conv_events) == 1
+        assert conv_events[0].project_context is context
+    else:
+        assert conv_events == []
+    assert len(history.appended) == 1
+    assert history.appended[0]["resolved_project_key"] == "soleil"

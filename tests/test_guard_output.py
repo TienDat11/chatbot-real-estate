@@ -10,6 +10,7 @@ from api.domain.services.guard_output import (
     _contextual_disclosure_verdict,
     _robot_phrase_verdict,
     _confidence_3tier,
+    extract_amounts,
     guard_output,
     sanitize_output,
 )
@@ -165,3 +166,13 @@ def test_guard_output_includes_disclosure_and_robot_verdicts():
     assert "robot_phrase" in res.verdicts
     assert res.verdicts["robot_phrase"]["style_warn"] is False
     assert res.confidence in ("HIGH", "MEDIUM", "LOW")
+
+
+def test_unit_and_fact_identifiers_do_not_create_orphan_numbers():
+    """Identifier digits are ignored while the actual financial amount is checked."""
+    from decimal import Decimal
+
+    assert extract_amounts("Căn CH-03 có giá 2 tỷ [fe-001]") == [Decimal("2e9")]
+    assert extract_amounts("Diện tích 434.2 m2; giá 2,85 tỷ.") == [
+        Decimal("434.2"), Decimal("2.85e9")
+    ]

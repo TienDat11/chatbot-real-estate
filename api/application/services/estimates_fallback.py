@@ -22,6 +22,7 @@ import logging
 import re
 from typing import Any
 
+from api.domain.services.unit_code import extract_unit_codes, is_unit_price_query
 from .merge import Merged, build_evidence_context, build_facts
 from .sql_leg import with_rls_identity
 
@@ -154,27 +155,23 @@ async def fetch_unit_estimates(project_key: str) -> list[dict]:
 async def apply_estimates_fallback(merged: Merged) -> bool:
     """Fill empty FACT_EVIDENCE from v_unit_estimates; True when applied.
 
-    Mutates ``merged`` in place (the established generate-step pattern): facts,
-    evidence_blocks, plus meta.sql_row_count / meta.has_approx / meta flag so
-    guard_output sees deterministic provenance while has_approx=True keeps the
-    confidence capped at MEDIUM — correct for indicative ranges.
+    Exact-unit price requests never use generic type estimates: an indicative
+    range is not evidence for the requested apartment.
     """
     if merged.facts:
         return False
-    # FR-25 revision: scope the estimates read to the RESOLVED retrieval
-    # project (meta.retrieval_project_key, set by the merge step) — the raw
-    # meta.project_key is the '_training' marker on training turns and matches
-    # no estimates row. A training turn with no resolved project reads None
-    # here and gates closed below (same fail-closed rule as the retrieval
-    # legs); callers that predate the retrieval key (eval, legacy merges) fall
-    # back to meta.project_key unchanged.
+    # The merge step records the resolved retrieval project in metadata;
+    # callers without that metadata retain the project_key fallback.
     project_key = merged.meta.get(
         "retrieval_project_key", merged.meta.get("project_key")
     )
     if not project_key:
         return False
-    query_text = " ".join(str(merged.meta.get(k) or "") for k in ("query", "rewritten"))
-    if not _UNIT_PRICE_HINT_RE.search(query_text):
+    query_text = str(merged.meta.get("query") or "")
+    eligibility_text = " ".join(str(merged.meta.get(k) or "") for k in ("query", "rewritten"))
+    if not _UNIT_PRICE_HINT_RE.search(eligibility_text):
+        return False
+    if extract_unit_codes(query_text) and is_unit_price_query(query_text):
         return False
     try:
         rows = await fetch_unit_estimates(str(project_key))

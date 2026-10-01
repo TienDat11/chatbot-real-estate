@@ -21,6 +21,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from jwt.algorithms import RSAAlgorithm
 
+from api.application.ports.project_registry import ProjectRegistryRecord
+
 from api.application.services.anon_identity import (
     AnonymousIdentityService,
     InMemoryRateLimitStore,
@@ -235,6 +237,21 @@ async def client(monkeypatch, install_gate):
         return project_key or "camellia"
 
     monkeypatch.setattr("api.application.services.project_scope.resolve_project_key", _fake_resolve)
+
+    async def _active_records():
+        return [
+            ProjectRegistryRecord(
+                project_key=key, ten_thuong_mai=name, ten_phap_ly=None,
+                vi_tri=None, hotline=None, location=None, geo_center_lat=None,
+                geo_center_lng=None, is_hot=False, status="active",
+            )
+            for key, name in (("camellia", "The Camellia Son Tra - Da Nang"), ("soleil", "The Soleil Đà Nẵng"))
+        ]
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _active_records,
+    )
     # Fresh process-local brake per test so IP buckets never leak between tests.
     set_rate_limit_port(InMemoryRateLimitStore())
 

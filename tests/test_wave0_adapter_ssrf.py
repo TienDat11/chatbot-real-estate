@@ -127,6 +127,17 @@ async def test_rerank_canonical_public_host_reaches_mock_request(binding, base_u
 # bug was canonical-config drift: staging configures aibox->https://api.jina.ai
 # while Settings.outbound_allowed_hosts omitted it, so rerank degraded before
 # any network I/O. DNS stays faked; no live resolution or HTTP here.
+#
+# Hermetic: ``Settings(_env_file=None)`` drops only the dotenv source, not
+# ``os.environ``, which pydantic-settings ranks above the field default. A
+# host/CI-exported OUTBOUND_ALLOWED_HOSTS (URL-form in one observed run) would
+# otherwise replace the canonical default these tests exist to pin.
+
+
+@pytest.fixture
+def _no_outbound_env(monkeypatch):
+    """Drop any process-level OUTBOUND_ALLOWED_HOSTS override."""
+    monkeypatch.delenv("OUTBOUND_ALLOWED_HOSTS", raising=False)
 
 
 class _RecordingClient(_FakeClient):
@@ -145,7 +156,7 @@ def _canonical_hosts() -> list[str]:
     return Settings(_env_file=None).outbound_allowed_hosts
 
 
-def test_validator_accepts_jina_with_canonical_settings_allowlist(public_dns):
+def test_validator_accepts_jina_with_canonical_settings_allowlist(public_dns, _no_outbound_env):
     """https://api.jina.ai/v1/rerank must PASS with canonical Settings hosts."""
     url = validate_outbound_url(
         "https://api.jina.ai/v1/rerank",
@@ -165,14 +176,16 @@ def test_validator_accepts_jina_with_canonical_settings_allowlist(public_dns):
         "https://api.jina.ai.evil.example/v1/rerank",
     ],
 )
-def test_validator_rejects_unknown_and_lookalike_hosts(url, public_dns):
+def test_validator_rejects_unknown_and_lookalike_hosts(url, public_dns, _no_outbound_env):
     """CFG-01 must not weaken the exact-host SSRF boundary."""
     with pytest.raises(OutboundUrlError):
         validate_outbound_url(url, allowed_hosts=_canonical_hosts(), resolve_host=public_dns)
 
 
 @pytest.mark.asyncio
-async def test_http_rerank_jina_aibox_passes_canonical_validation_and_posts(public_dns):
+async def test_http_rerank_jina_aibox_passes_canonical_validation_and_posts(
+    public_dns, _no_outbound_env
+):
     """Staging shape (aibox + https://api.jina.ai) must reach the mock HTTP client.
 
     Pre-fix, validation raised internally, the adapter degraded every chunk with

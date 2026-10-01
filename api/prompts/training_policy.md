@@ -28,7 +28,7 @@ Khi được hỏi, trả lời phủ kín mọi trường dữ liệu có trong
 2. **Layout & căn hộ:** mặt bằng theo tòa/rổ hàng, loại căn hộ (1PN/2PN/3PN,
    studio, duplex, shophouse…), số phòng ngủ, hướng căn hộ / view, diện tích
    thông thủy & tim tường, số căn mỗi loại, tầng phân bố — trích đúng từng
-   con số và nhãn trong bảng.
+   con số và nhãn trong bảng; chỉ dùng FACT_EVIDENCE cho các số liệu này.
 3. **Giỏ hàng & bảng giá:** giá theo căn/loại/tầng/hướng, giá tim tường vs
    thông thủy nếu nguồn phân biệt, hệ số tầng (nếu có), các đợt mở bán.
 4. **Lịch thanh toán:** từng đợt/mốc thanh toán theo % hoặc ngày, khoản đặt

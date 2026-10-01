@@ -234,6 +234,7 @@
     },
     {
       "id": "afford-01",
+      "project_key": "camellia",
       "question": "Tôi có 2 tỉ, mua được nhà nào?",
       "category": "fact_affordability",
       "expected_routing": {
@@ -280,6 +281,7 @@
     },
     {
       "id": "afford-02",
+      "project_key": "tower-a",
       "question": "Căn A10-01 vay ngân hàng A thì phải trả trước bao nhiêu phần trăm?",
       "category": "fact_affordability",
       "expected_routing": {
@@ -306,6 +308,7 @@
     },
     {
       "id": "afford-03",
+      "project_key": "tower-a",
       "question": "Căn nào có chính sách trả trước 0 phần trăm?",
       "category": "fact_affordability",
       "expected_routing": {
@@ -325,6 +328,7 @@
     },
     {
       "id": "afford-04",
+      "project_key": "tower-a",
       "question": "Căn nào diện tích trên 80 mét vuông?",
       "category": "fact_affordability",
       "expected_routing": {
@@ -348,6 +352,7 @@
     },
     {
       "id": "afford-05",
+      "project_key": "tower-a",
       "question": "So sánh chính sách vay ngân hàng A và ngân hàng B cho căn A10-01.",
       "category": "fact_affordability",
       "expected_routing": {
@@ -365,6 +370,7 @@
     },
     {
       "id": "afford-06",
+      "project_key": "tower-a",
       "question": "Căn A04-03 có chính sách vay nào không?",
       "category": "fact_affordability",
       "expected_routing": {
@@ -381,6 +387,7 @@
     },
     {
       "id": "afford-07",
+      "project_key": "tower-a",
       "question": "Giá bán dự án Tower A là bao nhiêu?",
       "category": "fact_affordability",
       "expected_routing": {
@@ -397,6 +404,7 @@
     },
     {
       "id": "agg-01",
+      "project_key": "tower-a",
       "question": "Có bao nhiêu căn hộ có giá dưới 2 tỷ?",
       "category": "aggregate",
       "expected_routing": {
@@ -414,6 +422,7 @@
     },
     {
       "id": "agg-02",
+      "project_key": "tower-a",
       "question": "Có bao nhiêu căn hộ có giá từ 2 tỷ trở xuống?",
       "category": "aggregate",
       "expected_routing": {
@@ -431,6 +440,7 @@
     },
     {
       "id": "agg-03",
+      "project_key": "tower-a",
       "question": "Căn hộ nào có giá cao nhất ở Tower A?",
       "category": "aggregate",
       "expected_routing": {
@@ -449,6 +459,7 @@
     },
     {
       "id": "agg-04",
+      "project_key": "tower-a",
       "question": "Có bao nhiêu căn hộ có giá từ 3 tỷ đến 6 tỷ?",
       "category": "aggregate",
       "expected_routing": {
@@ -466,6 +477,7 @@
     },
     {
       "id": "mixed-01",
+      "project_key": "tower-a",
       "question": "Căn A10-01 giá bao nhiêu và cầm cố quyền sử dụng đất có được pháp luật công nhận không?",
       "category": "mixed",
       "expected_routing": {
@@ -482,6 +494,7 @@
     },
     {
       "id": "mixed-02",
+      "project_key": "tower-a",
       "question": "Tôi có 3 tỷ thì mua được căn nào ở Tower A, và cần lưu ý gì về quy hoạch?",
       "category": "mixed",
       "expected_routing": {
@@ -497,6 +510,7 @@
     },
     {
       "id": "mixed-03",
+      "project_key": "tower-b",
       "question": "Giá căn B1-01 tòa B hiện tại là bao nhiêu và giải chấp là gì?",
       "category": "mixed",
       "expected_routing": {
@@ -567,6 +581,7 @@
     },
     {
       "id": "asof-01",
+      "project_key": "tower-b",
       "question": "Giá căn B1-01 tòa B hồi tháng 2 năm 2026 là bao nhiêu?",
       "category": "as_of",
       "as_of": "2026-02-15",
@@ -587,6 +602,7 @@
     },
     {
       "id": "asof-02",
+      "project_key": "tower-b",
       "question": "Giá căn B1-01 tòa B hiện tại là bao nhiêu?",
       "category": "as_of",
       "freshness": true,
@@ -609,6 +625,7 @@
     },
     {
       "id": "asof-03",
+      "project_key": "tower-a",
       "question": "Chính sách vay căn A10-01 vào tháng 5 năm 2026 là gì?",
       "category": "as_of",
       "as_of": "2026-05-15",
@@ -631,6 +648,7 @@
     },
     {
       "id": "numfmt-01",
+      "project_key": "tower-a",
       "question": "Căn nào có giá một tỷ hai?",
       "category": "number_format",
       "expected_routing": {
@@ -650,6 +668,7 @@
     },
     {
       "id": "numfmt-02",
+      "project_key": "tower-a",
       "question": "Căn nào có giá hai tỷ bảy trăm triệu?",
       "category": "number_format",
       "expected_routing": {
@@ -669,6 +688,7 @@
     },
     {
       "id": "wavef-camellia-unit-types",
+      "project_key": "camellia",
       "question": "Camellia có đầy đủ những loại căn nào theo hồ sơ?",
       "category": "exhaustive_unit_types",
       "expected_routing": {
@@ -686,6 +706,7 @@
     },
     {
       "id": "wavef-camellia-payment-methods",
+      "project_key": "camellia",
       "question": "Camellia có những phương thức thanh toán nào?",
       "category": "exhaustive_payment_methods",
       "expected_routing": {
@@ -703,6 +724,7 @@
     },
     {
       "id": "wavef-soleil-unit-types",
+      "project_key": "soleil",
       "question": "Soleil có những loại căn nào được hồ sơ xác nhận?",
       "category": "exhaustive_unit_types",
       "expected_routing": {
@@ -720,6 +742,7 @@
     },
     {
       "id": "wavef-soleil-payment-methods",
+      "project_key": "soleil",
       "question": "Soleil có những phương thức thanh toán nào?",
       "category": "exhaustive_payment_methods",
       "expected_routing": {
@@ -736,6 +759,7 @@
     },
     {
       "id": "wavef-missing-price-honesty",
+      "project_key": "soleil",
       "question": "Giá chính xác từng căn Soleil chưa có trong hồ sơ thì trả lời thế nào?",
       "category": "missing_price_honesty",
       "expected_routing": {
@@ -755,6 +779,7 @@
     },
     {
       "id": "wavef-cross-project-isolation",
+      "project_key": "soleil",
       "question": "Chỉ hỏi dữ liệu Soleil, không được trộn loại căn hay phương thức của Camellia.",
       "category": "cross_project_isolation",
       "expected_routing": {

@@ -22,6 +22,7 @@ from api.application.services.global_project_resolution import (
 )
 from api.application.services.project_scope import fetch_active_projects
 
+from api.application.services.project_context import ProjectContext
 
 async def _load_live_catalogue() -> list[tuple[str, str]]:
     """Global Assistant authoritative catalogue: live registry only.
@@ -92,6 +93,18 @@ class GlobalAssistantRedirectMismatchError(RuntimeError):
         )
 
 
+class GlobalAssistantAnswerIntegrityError(RuntimeError):
+    """The pipeline returned an answer this request's visible bound rejects.
+
+    The budget is applied INSIDE the pipeline, before the answer is hashed,
+    tokenized and audited. If the returned answer would still change under the
+    same bound, the audited bytes and the visible bytes are different strings,
+    so the turn fails closed here instead of persisting a shortened answer
+    under a hash that was computed for another one.
+    """
+
+
+
 @dataclass(frozen=True)
 class GlobalAssistantInput:
     query: str
@@ -153,6 +166,7 @@ class PreparedTurn:
     known_projects: list[tuple[str, str]]
     messages: list
     history: list[dict[str, str]]
+    project_context: ProjectContext | None = None
     replay: GlobalAssistantOutcome | None = None
     # Preserve the customer's original question through a picker selection;
     # never persist this effective query as the user's message text.
@@ -206,6 +220,34 @@ def _bound_visible(answer: str, max_visible_chars: int | None) -> str:
     if idx > 0:
         return answer[:idx] + _TRUNCATION_SUFFIX
     return answer[:limit] + _TRUNCATION_SUFFIX
+
+
+def _validate_visible_limit(max_visible_chars: int | None) -> None:
+    """Reject a budget that cannot hold a complete safe sentence.
+
+    ``_bound_visible`` counts CHARACTERS (Python code points), not UTF-8 bytes.
+    ``None`` means unbounded and is always valid. Otherwise the value must be a
+    real ``int`` — ``bool`` is rejected explicitly because it subclasses ``int``
+    and ``True`` would otherwise become a one-character budget — and at least
+    ``MIN_VISIBLE_CHARS``, the length of the longest safe copy the workflow can
+    substitute for a rejected answer. A smaller budget is refused before
+    publication rather than clipping that copy.
+
+    Lazy import: the workflow owns the copy constant and imports this module's
+    ``_bound_visible`` the other way.
+    """
+    from api.application.pipelines.workflow import MIN_VISIBLE_CHARS
+
+    if max_visible_chars is None:
+        return
+    if isinstance(max_visible_chars, bool) or not isinstance(max_visible_chars, int):
+        raise ValueError(
+            f"max_visible_chars phải là số nguyên từ {MIN_VISIBLE_CHARS} trở lên"
+        )
+    if max_visible_chars < MIN_VISIBLE_CHARS:
+        raise ValueError(
+            f"max_visible_chars phải là số nguyên từ {MIN_VISIBLE_CHARS} trở lên"
+        )
 
 
 class GlobalAssistantService:
@@ -381,6 +423,16 @@ class GlobalAssistantService:
             known_projects=known_projects,
             messages=messages,
             history=history,
+            project_context=(
+                ProjectContext(
+                    project_key=resolution.project_key,
+                    answer_mode="normal",
+                    active_catalogue=tuple(known_projects),
+                )
+                if resolution.status is ProjectResolutionStatus.RESOLVED
+                and resolution.project_key is not None
+                else None
+            ),
             effective_query=effective_query,
         )
 
@@ -391,7 +443,12 @@ class GlobalAssistantService:
         this call. Raises ``GlobalAssistantPersistenceError`` if durability fails.
         Raises ``GlobalAssistantRedirectMismatchError`` if the pipeline payload's
         ``project_redirect`` contradicts the resolved project_key (invariant).
+        Raises ``GlobalAssistantAnswerIntegrityError`` when the audited pipeline
+        answer disagrees with this request's visible budget.
         """
+        # The budget must be usable before ANY branch publishes: the
+        # clarification copy and the pipeline answer are both held to it.
+        _validate_visible_limit(prepared.request.max_visible_chars)
         started = time.perf_counter()
 
         # Unresolved: no RAG, no quota, just persist the clarification prompt.
@@ -420,16 +477,18 @@ class GlobalAssistantService:
             return outcome
 
         project_key = prepared.resolution.project_key
+        if prepared.project_context is None:
+            raise RuntimeError("resolved Global Assistant turn has no ProjectContext")
         pipeline = self._pipeline_factory(on_event=prepared.request.on_event)
         payload = await pipeline.run(
             prepared.effective_query,
             prepared.request.session_id,
             None,
             prepared.history,
-            project_key=project_key,
+            project_context=prepared.project_context,
             device_id=prepared.request.device_id,
             on_event=prepared.request.on_event,
-            known_projects=prepared.known_projects,
+            visible_limit=prepared.request.max_visible_chars,
         )
 
         # Invariant: pipeline payload's project_redirect must agree with the
@@ -447,8 +506,16 @@ class GlobalAssistantService:
                     resolved=project_key, redirected=redirect.get("project_key")
                 )
 
+        # P0-05: the pipeline already bounded AND audited this exact string.
+        # ``_bound_visible`` is a no-op on a fitting answer, so any difference
+        # here means the audited bytes and the visible bytes disagree — fail
+        # before core persistence rather than shipping a silently shortened
+        # answer under the hash of a different one.
         answer = str(payload.get("answer") or "")
-        answer = _bound_visible(answer, prepared.request.max_visible_chars)
+        if _bound_visible(answer, prepared.request.max_visible_chars) != answer:
+            raise GlobalAssistantAnswerIntegrityError(
+                "pipeline answer does not satisfy the request's visible bound"
+            )
         meta = {key: payload[key] for key in ("sources", "facts", "images", "places", "routing") if key in payload}
         outcome = GlobalAssistantOutcome(
             answer=answer,

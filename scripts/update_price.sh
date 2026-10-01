@@ -66,7 +66,6 @@ WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 # Strip a UTF-8 BOM from the CSV before handing it to Python.
 sed -e 's/^\xEF\xBB\xBF//' "${CSV_FILE}" > "${WORKDIR}/new_price.csv"
-
 PYTHON_BIN="${PYTHON_BIN:-python}"
 "${PYTHON_BIN}" - "${OLD_CAMPAIGN}" "${NEW_CAMPAIGN}" "${PROJECT}" "${SOURCE_DOC}" "${EFFECTIVE_FROM}" "${WORKDIR}/new_price.csv" <<'PYEOF'
 """Inline helper: expire old facts and insert a new batch atomically (asyncpg, §3.6).
@@ -168,9 +167,10 @@ if __name__ == "__main__":
     asyncio.run(main(*sys.argv[1:]))
 PYEOF
 
-# 3. Run a golden-set regression.
-echo "==> golden-set regression (eval --subset 20 — gồm legal + affordability + aggregate)"
-"${PYTHON_BIN}" eval/run_eval.py --subset 20 --fail-fast || {
+# The historical Tower A/B golden rows fail ProjectContext validation; this regression aborts before scoring.
+echo "==> scoped eval (legacy Tower A/B rows are not runnable with current project keys)"
+"${PYTHON_BIN}" eval/run_eval.py --project-key "${PROJECT}" --subset 20 --fail-fast || {
+ [../integration-final/scripts/update_6mo.sh#E331]
   echo "    ❌ regression fail — xem eval log; rollback: pg_restore -F c ${DUMP}" >&2
   exit 1
 }

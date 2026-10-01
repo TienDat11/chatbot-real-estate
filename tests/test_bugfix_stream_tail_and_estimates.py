@@ -20,8 +20,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from api.workflow import RagQueryWorkflow
+from api.application.services.project_context import ProjectContext
 from fastapi.testclient import TestClient
-
 from api import workflow as workflow_module
 from api.application.pipelines.conv_workflow import RagRgreConvWorkflow
 from api.application.pipelines.workflow import QueryRejected
@@ -36,6 +36,12 @@ from api.domain.services.guard_input import GuardResult as InputGuardResult
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
 from api.domain.services.guard_output import guard_output
 from api.domain.services.rewrite import RoutedResult
+
+_ACTIVE_CATALOGUE = (("camellia", "Camellia"),)
+
+
+def _project_context(project_key="camellia") -> ProjectContext:
+    return ProjectContext(project_key, "normal", _ACTIVE_CATALOGUE)
 
 # A realistic answer whose internal-id bracket is split across deltas and whose
 # Vietnamese tail would previously sit in the hold-back buffer forever.
@@ -79,9 +85,9 @@ class _StreamStubInner:
         self._result = result
         self._error = error
 
-    def run(self, **kwargs):
+    def run(self, *, project_context, **kwargs):
+        assert isinstance(project_context, ProjectContext)
         outer = self
-
         async def handler():
             for d in outer._deltas:
                 res = outer._wf._emit_sanitized_stream("token", {"text": d})
@@ -115,7 +121,7 @@ async def test_stream_dying_mid_tail_loses_nothing_vs_one_shot():
     wf._inner = _StreamStubInner(
         wf, _split_deltas(_FULL_ANSWER), error=RuntimeError("llm gateway dropped")
     )
-    result = await wf.run(query="giá studio", session_id="s_tail_abort", history=[])
+    result = await wf.run(query="giá studio", session_id="s_tail_abort", history=[], project_context=_project_context())
     expected = sanitize_answer_text(_FULL_ANSWER)
     # done.answer equals one-shot sanitize of the full text (nothing lost).
     assert result["answer"] == expected
@@ -136,7 +142,7 @@ async def test_normal_completion_stream_equals_done_and_one_shot():
     wf._inner = _StreamStubInner(
         wf, _split_deltas(_FULL_ANSWER), result={"answer": _FULL_ANSWER, "requires_review": False}
     )
-    result = await wf.run(query="giá studio", session_id="s_tail_ok", history=[])
+    result = await wf.run(query="giá studio", session_id="s_tail_ok", history=[], project_context=_project_context())
     expected = sanitize_answer_text(_FULL_ANSWER)
     assert result["answer"] == expected
     assert "answer_truncated" not in result
@@ -150,7 +156,7 @@ async def test_query_rejected_keeps_error_contract():
     wf = RagRgreConvWorkflow(on_event=on_event)
     wf._inner = _StreamStubInner(wf, [], error=QueryRejected("L1 rejected"))
     with pytest.raises(QueryRejected):
-        await wf.run(query="spam", session_id="s_tail_reject", history=[])
+        await wf.run(query="spam", session_id="s_tail_reject", history=[], project_context=_project_context())
 
 
 @pytest.mark.asyncio
@@ -159,7 +165,7 @@ async def test_inner_fail_without_streamed_tokens_reraises():
     wf = RagRgreConvWorkflow(on_event=on_event)
     wf._inner = _StreamStubInner(wf, [], error=RuntimeError("guard blew up"))
     with pytest.raises(RuntimeError):
-        await wf.run(query="giá studio", session_id="s_tail_nostr", history=[])
+        await wf.run(query="giá studio", session_id="s_tail_nostr", history=[], project_context=_project_context())
 
 
 @pytest.mark.asyncio
@@ -169,11 +175,11 @@ async def test_rerun_after_abort_gets_fresh_state():
     wf = RagRgreConvWorkflow(on_event=on_event)
     failing = _StreamStubInner(wf, _split_deltas(_FULL_ANSWER), error=RuntimeError("x"))
     wf._inner = failing
-    first = await wf.run(query="giá", session_id="s_rerun", history=[])
+    first = await wf.run(query="giá", session_id="s_rerun", history=[], project_context=_project_context())
     assert first["answer_truncated"] is True
     ok_result = {"answer": "Căn studio giá treo 1,98 tỷ anh nhé.", "requires_review": False}
     wf._inner = _StreamStubInner(wf, _split_deltas(ok_result["answer"]), result=ok_result)
-    second = await wf.run(query="giá", session_id="s_rerun", history=[])
+    second = await wf.run(query="giá", session_id="s_rerun", history=[], project_context=_project_context())
     assert "answer_truncated" not in second
     assert second["answer"] == "Căn studio giá treo 1,98 tỷ anh nhé."
 
@@ -187,7 +193,7 @@ async def test_stream_tail_flushed_on_timeout_degraded_done():
     wf._inner = _StreamStubInner(
         wf, _split_deltas(_FULL_ANSWER), error=TimeoutError("step budget hit")
     )
-    result = await wf.run(query="giá studio", session_id="s_tail_timeout", history=[])
+    result = await wf.run(query="giá studio", session_id="s_tail_timeout", history=[], project_context=_project_context())
     expected = sanitize_answer_text(_FULL_ANSWER, terminated=True)
     assert result["answer"] == expected
     assert result["answer_truncated"] is True
@@ -205,7 +211,7 @@ async def test_done_answer_neutralizes_unterminated_marker():
     wf._inner = _StreamStubInner(
         wf, _split_deltas(raw), result={"answer": raw, "requires_review": False}
     )
-    result = await wf.run(query="giá studio", session_id="s_done_term", history=[])
+    result = await wf.run(query="giá studio", session_id="s_done_term", history=[], project_context=_project_context())
     assert result["answer"] == "Giá studio 1,98 tỷ "
     assert "[chunk_a1b2c3d4" not in result["answer"]
     assert "".join(d.get("text", "") for e, d in events if e == "token") == result["answer"]
@@ -218,7 +224,7 @@ def test_asgi_sse_done_replaces_partial_after_midstream_death(monkeypatch):
 
     class FailingPipe:
         async def run(
-            self, query, session_id, as_of, history, project_key=None, device_id=None, on_event=None
+            self, query, session_id, as_of, history, *, project_context, device_id=None, on_event=None
         ):
             wf = RagRgreConvWorkflow(on_event=on_event)
             wf._inner = _StreamStubInner(
@@ -229,7 +235,7 @@ def test_asgi_sse_done_replaces_partial_after_midstream_death(monkeypatch):
                 session_id=session_id,
                 as_of=as_of,
                 history=history or [],
-                project_key=project_key,
+                project_context=project_context,
                 device_id=device_id,
             )
 
@@ -273,7 +279,7 @@ def test_asgi_sse_normal_completion_done_answer_equals_streamed_text(monkeypatch
 
     class OkPipe:
         async def run(
-            self, query, session_id, as_of, history, project_key=None, device_id=None, on_event=None
+            self, query, session_id, as_of, history, *, project_context, device_id=None, on_event=None
         ):
             wf = RagRgreConvWorkflow(on_event=on_event)
             wf._inner = _StreamStubInner(
@@ -286,7 +292,7 @@ def test_asgi_sse_normal_completion_done_answer_equals_streamed_text(monkeypatch
                 session_id=session_id,
                 as_of=as_of,
                 history=history or [],
-                project_key=project_key,
+                project_context=project_context,
                 device_id=device_id,
             )
 
@@ -569,6 +575,27 @@ async def test_apply_fallback_gates_non_price_turns():
 
 
 @pytest.mark.asyncio
+async def test_apply_fallback_skips_type_estimates_for_any_exact_price_query():
+    merged = Merged(
+        rag_blocks="",
+        evidence_blocks="",
+        sources=[],
+        facts=[],
+        meta={
+            "project_key": "camellia",
+            "query": "So sánh giá CH-13A và CH-11",
+            "rewritten": "bảng giá studio", 
+        },
+    )
+    with patch(
+        "api.application.services.estimates_fallback.fetch_unit_estimates",
+        new=AsyncMock(return_value=_estimate_rows()),
+    ) as fetch:
+        assert await apply_estimates_fallback(merged) is False
+    fetch.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_guard_confidence_medium_with_estimate_evidence():
     evidence = build_estimate_evidence(_estimate_rows())
     # Post-aggregation contract: policy data lives INSIDE fields
@@ -630,8 +657,14 @@ def _make_routed(rewritten: str) -> RoutedResult:
 async def test_workflow_seam_feeds_populated_meta_to_estimates_fallback(monkeypatch):
     """Production path for Bug B: workflow.merge writes meta.query/rewritten/
     project_key BEFORE store.set("merged"), then generate -> stream_answer runs
-    apply_estimates_fallback(merged) on that same object, and the hydrated
-    estimate facts reach the authoritative StopEvent payload."""
+    apply_estimates_fallback(merged) on that same object.
+
+    The fallback's own output is asserted on ``merged`` (the seam this test
+    names). It is NOT asserted on the StopEvent payload: ``v_unit_estimates``
+    rows are range/estimate with no fact id, no source document and no active
+    campaign, so they fail prompt-evidence integrity and the turn is replaced
+    by the number-free limitation — see D3 below and
+    tests/test_financial_claim_publication.py."""
     events: list[tuple[str, dict]] = []
     captured: dict = {}
 
@@ -645,6 +678,7 @@ async def test_workflow_seam_feeds_populated_meta_to_estimates_fallback(monkeypa
         # The EXACT seam call generate.stream_answer performs before tier select.
         captured["meta"] = {k: merged.meta.get(k) for k in ("project_key", "query", "rewritten")}
         captured["applied"] = await apply_estimates_fallback(merged)
+        captured["facts"] = [fact["fe_id"] for fact in merged.facts]
         yield "giá treo trả lời"
 
     async def fake_output_guard(answer, facts, sources, routing, meta=None):
@@ -669,15 +703,76 @@ async def test_workflow_seam_feeds_populated_meta_to_estimates_fallback(monkeypa
             query="Lấy cho anh căn rẻ nhất",
             session_id=None,
             history=[],
-            project_key="camellia",
+            project_context=_project_context(),
         )
-
     fetch.assert_awaited_once_with("camellia")
     assert captured["applied"] is True
     # Meta was populated by the merge step before generate consumed it.
     assert captured["meta"]["project_key"] == "camellia"
     assert captured["meta"]["query"] == "Lấy cho anh căn rẻ nhất"
     assert captured["meta"]["rewritten"]
-    # Hydrated estimate evidence reached the output payload.
-    assert [f["fe_id"] for f in result["facts"]] == ["fe-001", "fe-002"]
-    assert result["confidence"] == "MEDIUM"
+    # The fallback hydrated the estimate evidence onto the merged object.
+    assert captured["facts"] == ["fe-001", "fe-002"]
+    assert result["answer"] == workflow_module.LOW_GROUNDING_MESSAGE
+    assert result["confidence"] == "LOW"
+
+
+@pytest.mark.asyncio
+async def test_estimates_fallback_numerics_never_publish(monkeypatch):
+    """D3: ``v_unit_estimates`` fallback rows are UNPUBLISHABLE numerics.
+
+    The seam test above proves the fallback hydrates evidence onto ``merged``;
+    this one proves that when the draft quotes those numbers the workflow
+    replaces the answer instead of shipping a model-invented price. A fallback
+    range carries no fact id, no source document and no active campaign, so
+    ``_sql_confirms_fact`` can never match it against the SQL leg.
+    """
+    events: list[tuple[str, dict]] = []
+    draft = "Căn rẻ nhất của dự án có giá treo từ 1.980.000.000 đồng đến 2.640.000.000 đồng."
+
+    async def fake_guard(raw):
+        return InputGuardResult(clean=raw, rejected=False, degraded=True)
+
+    async def fake_rewrite(clean, history, as_of_iso):
+        return _make_routed("căn hộ có giá rẻ nhất dự án")
+
+    async def fake_stream(merged, history, high_stakes):
+        from api.application.services import generate as generate_module
+
+        generate_module.build_messages(merged, history)
+        await apply_estimates_fallback(merged)
+        yield draft
+
+    async def fake_output_guard(answer, facts, sources, routing, meta=None):
+        return OutputGuardResult(confidence="HIGH", requires_review=False, verdicts={})
+
+    async def fake_audit(entry):
+        return None
+
+    monkeypatch.setattr(workflow_module, "guard_input", fake_guard)
+    monkeypatch.setattr(workflow_module, "rewrite_query", fake_rewrite)
+    monkeypatch.setattr(workflow_module, "get_reranker", lambda: _FakeReranker())
+    monkeypatch.setattr(workflow_module, "stream_answer", fake_stream)
+    monkeypatch.setattr(workflow_module, "guard_output", fake_output_guard)
+    monkeypatch.setattr(workflow_module, "write_audit", fake_audit)
+
+    with patch(
+        "api.application.services.estimates_fallback.fetch_unit_estimates",
+        new=AsyncMock(return_value=_estimate_rows()),
+    ):
+        wf = RagQueryWorkflow(on_event=lambda e, d: events.append((e, d)))
+        result = await wf.run(
+            query="Giá căn rẻ nhất dự án",
+            session_id=None,
+            history=[],
+            project_context=_project_context(),
+        )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+    for figure in ("1.980.000.000", "2.640.000.000", "1,98 tỷ", "2,64 tỷ"):
+        assert figure not in token_text
+        assert figure not in result["answer"]
+    assert result["answer"] == workflow_module.LOW_GROUNDING_MESSAGE
+    assert result["confidence"] == "LOW"
+    assert result["requires_review"] is True

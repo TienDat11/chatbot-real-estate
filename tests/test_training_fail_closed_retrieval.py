@@ -1,42 +1,22 @@
-"""FR-25 review fix: an unresolved training turn must fail CLOSED in the workflow.
-
-Contract locked here (Reviewer wave, 2026-09):
-
-1. training marker + NO context project -> run_rag_leg/run_sql_leg/get_geo/
-   image seams are NEVER called: a None project scope would drop the
-   ``d.project_key = $2`` predicate in rag_leg._post_filter and retrieve the
-   FULL corpus (every project's chunks together). Zero sources, zero facts,
-   zero images, zero places, and the loud ``training_scope_unresolved``
-   degrade flag rides into the audit.
-2. training marker + real context project -> every data consumer receives the
-   RESOLVED project ('camellia'), never the '_training' marker: retrieval,
-   SQL, merge_context placeholder hydration, and the estimates fallback
-   (meta.retrieval_project_key).
-3. customer mode with project_key=None keeps its legacy unscoped contract
-   (single-active default rule, story 10.1) — the fail-closed guard is
-   training-only and must not change it.
-
-All offline: every leg/service seam is a recording fake — no DB, no LLM.
-"""
+"""Active ProjectContext scope reaches workflow data consumers."""
 
 from __future__ import annotations
 
 import asyncio
 
 from api.application.pipelines import workflow as wf_mod
-from api.application.pipelines.workflow import (
-    RagQueryWorkflow,
-    training_retrieval_scope,
-)
+from api.application.pipelines.workflow import RagQueryWorkflow
 from api.application.services.estimates_fallback import apply_estimates_fallback
 from api.application.services.merge import Merged
+from api.application.services.project_context import ProjectContext
 from api.application.services.rag_leg import RagLegResult
 from api.application.services.sql_leg import SqlLegResult
 from api.domain.services.guard_input import GuardResult as InputGuardResult
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
 from api.domain.services.rewrite import RoutedResult
 
-# All three legs on so every fail-closed guard must be exercised at once.
+
+# All workflow legs run so every ProjectContext consumer is exercised.
 _ROUTING_ALL = {
     "needs_rag": True,
     "needs_sql": True,
@@ -97,8 +77,6 @@ def _install_seams(monkeypatch, rewritten: str = "hoi tra cuu"):
         )
 
     async def fake_rag(rewritten_, hl, ll, as_of, project_key=None):
-        # Reaching this seam at all with a training-unresolved turn is the bug;
-        # record the scope so resolved tests can assert on it.
         rec["rag_calls"].append(project_key)
         return RagLegResult([], degraded=False)
 
@@ -108,8 +86,9 @@ def _install_seams(monkeypatch, rewritten: str = "hoi tra cuu"):
 
     async def fake_merge(query, chunks, rows, as_of, project_key=None):
         rec["merge_scopes"].append(project_key)
-        return _make_merged()
-
+        merged = _make_merged()
+        rec["merged"] = merged
+        return merged
     async def fake_search(*args, **kwargs):
         rec["search_images_calls"].append((args, kwargs))
         return []
@@ -119,6 +98,7 @@ def _install_seams(monkeypatch, rewritten: str = "hoi tra cuu"):
         return []
 
     async def fake_stream(merged, history, high_stakes):
+        rec["prompt_meta"] = dict(merged.meta)
         yield "ok"
 
     async def fake_output_guard(answer, facts, sources, routing, meta=None):
@@ -145,7 +125,7 @@ def _install_seams(monkeypatch, rewritten: str = "hoi tra cuu"):
     return rec
 
 
-def _run(monkeypatch, *, project_key, training_context):
+def _run(monkeypatch, *, project_context):
     rec = _install_seams(monkeypatch)
 
     async def go():
@@ -154,81 +134,46 @@ def _run(monkeypatch, *, project_key, training_context):
             query="hoi",
             session_id=None,
             history=[],
-            project_key=project_key,
-            training_context_project_key=training_context,
+            project_context=project_context,
         )
 
     return asyncio.run(go()), rec
 
 
-# --- 1. training + NO context: zero retrieval anywhere --------------------------
+# --- 1. Training and customer active-scope contracts ----------------------------
 
 
-def test_training_unresolved_calls_no_retrieval_seams(monkeypatch) -> None:
-    result, rec = _run(monkeypatch, project_key="_training", training_context=None)
+def test_training_scope_reaches_every_data_consumer(monkeypatch) -> None:
+    context = ProjectContext("camellia", "training", (("camellia", "Camellia"),))
+    result, rec = _run(monkeypatch, project_context=context)
 
-    # Absolute fail-closed: not one data seam was entered.
-    assert rec["rag_calls"] == []
-    assert rec["sql_calls"] == []
-    assert rec["geo_calls"] == []
-    assert rec["search_images_calls"] == []
-    assert rec["fetch_board_calls"] == []
-    # Nothing of any project reaches the answer contract.
-    assert result["sources"] == []
-    assert result["facts"] == []
-    assert result["images"] == []
-    assert result["places"] == []
-    # Loud degrade flag rides into the audit (the ONLY way an operator sees it).
-    assert "training_scope_unresolved" in rec["audits"][-1]["degraded"]
-
-
-# --- 2. training + real context: every consumer gets the RESOLVED key -----------
-
-
-def test_training_resolved_scopes_every_leg_to_real_project(monkeypatch) -> None:
-    result, rec = _run(monkeypatch, project_key="_training", training_context="camellia")
-
-    assert rec["rag_calls"] == ["camellia"]  # never the marker
+    assert rec["rag_calls"] == ["camellia"]
     assert rec["sql_calls"] == ["camellia"]
-    assert rec["merge_scopes"] == ["camellia"]  # placeholder hydration scope
-    assert rec["geo_calls"]  # geo ran against the resolved context project
-    # The marker must still ride the prompt-profile meta (contract with
-    # generate.build_messages / select_answer_tier) — but never a data scope.
-    assert training_retrieval_scope("_training", "camellia") == "camellia"
+    assert rec["merge_scopes"] == ["camellia"]
+    assert rec["geo_calls"]
+    assert rec["search_images_calls"][0][1]["project_key"] == "camellia"
+    assert rec["prompt_meta"]["project_key"] == "camellia"
+    assert rec["prompt_meta"]["answer_mode"] == "training"
+    assert result["sources"] == []
 
 
-# --- 3. customer None scope preserved; training None never reaches the RAG leg --
+def test_customer_active_scope_reaches_data_consumers(monkeypatch) -> None:
+    context = ProjectContext("camellia", "normal", (("camellia", "Camellia"),))
+    _, rec = _run(monkeypatch, project_context=context)
+
+    assert rec["rag_calls"] == ["camellia"]
+    assert rec["sql_calls"] == ["camellia"]
+    assert rec["merge_scopes"] == ["camellia"]
+    assert rec["geo_calls"]
+    assert rec["search_images_calls"][0][1]["project_key"] == "camellia"
+    assert rec["prompt_meta"]["project_key"] == "camellia"
+    assert rec["prompt_meta"]["answer_mode"] == "normal"
 
 
-def test_customer_none_scope_contract_preserved(monkeypatch) -> None:
-    _, rec = _run(monkeypatch, project_key=None, training_context=None)
-
-    # Customer mode may legitimately run unscoped (single-active default,
-    # story 10.1): the guard is training-only and must not change this.
-    assert rec["rag_calls"] == [None]
-    assert rec["sql_calls"] == [None]
+# --- 2. Estimates fallback uses the active project scope ------------------------
 
 
-def test_no_training_path_reaches_run_rag_leg_with_none(monkeypatch) -> None:
-    """Static + behavioral proof: for a training marker the ONLY scope value
-    that can reach run_rag_leg is a non-empty context project."""
-    # Behavior: marker + empty-string context (the hostile shape that would
-    # slip past an `is None` check) also fails closed.
-    _, rec = _run(monkeypatch, project_key="_training", training_context="")
-    assert rec["rag_calls"] == []
-    assert rec["sql_calls"] == []
-    # The hydration scope is the falsy resolved context — NEVER the marker.
-    assert all(s != "_training" for s in rec["merge_scopes"])
-    # The resolved scope of any training marker is falsy only when unresolved,
-    # and unresolved is exactly the guarded branch.
-    assert training_retrieval_scope("_training", None) is None
-    assert training_retrieval_scope("_training", "") == ""
-
-
-# --- 4. estimates fallback reads the RESOLVED key, gates closed on training None -
-
-
-def test_estimates_fallback_uses_retrieval_key_and_gates_closed(monkeypatch) -> None:
+def test_estimates_fallback_uses_active_project_scope(monkeypatch) -> None:
     from api.application.services import estimates_fallback as ef
 
     calls: list = []
@@ -239,28 +184,16 @@ def test_estimates_fallback_uses_retrieval_key_and_gates_closed(monkeypatch) -> 
 
     monkeypatch.setattr(ef, "fetch_unit_estimates", fake_fetch)
 
-    # Training turn, resolved context: fallback must read 'camellia', not '_training'.
-    # Query text carries the Vietnamese price-intent hint the gate requires.
     m = _make_merged(
-        project_key="_training",
+        project_key="camellia",
         retrieval_project_key="camellia",
+        answer_mode="training",
         query="giá căn hộ bao nhiêu",
         rewritten="giá căn hộ camellia",
     )
     asyncio.run(apply_estimates_fallback(m))
     assert calls == ["camellia"]
 
-    # Training turn, unresolved: retrieval key is None -> gate closed, no read
-    # (never falls back to the marker, never reads any project's board).
-    calls.clear()
-    m2 = _make_merged(
-        project_key="_training",
-        retrieval_project_key=None,
-        query="giá căn hộ bao nhiêu",
-        rewritten="giá căn hộ",
-    )
-    assert asyncio.run(apply_estimates_fallback(m2)) is False
-    assert calls == []
 
     # Legacy merged frames without the retrieval key keep the old behavior.
     calls.clear()
@@ -269,3 +202,60 @@ def test_estimates_fallback_uses_retrieval_key_and_gates_closed(monkeypatch) -> 
     )
     asyncio.run(apply_estimates_fallback(m3))
     assert calls == ["soleil"]
+
+
+def _record(project_key: str):
+    from api.application.ports.project_registry import ProjectRegistryRecord
+
+    return ProjectRegistryRecord(
+        project_key=project_key, ten_thuong_mai=project_key, ten_phap_ly=None,
+        vi_tri=None, hotline=None, location=None, geo_center_lat=None,
+        geo_center_lng=None, is_hot=False, status="active",
+    )
+
+
+def _run_with_record(monkeypatch, *, project_context, record):
+    rec = _install_seams(monkeypatch)
+    monkeypatch.setattr(wf_mod, "request_project_snapshot", lambda: record)
+
+    async def go():
+        wf = RagQueryWorkflow(on_event=lambda e, d: rec["events"].append((e, d)))
+        return await wf.run(
+            query="hoi",
+            session_id=None,
+            history=[],
+            project_context=project_context,
+        )
+
+    return asyncio.run(go()), rec
+
+
+def test_non_camellia_without_coords_omits_geo_lookup(monkeypatch) -> None:
+    """A resolved non-Camellia project with no verified coords never borrows Camellia's center."""
+    context = ProjectContext("soleil", "normal", (("soleil", "Soleil"),))
+    result, rec = _run_with_record(monkeypatch, project_context=context, record=_record("soleil"))
+    assert rec["geo_calls"] == []
+    assert result["places"] == []
+
+
+def test_camellia_without_coords_keeps_legacy_geo_lookup(monkeypatch) -> None:
+    """Opposite control: Camellia with no record coords keeps the legacy default lookup."""
+    context = ProjectContext("camellia", "normal", (("camellia", "Camellia"),))
+    result, rec = _run_with_record(monkeypatch, project_context=context, record=_record("camellia"))
+    assert rec["geo_calls"]
+    assert result["places"] == []
+
+
+def test_non_camellia_with_coords_still_looks_up(monkeypatch) -> None:
+    """Non-Camellia WITH verified coords keeps its own lookup (guard is fallback-only)."""
+    from api.application.ports.project_registry import ProjectRegistryRecord
+
+    context = ProjectContext("soleil", "normal", (("soleil", "Soleil"),))
+    record = ProjectRegistryRecord(
+        project_key="soleil", ten_thuong_mai="soleil", ten_phap_ly=None,
+        vi_tri=None, hotline=None, location=None, geo_center_lat=16.2,
+        geo_center_lng=108.3, is_hot=False, status="active",
+    )
+    result, rec = _run_with_record(monkeypatch, project_context=context, record=record)
+    assert rec["geo_calls"] == [(16.2, 108.3, 10000)]
+    assert result["places"] == []

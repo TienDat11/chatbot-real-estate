@@ -15,8 +15,12 @@ import json
 import pytest
 
 from api.application.pipelines.workflow import QueryRejected
+from api.application.services.project_context import ProjectContext
 from api.application.services.token_coalescer import TokenCoalescer
 from api.interfaces.api.main import QueryRequest, _sse_stream
+
+
+_CAMELLIA_CONTEXT = ProjectContext("camellia", "normal", (("camellia", "Camellia"),))
 
 
 class _FakeClock:
@@ -163,7 +167,7 @@ async def test_sse_stream_coalesces_tokens_and_equals_done_answer():
     frames = await _collect(
         _sse_stream(
             _CoalescingPipe(pre, post), QueryRequest(query="hello"), None,
-            "camellia", None, _Gate(), _Context(),
+            _CAMELLIA_CONTEXT, None, _Gate(), _Context(),
         )
     )
     names = [e for e, _ in frames]
@@ -197,7 +201,7 @@ async def test_error_frame_rejected_is_not_retryable():
     frames = await _collect(
         _sse_stream(
             _RejectingPipe(), QueryRequest(query="hi"), None,
-            "camellia", None, _Gate(), _Context(),
+            _CAMELLIA_CONTEXT, None, _Gate(), _Context(),
         )
     )
     err = next(d for e, d in frames if e == "error")
@@ -211,7 +215,7 @@ async def test_error_frame_internal_is_retryable():
     frames = await _collect(
         _sse_stream(
             _CrashingPipe(), QueryRequest(query="hi"), None,
-            "camellia", None, _Gate(), _Context(),
+            _CAMELLIA_CONTEXT, None, _Gate(), _Context(),
         )
     )
     err = next(d for e, d in frames if e == "error")
@@ -223,7 +227,7 @@ async def test_error_frame_internal_is_retryable():
 async def test_error_frame_stream_timeout_is_retryable():
     frames = await _collect(
         _sse_stream(
-            _StalledPipe(), QueryRequest(query="hi"), None, "camellia", None,
+            _StalledPipe(), QueryRequest(query="hi"), None, _CAMELLIA_CONTEXT, None,
             _Gate(), _Context(), total_timeout_s=0.3,
         )
     )

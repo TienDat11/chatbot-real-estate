@@ -152,9 +152,16 @@ gcloud run services replace service.yaml --region asia-southeast1
 ```
 
 ### 2.2. Tại sao probe + min-instances (+ throttling mặc định)
-- **Cloud Run giữ traffic cho đến khi startup probe pass.** Ngân sách probe ở trên = 8 lần × 10 giây = 80 giây, đủ cho LightRAG init lạnh ~30–40 giây (`get_lightrag` + `initialize_storages`, chạy trong background task lúc khởi động khi `RAG_PREWARM_ENABLED=true`).
-- **`--min-instances=1`**: luôn giữ 1 instance không bị scale về 0 → LightRAG đã warm ở lúc deploy/startup, chat đầu tiên không trả chậm.
-- **Bỏ `--no-cpu-throttling` (request-based billing, khuyến nghị):** prewarm LightRAG chạy TRONG startup và `/ready` chỉ trả `ok:true` khi `RAG_PREWARM_FINISHED=true` — tức prewarm xong TRƯỚC khi nhận traffic, và Cloud Run cấp CPU đầy đủ trong giai đoạn startup ở cả hai chế độ. Sau đó instance idle chỉ giữ LightRAG ấm trong bộ nhớ (trạng thái RAM), CPU tạm ngưng không làm mất sự ấm đó → chat đầu tiên vẫn nhanh, hóa đơn idle giảm ~4 lần (idle min-instance $0.0000025/vCPU-s so với always-CPU $0.000018/vCPU-s, proxy tier-1). Đổi lại: lead-mirror reconciliation sweep (chu kỳ 5 phút) chỉ chạy khi có request đi qua — chấp nhận được vì tolerance sweep là 300 phút.
+**Demo candidate with startup cleanup paused:** Cloud Run can instantiate a zero-traffic
+revision, so before any candidate starts set `CHAT_HISTORY_RETENTION_ENABLED=false`
+to skip the retention task and its customer-session DELETE. Also set
+`ZALO_BOT_MAINTENANCE_ENABLED=false` to skip the Zalo runtime's exhausted-event
+UPDATE and terminal-event DELETE while leaving due-event processing/webhook paths
+available. Both flags default to `true` and are reversible. Keep the existing
+`RAG_PREWARM_ENABLED=true` behavior so LightRAG completes its explicitly permitted
+startup initialization before `/ready` succeeds for the candidate's probes.
+No other manual migration, re-embedding, repair, seed, or DDL is authorized.
+
 - **`--max-instances=2 --memory=1Gi --cpu=1`**: chặn chi phí khi bị spam; 1Gi chặn OOM của LightRAG/LlamaIndex (mặc định 512MiB chưa verify đủ); 1 vCPU đủ cho 1 worker uvicorn.
 - Hai flag `--min-instances=1` + startup probe `/ready` là thứ tiêu diệt vấn đề "chat đầu tiên chậm 30–40 giây"; CPU throttling mặc định là thứ hạ hóa đơn xuống ~$13/tháng thay vì ~$52.
 

@@ -18,13 +18,49 @@ the step cannot be invoked directly the way ``sql_leg`` is in test_workflow_stam
 from __future__ import annotations
 
 import asyncio
+from datetime import date, timedelta
 
+import pytest
+import api.application.services.merge as merge_module
+from api.application.services.generate import build_messages
+from api.application.services.rag_leg import RagLegResult
 from api.workflow import RagQueryWorkflow
-
+from api.application.services.project_context import ProjectContext
 from api import workflow as workflow_module
 from api.domain.services.guard_input import GuardResult as InputGuardResult
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
 from api.domain.services.rewrite import RoutedResult
+
+
+_ACTIVE_CATALOGUE = (("camellia", "Camellia"),)
+
+
+def _project_context(project_key="camellia") -> ProjectContext:
+    return ProjectContext(project_key, "normal", _ACTIVE_CATALOGUE)
+
+
+# One registry-authorized chunk: the merge step only emits a row the document
+# registry signs off on, and image publication rides the same evidence gate.
+_CONTENT = "Camellia có vườn cây xanh và lối dạo bộ."
+
+
+def _chunk() -> dict:
+    return {"id": "camellia-amenities", "content": _CONTENT, "score": 0.91}
+
+
+def _record() -> dict:
+    return {
+        "chunk_id": "camellia-amenities",
+        "registry_content": _CONTENT,
+        "doc_id": "camellia-doc",
+        "title": "Hồ sơ tiện ích Camellia",
+        "section": "Tiện ích",
+        "kind": "project",
+        "project_key": "camellia",
+        "status": "published",
+        "effective_from": date.today() - timedelta(days=1),
+        "effective_to": None,
+    }
 
 
 class _FakeReranker:
@@ -35,11 +71,12 @@ class _FakeReranker:
 
 
 def _make_routed(rewritten: str) -> RoutedResult:
-    """A rag-only routed result (needs_sql/geo False) so the legs short-circuit."""
+    """A rag-only routed result (needs_sql/geo False) so those legs short-circuit;
+    needs_rag stays True so the merge step has authority to publish images."""
     return RoutedResult(
         rewritten=rewritten,
         routing={
-            "needs_rag": False,
+            "needs_rag": True,
             "needs_sql": False,
             "structured_path": "none",
             "needs_geo": False,
@@ -68,7 +105,32 @@ def _patch_workflow(monkeypatch, *, rewritten: str) -> list[tuple[str, dict]]:
         return _make_routed(rewritten)
 
     async def fake_stream(merged, history, high_stakes):
+        # The real stream_answer builds the prompt through build_messages, which
+        # records the rows output_guard verifies before it may publish anything.
+        # The harness must drive that same seam or images have no authority.
+        build_messages(merged, history)
         yield "câu trả lời"
+
+    async def fake_rag(*args, **kwargs):
+        return RagLegResult(chunks=[_chunk()])
+
+    class _Connection:
+        async def fetch(self, sql_text, ids):
+            return [_record()]
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Connection()
+
+        async def __aexit__(self, *exc):
+            return None
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    async def fake_pool():
+        return _Pool()
 
     async def fake_output_guard(answer, facts, sources, routing, meta=None):
         return OutputGuardResult(confidence="MEDIUM", requires_review=False, verdicts={})
@@ -79,29 +141,32 @@ def _patch_workflow(monkeypatch, *, rewritten: str) -> list[tuple[str, dict]]:
     monkeypatch.setattr(workflow_module, "guard_input", fake_guard)
     monkeypatch.setattr(workflow_module, "rewrite_query", fake_rewrite)
     monkeypatch.setattr(workflow_module, "get_reranker", lambda: _FakeReranker())
+    monkeypatch.setattr(workflow_module, "run_rag_leg", fake_rag)
     monkeypatch.setattr(workflow_module, "stream_answer", fake_stream)
     monkeypatch.setattr(workflow_module, "guard_output", fake_output_guard)
     monkeypatch.setattr(workflow_module, "write_audit", fake_audit)
+    monkeypatch.setattr(merge_module, "get_ro_pool", fake_pool)
 
     return events
 
 
 def _run_workflow(
-    raw_query: str, rewritten: str, images: list[dict], monkeypatch
+    raw_query: str, rewritten: str, images: list[dict], monkeypatch, project_key="camellia"
 ) -> tuple[dict, dict, list]:
     """Run the whole workflow with the shared patch set; return (result, calls, events)."""
     calls = {"search_query": None}
     events = _patch_workflow(monkeypatch, rewritten=rewritten)
 
-    async def fake_search(query):
+    async def fake_search(query, project_key=None):
         calls["search_query"] = query
         return images
-
     monkeypatch.setattr(workflow_module, "search_images", fake_search)
 
     async def go():
         wf = RagQueryWorkflow(on_event=lambda e, d: events.append((e, d)))
-        return await wf.run(query=raw_query, session_id=None, history=[])
+        return await wf.run(
+            query=raw_query, session_id=None, history=[], project_context=_project_context(project_key)
+        )
 
     result = asyncio.run(go())
     return result, calls, events
@@ -110,23 +175,43 @@ def _run_workflow(
 def test_merge_calls_search_images_with_rewritten_query(monkeypatch):
     """The merge step must search by the REWRITTEN query (self-contained), not the
     raw user input — the caption embedding only matches against a full phrase."""
-    raw_query = "căn CH-3 giá bao nhiêu"
+    # The raw turn must be non-price: the P0-03C publication gate clears the
+    # evidence/image payloads for an unanswered price question, so a price raw
+    # query would never reach the image-publication path this test pins.
+    raw_query = "căn CH-3 có tiện ích gì"
     rewritten = "mặt bằng căn hộ CH-03 giá bán hiện tại"
     result, calls, _ = _run_workflow(
-        raw_query, rewritten, [{"image_id": "i1", "score": 0.9}], monkeypatch
+        raw_query,
+        rewritten,
+        [{"image_id": "i1", "score": 0.9, "project_key": "camellia", "unit_code": "CH-03"}],
+        monkeypatch,
     )
-
     assert calls["search_query"] == rewritten
     assert calls["search_query"] != raw_query  # raw input never used
-    assert result["images"] == [{"image_id": "i1", "score": 0.9}]
+    assert result["images"] == [
+        {"image_id": "i1", "score": 0.9, "project_key": "camellia", "unit_code": "CH-03"}
+    ]
 
 
 def test_merge_emits_sse_images_event_with_search_results(monkeypatch):
     """SSE_EVENT_IMAGES must fire exactly once with the full list search_images
     returned — the payload contract the FE gallery renders from."""
-    images = [{"image_id": "i1", "score": 0.9}, {"image_id": "i2", "score": 0.8}]
+    images = [
+        {
+            "image_id": "i1",
+            "score": 0.9,
+            "project_key": "camellia",
+            "unit_code": "CH-03",
+        },
+        {
+            "image_id": "i2",
+            "score": 0.8,
+            "project_key": "camellia",
+            "unit_code": "CH-03",
+        },
+    ]
     result, calls, events = _run_workflow(
-        "giá căn CH-3", "giá bán căn hộ CH-03", images, monkeypatch
+        "căn CH-3 có tiện ích gì", "giá bán căn hộ CH-03", images, monkeypatch
     )
 
     name = workflow_module.SSE_EVENT_IMAGES
@@ -141,14 +226,16 @@ def test_merge_empty_images_still_completes_pipeline(monkeypatch):
     """search_images returning [] must not crash the pipeline: the images SSE
     event carries {"images": []}, StopEvent.result["images"] is [], and the
     answer still streams through normally."""
-    result, _, events = _run_workflow("giá căn CH-3", "giá bán căn hộ CH-03", [], monkeypatch)
+    result, _, events = _run_workflow("căn CH-3 có tiện ích gì", "giá bán căn hộ CH-03", [], monkeypatch)
 
     name = workflow_module.SSE_EVENT_IMAGES
     image_events = [(e, d) for e, d in events if e == name]
     assert len(image_events) == 1
     assert image_events[0][1] == {"images": []}
     assert result["images"] == []
-    assert result["answer"] == "câu trả lời"  # pipeline completed, answer intact
+    # The empty search must not suppress the answer: the pipeline still streams
+    # and returns the normal answer text.
+    assert result["answer"] == "câu trả lời"
 
 
 # ==============================================================================
@@ -192,10 +279,15 @@ def _run_image_branch(
     async def go():
         wf = RagQueryWorkflow(on_event=lambda e, d: events.append((e, d)))
         return await wf.run(
-            query="bạn gửi tôi bảng giá của từng loại căn hộ được không?",
+            # Non-price and unit-code-free: the raw turn must publish (P0-03C
+            # clears images on an unanswered price question), and a concrete
+            # unit code would make the presentation filter drop the un-keyed
+            # semantic fixture. The board intent is mocked, so the price-board
+            # rewritten text still exercises the fetch-vs-search wiring.
+            query="tiện ích dự án camellia có gì",
             session_id=None,
             history=[],
-            project_key=project_key,
+            project_context=_project_context(project_key or "camellia"),
         )
 
     result = asyncio.run(go())
@@ -243,19 +335,11 @@ def test_single_type_intent_keeps_semantic_path(monkeypatch):
     assert result["images"] == semantic_images
 
 
-def test_full_board_intent_without_project_key_falls_back_to_semantic(monkeypatch):
-    """The deterministic fetch needs a project scope: without one the pipeline
-    degrades to the legacy unscoped semantic call instead of failing."""
-    semantic_images = [{"image_id": "sem-unscoped"}]
-    result, calls, _ = _run_image_branch(
-        monkeypatch,
-        rewritten="bảng giá từng loại căn hộ",
-        project_key=None,
-        intent=True,
-        board=[{"image_id": "should-not-appear"}],
-        semantic_images=semantic_images,
-    )
+def test_full_board_intent_requires_project_context(monkeypatch):
+    workflow = RagQueryWorkflow()
 
-    assert calls["search"] == (("bảng giá từng loại căn hộ",), {})
-    assert calls["fetch_project"] is None
-    assert result["images"] == semantic_images
+    async def run_without_project_context():
+        await workflow.run(query="bảng giá từng loại căn hộ", session_id=None, history=[])
+
+    with pytest.raises(ValueError, match="project_context is required"):
+        asyncio.run(run_without_project_context())

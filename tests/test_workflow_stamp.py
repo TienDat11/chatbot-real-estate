@@ -12,7 +12,15 @@ from llama_index.core.workflow import Context
 
 from api.rewrite import RoutedResult
 from api.sql_leg import SqlLegResult
+from api.application.services.project_context import ProjectContext
 from api.workflow import RagQueryWorkflow, SqlRequestEv
+
+
+_ACTIVE_CATALOGUE = (("camellia", "Camellia"),)
+
+
+def _project_context() -> ProjectContext:
+    return ProjectContext("camellia", "normal", _ACTIVE_CATALOGUE)
 
 
 class _Guard:
@@ -55,6 +63,7 @@ def test_sql_leg_stamps_affordability_path(monkeypatch):
         await ctx.store.set("guard", _Guard())
         await ctx.store.set("as_of_date", None)
         await ctx.store.set("degraded", [])
+        await ctx.store.set("project_context", _project_context())
 
         done = await wf.sql_leg(ctx, SqlRequestEv())
         assert done is not None

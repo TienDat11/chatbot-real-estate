@@ -26,10 +26,10 @@ with every external call monkeypatched (no LLM, no DB, no network).
 from __future__ import annotations
 
 import asyncio
-
+from datetime import date, timedelta
 import pytest
 from api.workflow import RagQueryWorkflow
-
+from api.application.services.project_context import ProjectContext
 from api import workflow as workflow_module
 from api.application.pipelines.conv_workflow import RagRgreConvWorkflow
 from api.application.services import generate as generate_module
@@ -47,6 +47,12 @@ from api.workflow import VERIFICATION_FALLBACK_MESSAGE
 from api.application.services import merge as merge_module
 from api.application.services.rag_leg import RagLegResult
 
+_ACTIVE_CATALOGUE = (("camellia", "Camellia"),)
+
+
+def _project_context(project_key="camellia") -> ProjectContext:
+    return ProjectContext(project_key, "normal", _ACTIVE_CATALOGUE)
+
 # --------------------------------------------------------------------------
 # stream_answer: typed failure instead of a fake textual answer
 # --------------------------------------------------------------------------
@@ -54,6 +60,97 @@ from api.application.services.rag_leg import RagLegResult
 
 def _merged() -> Merged:
     return Merged(rag_blocks="", evidence_blocks="", sources=[], facts=[], meta={})
+def _scoped_evidence() -> Merged:
+    """A real ``merge_context`` output: one selected, current, in-scope RAG row
+    plus one confirmed fact. Built with the production builders so the prompt
+    rows the gate re-reads are the ones production would serialize."""
+    chunk = {
+        "id": "chunk-1", "content": "Nguồn dự án", "score": 0.9,
+        "doc_id": "d1", "title": "Nguồn dự án", "section": "Tổng quan",
+        "project_key": "camellia", "status": "published",
+        "effective_from": (date.today() - timedelta(days=1)).isoformat(),
+        "effective_to": None,
+    }
+    evidence = [{
+        "fe_id": "fe-001", "subject": "project:camellia", "policy_key": None,
+        "fields": {"unit_count": 2}, "note": None,
+        "effective_from": (date.today() - timedelta(days=1)).isoformat(),
+        "effective_to": None, "quality": "exact", "trust_level": "confirmed",
+    }]
+    return Merged(
+        rag_blocks=merge_module.build_rag_context([chunk]),
+        evidence_blocks=merge_module.build_evidence_context(evidence),
+        sources=merge_module.build_sources([chunk]),
+        facts=merge_module.build_facts(evidence),
+        meta={
+            "project_key": "camellia", "retrieval_project_key": "camellia",
+            "selected_chunk_ids": ("chunk-1",),
+            "selected_project_keys": ("camellia",),
+            "selected_fact_ids": (),
+            "selected_fe_ids": ("fe-001",),
+        },
+    )
+
+
+def _scoped_price_evidence(unit: str = "CH-03", price: int = 2_850_000_000):
+    """Same as ``_scoped_evidence`` but with a FINANCE-authorized price row.
+
+    P0-03C only lets a figure ship when a selected prompt row carries a fact id
+    proven against the SQL leg plus a current published source document and an
+    active same-project campaign. The plain ``_scoped_evidence`` row has none
+    of those, so a money figure bound to it is a limitation, not a publication.
+
+    Returns ``(merged, sql_rows)``: the workflow re-reads the leg output as
+    ``meta["_fact_evidence"]``, so a financial fixture must supply BOTH halves.
+    """
+    start = (date.today() - timedelta(days=1)).isoformat()
+    chunk = {
+        "id": "chunk-1", "content": "Nguồn dự án", "score": 0.9,
+        "doc_id": "d1", "title": "Bảng giá", "section": "Tổng quan",
+        "project_key": "camellia", "status": "published",
+        "effective_from": start, "effective_to": None,
+    }
+    lineage = {
+        "unit": "vnd",
+        "source_doc_id": "d1",
+        "source_doc_status": "published",
+        "source_doc_project_key": "camellia",
+        "source_doc_effective_from": start,
+        "source_doc_effective_to": None,
+        "campaign_key": "cam-2026q3",
+        "campaign_project_key": "camellia",
+        "campaign_status": "active",
+        "campaign_effective_from": start,
+        "campaign_effective_to": None,
+        "campaign_source_doc_id": "d1",
+        "campaign_source_doc_status": "published",
+        "campaign_source_doc_project_key": "camellia",
+        "campaign_source_doc_effective_from": start,
+        "campaign_source_doc_effective_to": None,
+    }
+    evidence = [{
+        "fe_id": "fe-001", "fact_id": 203, "subject": f"unit:camellia/{unit}",
+        "policy_key": "htls", "fields": {"price_vnd": price}, "note": None,
+        "effective_from": start, "effective_to": None,
+        "quality": "exact", "trust_level": "confirmed",
+        **lineage,
+    }]
+    return (
+        Merged(
+            rag_blocks=merge_module.build_rag_context([chunk]),
+            evidence_blocks=merge_module.build_evidence_context(evidence),
+            sources=merge_module.build_sources([chunk]),
+            facts=merge_module.build_facts(evidence),
+            meta={
+                "project_key": "camellia", "retrieval_project_key": "camellia",
+                "selected_chunk_ids": ("chunk-1",),
+                "selected_project_keys": ("camellia",),
+                "selected_fact_ids": (203,),
+                "selected_fe_ids": ("fe-001",),
+            },
+        ),
+        evidence,
+    )
 
 
 class _FakeLlm:
@@ -143,32 +240,41 @@ def _make_routed(rewritten: str) -> RoutedResult:
         as_of=None,
     )
 
+def _recording(stream):
+    """Wrap a stream stub so the generate step's real side effect still happens:
+    ``build_messages`` records ``_prompt_rag_rows`` / ``_prompt_fact_rows`` via
+    ``_record_prompt_evidence`` (``generate.py:93-99,120,149``). The publication
+    gate reads only those keys, so a bare stub would exercise a state
+    production can never reach."""
+    async def run(merged, history, high_stakes):
+        generate_module.build_messages(merged, history)
+        async for token in stream(merged, history, high_stakes):
+            yield token
+
+    return run
+
 
 def _run_wf(
     monkeypatch,
     *,
+    project_context,
     stream,
     output_guard,
     output_guard_timeout=None,
     log=None,
     audits=None,
-    project_key=None,
+    merged_result=None,
     query=None,
     rag_chunks=None,
     registry_record=None,
-) -> tuple[dict, list[tuple[str, dict]]]:
-    """Run the real RagQueryWorkflow with all externals patched.
+    sql_rows=None,
+):
+    """Run the real workflow with patched external services and scoped fixtures.
 
-    If ``log`` is provided (a shared list), token events are appended as
-    ``("token", text)`` markers so ordering can be observed against guard
-    markers appended by the fake ``output_guard``.
-
-    If ``audits`` is provided (a shared list), each ``write_audit`` call appends
-    the audit dict so fail-closed sanitization of exception metadata can be
-    asserted.
-
-    Returns ``(done_result, events)``. A generation/transport failure raises
-    from within the run (see ``test_generate_step...`` for the expected case).
+    ``sql_rows`` is the real SQL leg's output: P0-03C re-reads it as
+    ``meta["_fact_evidence"]`` and authorizes a figure only when the selected
+    prompt row is byte-identical to the leg row it was serialized from, so a
+    financial fixture must supply the leg, not just the prompt projection.
     """
     events: list[tuple[str, dict]] = []
 
@@ -176,10 +282,14 @@ def _run_wf(
         return InputGuardResult(clean=raw, rejected=False, degraded=True)
 
     async def fake_rewrite(clean, history, as_of_iso):
-        rewritten = clean if rag_chunks is not None else "giá căn CH-03"
+        rewritten = clean if rag_chunks is not None else "thông tin căn hộ"
         routed = _make_routed(rewritten)
         if rag_chunks is not None:
             routed.routing["needs_rag"] = True
+        if sql_rows is not None:
+            routed.routing["needs_sql"] = True
+            routed.routing["structured_path"] = "nl2sql"
+            routed.sql_spec = {"source": "facts"}
         return routed
 
     async def fake_audit(entry):
@@ -195,9 +305,16 @@ def _run_wf(
     monkeypatch.setattr(workflow_module, "guard_input", fake_guard)
     monkeypatch.setattr(workflow_module, "rewrite_query", fake_rewrite)
     monkeypatch.setattr(workflow_module, "get_reranker", lambda: _FakeReranker())
-    monkeypatch.setattr(workflow_module, "stream_answer", stream)
+    monkeypatch.setattr(workflow_module, "stream_answer", _recording(stream))
     monkeypatch.setattr(workflow_module, "guard_output", output_guard)
     monkeypatch.setattr(workflow_module, "write_audit", fake_audit)
+    if sql_rows is not None:
+        async def fake_sql(*args):
+            return workflow_module.SqlLegResult(
+                [dict(row) for row in sql_rows], {"mode": "spec", "source": "facts"}
+            )
+
+        monkeypatch.setattr(workflow_module, "run_sql_leg", fake_sql)
     if rag_chunks is not None:
         async def fake_rag(*args):
             return RagLegResult(chunks=rag_chunks)
@@ -223,6 +340,11 @@ def _run_wf(
         monkeypatch.setattr(workflow_module, "run_rag_leg", fake_rag)
         monkeypatch.setattr(merge_module, "get_ro_pool", fake_pool)
         monkeypatch.setattr(workflow_module, "search_images", lambda *args, **kwargs: asyncio.sleep(0, result=[]))
+    if merged_result is not None:
+        async def fake_merge(query, rag_chunks, evidence, as_of, project_context):
+            return merged_result
+
+        monkeypatch.setattr(workflow_module, "merge_context", fake_merge)
     if output_guard_timeout is not None:
         monkeypatch.setitem(
             workflow_module.STEP_TIMEOUTS, "output_guard", output_guard_timeout
@@ -231,10 +353,9 @@ def _run_wf(
     async def go():
         wf = RagQueryWorkflow(on_event=_cb)
         return await wf.run(
-            query=query if query is not None else "giá căn CH-03",
-            session_id=None, history=[], project_key=project_key
+            query=query if query is not None else "thông tin căn hộ",
+            session_id=None, history=[], project_context=project_context
         )
-
     return asyncio.run(go()), events
 
 
@@ -272,7 +393,7 @@ def test_generate_step_propagates_generation_failure(monkeypatch):
 
     async def go():
         wf = RagQueryWorkflow(on_event=lambda e, d: events.append((e, d)))
-        return await wf.run(query="giá căn CH-03", session_id=None, history=[])
+        return await wf.run(query="giá căn CH-03", session_id=None, history=[], project_context=_project_context())
 
     with pytest.raises(GenerationProviderError):
         asyncio.run(go())
@@ -296,6 +417,7 @@ def test_output_guard_timeout_fails_closed(monkeypatch):
         stream=ok_stream,
         output_guard=slow_output_guard,
         output_guard_timeout=0.01,
+        project_context=_project_context(),
     )
     assert result["confidence"] == "LOW"
     assert result["requires_review"] is True
@@ -312,7 +434,8 @@ def test_output_guard_exception_fails_closed(monkeypatch):
 
     audits: list[dict] = []
     result, _events = _run_wf(
-        monkeypatch, stream=ok_stream, output_guard=broken_output_guard, audits=audits
+        monkeypatch, stream=ok_stream, output_guard=broken_output_guard, audits=audits,
+        project_context=_project_context(),
     )
     assert result["confidence"] == "LOW"
     assert result["requires_review"] is True
@@ -349,7 +472,12 @@ def test_case_a_no_token_before_guard_completion(monkeypatch):
         return OutputGuardResult(confidence="HIGH", requires_review=False, verdicts={})
 
     result, events = _run_wf(
-        monkeypatch, stream=stream, output_guard=output_guard, log=log
+        monkeypatch,
+        stream=stream,
+        output_guard=output_guard,
+        log=log,
+        project_context=_project_context(),
+        merged_result=_scoped_evidence(),
     )
 
     # The guard must have run on the success path.
@@ -389,6 +517,7 @@ def test_case_b_guard_timeout_original_not_emitted(monkeypatch):
     result, events = _run_wf(
         monkeypatch, stream=stream, output_guard=slow_guard,
         output_guard_timeout=0.01,
+        project_context=_project_context(),
     )
 
     token_text = "".join(
@@ -415,7 +544,8 @@ def test_case_c_guard_exception_original_not_emitted(monkeypatch):
 
     audits: list[dict] = []
     result, events = _run_wf(
-        monkeypatch, stream=stream, output_guard=broken_guard, audits=audits
+        monkeypatch, stream=stream, output_guard=broken_guard, audits=audits,
+        project_context=_project_context(),
     )
 
     # Verifier crash metadata is sanitized: stable type name only, no message.
@@ -469,7 +599,7 @@ def test_case_d_provider_failure_no_partial_to_customer(monkeypatch):
 
     async def go():
         wf = RagQueryWorkflow(on_event=lambda e, d: events.append((e, d)))
-        return await wf.run(query="giá căn CH-03", session_id=None, history=[])
+        return await wf.run(query="giá căn CH-03", session_id=None, history=[], project_context=_project_context())
 
     with pytest.raises(GenerationProviderError):
         asyncio.run(go())
@@ -484,8 +614,15 @@ def test_case_d_provider_failure_no_partial_to_customer(monkeypatch):
 def test_case_e_success_delivered_once_equals_verified(monkeypatch):
     """Success path: the answer is delivered exactly once — the joined token text
     equals the verified answer and the returned done payload matches."""
-    full_answer = "diện tích 68 m2, giá 2.85 tỷ [fe-001] theo Bảng giá"
-    chunks = ["diện tích ", "68 m2, ", "giá 2.85 tỷ ", "[fe-001] ", "theo ", "Bảng giá"]
+    # Number-free on purpose: this test owns the TRANSPORT contract (delivered
+    # exactly once, token == done), so the figure it carries would only add an
+    # unverified money claim on top. Priced publication is covered by
+    # tests/test_financial_claim_publication.py against lineage-backed rows.
+    draft_answer = "căn CH-03 thuộc khu dân trí trung tâm [fe-001] theo Bảng giá"
+    # P0-05: the internal [fe-001] marker is now canonicalized BEFORE the
+    # final check/hash, so the delivered string is the sanitized one.
+    full_answer = "căn CH-03 thuộc khu dân trí trung tâm theo Bảng giá"
+    chunks = ["căn CH-03 ", "thuộc khu ", "dân trí trung tâm ", "[fe-001] ", "theo ", "Bảng giá"]
 
     async def stream(merged, history, high_stakes):
         for chunk in chunks:
@@ -497,10 +634,18 @@ def test_case_e_success_delivered_once_equals_verified(monkeypatch):
         received.append(answer)
         return OutputGuardResult(confidence="HIGH", requires_review=False, verdicts={})
 
-    result, events = _run_wf(monkeypatch, stream=stream, output_guard=output_guard)
+    price_merged, price_rows = _scoped_price_evidence()
+    result, events = _run_wf(
+        monkeypatch,
+        stream=stream,
+        output_guard=output_guard,
+        project_context=_project_context(),
+        merged_result=price_merged,
+        sql_rows=price_rows,
+    )
 
     assert len(received) == 1
-    assert received[0] == full_answer
+    assert received[0] == draft_answer
     token_text = "".join(
         d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
     )
@@ -510,38 +655,202 @@ def test_case_e_success_delivered_once_equals_verified(monkeypatch):
     assert result["answer"] == full_answer
 
 
-def test_low_confidence_does_not_publish_original(monkeypatch):
-    """LGN-P0-002R: a guard verdict of LOW (e.g. grounding failure or high-stakes)
-    is NOT safe to deliver — the original answer must be withheld and the
-    deterministic safe-copy delivered exactly once as token == done.answer."""
-    original = "căn CH-03 giá 2.85 tỷ [fe-001]"
+def test_low_confidence_with_same_project_evidence_publishes_reviewable_answer(monkeypatch):
+    """A completed LOW review verdict remains useful when scope is verified."""
+    original = "Thông tin căn hộ đang được chuyên viên kiểm tra thêm."
 
     async def stream(merged, history, high_stakes):
         yield original
 
     async def low_guard(answer, facts, sources, routing, meta=None):
         return OutputGuardResult(
-            confidence="LOW", requires_review=True, verdicts={"high_stakes": True}
+            confidence="LOW", requires_review=True, verdicts={"quality": "low"}
         )
 
-    result, events = _run_wf(monkeypatch, stream=stream, output_guard=low_guard)
+    result, events = _run_wf(
+        monkeypatch,
+        stream=stream,
+        output_guard=low_guard,
+        project_context=_project_context(),
+        merged_result=_scoped_evidence(),
+    )
 
     token_text = "".join(
         d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
     )
+    assert token_text == original
+def test_low_numeric_failure_returns_scoped_uncertainty_not_unsupported_answer(monkeypatch):
+    original = "Căn CH-03 có giá 99 tỷ theo bảng giá."
+
+    async def stream(merged, history, high_stakes):
+        yield original
+
+    audits: list[dict] = []
+    result, events = _run_wf(
+        monkeypatch,
+        stream=stream,
+        output_guard=guard_output,
+        project_context=_project_context(),
+        merged_result=_scoped_evidence(),
+        audits=audits,
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+
     assert original not in token_text
-    assert token_text == VERIFICATION_FALLBACK_MESSAGE
-    assert result["answer"] == VERIFICATION_FALLBACK_MESSAGE
     assert original not in result["answer"]
-    assert result["confidence"] == "LOW"
-    assert result["requires_review"] is True
+    assert result["answer"] == workflow_module.LOW_GROUNDING_MESSAGE
+    assert audits[-1]["guard_verdicts"]["numeric_grounding"] == "fail"
+
+
+def test_low_orphan_citation_returns_scoped_uncertainty(monkeypatch):
+    original = "Thông tin chi tiết [fe-999] đã được ghi nhận."
+
+    async def stream(merged, history, high_stakes):
+        yield original
+
+    async def low_guard(answer, facts, sources, routing, meta=None):
+        return OutputGuardResult(
+            confidence="LOW",
+            requires_review=True,
+            verdicts={"numeric_grounding": "pass", "citation_grounding": {"status": "fail"}},
+        )
+
+    result, events = _run_wf(
+        monkeypatch,
+        stream=stream,
+        output_guard=low_guard,
+        project_context=_project_context(),
+        merged_result=_scoped_evidence(),
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+
+    assert original not in token_text
+    assert original not in result["answer"]
+    assert result["answer"] == workflow_module.LOW_GROUNDING_MESSAGE
+
+
+def test_low_with_no_evidence_remains_fail_closed(monkeypatch):
+    original = "Nội dung chưa có nguồn xác nhận."
+
+    async def stream(merged, history, high_stakes):
+        yield original
+
+    async def low_guard(answer, facts, sources, routing, meta=None):
+        return OutputGuardResult(confidence="LOW", requires_review=True, verdicts={})
+
+    result, events = _run_wf(
+        monkeypatch, stream=stream, output_guard=low_guard, project_context=_project_context()
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+
+    assert original not in token_text
+    assert result["answer"] == VERIFICATION_FALLBACK_MESSAGE
+
+
+def test_low_cross_project_evidence_remains_fail_closed(monkeypatch):
+    original = "Thông tin đã có nguồn."
+
+    async def stream(merged, history, high_stakes):
+        yield original
+
+    async def low_guard(answer, facts, sources, routing, meta=None):
+        return OutputGuardResult(confidence="LOW", requires_review=True, verdicts={})
+
+    result, events = _run_wf(
+        monkeypatch,
+        stream=stream,
+        output_guard=low_guard,
+        project_context=_project_context(),
+        merged_result=Merged(
+            rag_blocks="",
+            evidence_blocks="",
+            sources=[{"doc_id": "d1", "title": "Nguồn", "project_key": "other-project"}],
+            facts=[],
+            meta={"project_key": "camellia", "retrieval_project_key": "camellia"},
+        ),
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+
+    assert original not in token_text
+    assert result["answer"] == VERIFICATION_FALLBACK_MESSAGE
+
+
+def test_low_with_sources_but_no_selected_provenance_remains_fail_closed(monkeypatch):
+    """Sources are present but carry no selected provenance, so the prompt rows
+    cannot match a selection and the gate must fail closed.
+
+    The unresolved-scope branch this test used to name is dead on a real run:
+    ``validate_project_key`` rejects a blank project_key, so ``ProjectContext``
+    can never be built with one and ``retrieval_project`` is always a non-empty
+    str — ``unresolved_scope`` never fires. The reachable block reason here is a
+    grounding failure, which the copy rule maps to LOW_GROUNDING_MESSAGE.
+    """
+    original = "Thông tin đã có nguồn."
+    async def stream(merged, history, high_stakes):
+        yield original
+    async def low_guard(answer, facts, sources, routing, meta=None):
+        return OutputGuardResult(confidence="LOW", requires_review=True, verdicts={})
+    unprovenanced_evidence = Merged(
+        rag_blocks="",
+        evidence_blocks="",
+        sources=[{"doc_id": "d1", "title": "Nguồn"}],
+        facts=[],
+        meta={},
+    )
+    result, events = _run_wf(
+        monkeypatch,
+        stream=stream,
+        output_guard=low_guard,
+        project_context=_project_context(),
+        merged_result=unprovenanced_evidence,
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+    assert original not in token_text
+    assert result["answer"] == workflow_module.LOW_GROUNDING_MESSAGE
+
+
+def test_low_without_completed_verifier_remains_fail_closed(monkeypatch):
+    original = "Thông tin đã có nguồn."
+
+    async def stream(merged, history, high_stakes):
+        yield original
+
+    async def broken_guard(answer, facts, sources, routing, meta=None):
+        return OutputGuardResult(confidence="LOW", requires_review=True, verdicts={})
+
+    result, events = _run_wf(
+        monkeypatch, stream=stream, output_guard=broken_guard, output_guard_timeout=0.001,
+        project_context=_project_context(),
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+
+    assert original not in token_text
+    assert result["answer"] == VERIFICATION_FALLBACK_MESSAGE
+
+
 
 
 def test_medium_success_publishes_original_once(monkeypatch):
     """MEDIUM confidence with requires_review (high-stakes) still publishes the
-    verified original answer exactly once — only LOW suppresses publication."""
-    full_answer = "diện tích 68 m2, giá 2.85 tỷ [fe-001] theo Bảng giá"
-    chunks = ["diện tích ", "68 m2, ", "giá 2.85 tỷ ", "[fe-001] ", "theo ", "Bảng giá"]
+    verified answer exactly once. A LOW verdict is not an automatic veto — the
+    decision is whether selected, current, same-project evidence exists."""
+    # Number-free for the same reason as test_case_e: this test owns the
+    # MEDIUM-publishes-once tier contract, not figure authority.
+    draft_answer = "căn CH-03 thuộc khu dân trí trung tâm [fe-001] theo Bảng giá"
+    full_answer = "căn CH-03 thuộc khu dân trí trung tâm theo Bảng giá"
+    chunks = ["căn CH-03 ", "thuộc khu ", "dân trí trung tâm ", "[fe-001] ", "theo ", "Bảng giá"]
 
     async def stream(merged, history, high_stakes):
         for chunk in chunks:
@@ -555,10 +864,18 @@ def test_medium_success_publishes_original_once(monkeypatch):
             confidence="MEDIUM", requires_review=True, verdicts={"high_stakes": True}
         )
 
-    result, events = _run_wf(monkeypatch, stream=stream, output_guard=output_guard)
+    price_merged, price_rows = _scoped_price_evidence()
+    result, events = _run_wf(
+        monkeypatch,
+        stream=stream,
+        output_guard=output_guard,
+        project_context=_project_context(),
+        merged_result=price_merged,
+        sql_rows=price_rows,
+    )
 
     assert len(received) == 1
-    assert received[0] == full_answer
+    assert received[0] == draft_answer
     token_text = "".join(
         d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
     )
@@ -619,7 +936,7 @@ async def test_case_d1_conv_failure_no_partial_leak(monkeypatch):
 
     wf = RagRgreConvWorkflow(on_event=_cb)
     with pytest.raises(GenerationProviderError):
-        await wf.run(query="giá căn CH-03", session_id="s_d1", history=[])
+        await wf.run(query="giá căn CH-03", session_id="s_d1", history=[], project_context=_project_context())
 
     token_text = "".join(
         d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
@@ -635,6 +952,10 @@ async def test_case_d2_conv_guard_timeout_no_partial_leak(monkeypatch):
     After the fix, output_guard emits the deterministic safe-copy as the sole
     token frame; the conv wrapper forwards that to the done payload, so the
     original is absent from token frames AND done payload.
+
+    The turn is a price-availability question and the verifier is unavailable,
+    so the copy is the failed-price one: an unchecked lookup is uncertainty,
+    never a claim that no price exists.
 
     Asserts: original answer absent from token frames AND done payload;
     safe-copy delivered once and equals done.answer.
@@ -673,19 +994,18 @@ async def test_case_d2_conv_guard_timeout_no_partial_leak(monkeypatch):
     )
 
     wf = RagRgreConvWorkflow(on_event=_cb)
-    result = await wf.run(query="giá căn CH-03", session_id="s_d2", history=[])
-
+    result = await wf.run(query="thông tin giá căn CH-03", session_id="s_d2", history=[], project_context=_project_context())
     token_text = "".join(
         d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
     )
     for forbidden in ("diện tích", "68 m2", "giá 2 tỷ", "[fe-001]"):
         assert forbidden not in token_text
-    assert token_text == VERIFICATION_FALLBACK_MESSAGE
+    assert token_text == workflow_module.PRICE_LOOKUP_UNCERTAIN
     assert result["confidence"] == "LOW"
     assert result["requires_review"] is True
     for forbidden in ("diện tích", "68 m2", "giá 2 tỷ", "[fe-001]"):
         assert forbidden not in result["answer"]
-    assert result["answer"] == VERIFICATION_FALLBACK_MESSAGE
+    assert result["answer"] == workflow_module.PRICE_LOOKUP_UNCERTAIN
 
 
 # --------------------------------------------------------------------------
@@ -694,7 +1014,7 @@ async def test_case_d2_conv_guard_timeout_no_partial_leak(monkeypatch):
 
 
 def test_orphan_citation_forces_low_and_review():
-    facts = [{"fe_id": "fe-001", "fields": {"price": 2_000_000_000}}]
+    facts = [{"fe_id": "fe-001", "fields": {"price_vnd": 2_000_000_000}, "unit": "vnd"}]
     sources = [{"doc_id": "d1", "title": "Bảng giá"}]
     result = asyncio.run(
         guard_output(
@@ -712,7 +1032,7 @@ def test_orphan_citation_forces_low_and_review():
 
 def test_grounded_citation_keeps_high_confidence():
     """The fail-closed rule must not drag down a properly grounded answer."""
-    facts = [{"fe_id": "fe-001", "fields": {"price": 2_000_000_000}}]
+    facts = [{"fe_id": "fe-001", "fields": {"price_vnd": 2_000_000_000}, "unit": "vnd"}]
     sources = [{"doc_id": "d1", "title": "Bảng giá"}]
     result = asyncio.run(
         guard_output(
@@ -742,28 +1062,30 @@ def test_orphan_citation_workflow_fails_closed(monkeypatch):
     async def stream(merged, history, high_stakes):
         yield original
 
-    async def fake_merge(query, rag_chunks, evidence, as_of, project_key=None):
-        return Merged(
+    audits: list[dict] = []
+    result, events = _run_wf(
+        monkeypatch,
+        stream=stream,
+        output_guard=guard_output,
+        audits=audits,
+        project_context=_project_context(),
+        merged_result=Merged(
             rag_blocks="",
             evidence_blocks="",
             sources=[{"doc_id": "d1", "title": "Bảng giá"}],
-            facts=[{"fe_id": "fe-001", "fields": {"price": 2_000_000_000}}],
-        )
-
-    monkeypatch.setattr(workflow_module, "merge_context", fake_merge)
-
-    audits: list[dict] = []
-    result, events = _run_wf(
-        monkeypatch, stream=stream, output_guard=guard_output, audits=audits
+            facts=[{"fe_id": "fe-001", "fields": {"price_vnd": 2_000_000_000}, "unit": "vnd"}],
+            meta={"project_key": "camellia", "retrieval_project_key": "camellia"},
+        ),
     )
+
 
     token_text = "".join(
         d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
     )
     assert original not in token_text
-    assert token_text == VERIFICATION_FALLBACK_MESSAGE
+    assert token_text == workflow_module.LOW_GROUNDING_MESSAGE
     assert original not in result["answer"]
-    assert result["answer"] == VERIFICATION_FALLBACK_MESSAGE
+    assert result["answer"] == workflow_module.LOW_GROUNDING_MESSAGE
     assert result["confidence"] == "LOW"
     assert result["requires_review"] is True
 
@@ -815,7 +1137,7 @@ def test_camellia_amenity_rag_area_publishes_without_sql_facts(monkeypatch):
             audits = []
             result, events = _run_wf(
                 scope, stream=stream, output_guard=guard_output,
-                query="Dự án camellia tiện ích gì?", project_key="camellia",
+                query="Dự án camellia tiện ích gì?", project_context=_project_context(),
                 rag_chunks=[chunk], registry_record=selected_record, audits=audits,
             )
             token_text = "".join(
@@ -830,3 +1152,168 @@ def test_camellia_amenity_rag_area_publishes_without_sql_facts(monkeypatch):
                 assert token_text != answer
                 assert result["answer"] != answer
                 assert verdict == "fail"
+def test_partial_generation_has_no_evidence_or_answer_publication(monkeypatch):
+    partial = "Camellia có tiện ích bí mật."
+
+    async def stream(merged, history, high_stakes):
+        yield partial
+        raise GenerationProviderError("provider reset")
+
+    async def output_guard(*args, **kwargs):
+        raise AssertionError("guard must not run after partial generation")
+
+    async def fake_guard(raw):
+        return InputGuardResult(clean=raw, rejected=False, degraded=True)
+
+    async def fake_rewrite(clean, history, as_of_iso):
+        return _make_routed(clean)
+
+    monkeypatch.setattr(workflow_module, "guard_input", fake_guard)
+    monkeypatch.setattr(workflow_module, "rewrite_query", fake_rewrite)
+    monkeypatch.setattr(workflow_module, "get_reranker", lambda: _FakeReranker())
+    monkeypatch.setattr(workflow_module, "stream_answer", stream)
+    monkeypatch.setattr(workflow_module, "guard_output", output_guard)
+
+    events = []
+    async def go():
+        return await RagQueryWorkflow(on_event=lambda event, data: events.append((event, data))).run(
+            query="Camellia tiện ích", session_id=None, history=[], project_context=_project_context())
+
+    with pytest.raises(GenerationProviderError):
+        asyncio.run(go())
+    assert not any(event in {workflow_module.SSE_EVENT_TOKEN, workflow_module.SSE_EVENT_SOURCES,
+        workflow_module.SSE_EVENT_FACTS, workflow_module.SSE_EVENT_IMAGES} for event, _ in events)
+
+
+# --------------------------------------------------------------------------
+# P0-03C: the citation "pending" gate, and the verifier-timeout pair
+# --------------------------------------------------------------------------
+
+
+def test_pending_citation_publishes_only_when_the_answer_cites_nothing(monkeypatch):
+    """``pending`` means the verifier could not check the citations at all.
+
+    An answer that carries no ``[fe-xxx]`` has nothing unverified to hide, so it
+    may ship — flagged for review. An answer that DOES cite is exactly the case
+    pending was raised for, so it blocks.
+    """
+    async def stream(merged, history, high_stakes):
+        yield "Dự án có vườn cây xanh và lối dạo bộ."
+
+    async def pending_guard(answer, facts, sources, routing, meta=None):
+        return OutputGuardResult(
+            confidence="MEDIUM",
+            requires_review=True,
+            verdicts={"citation_grounding": {"status": "pending"}},
+        )
+
+    result, events = _run_wf(
+        monkeypatch, stream=stream, output_guard=pending_guard,
+        project_context=_project_context(), merged_result=_scoped_evidence(),
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+    assert token_text == "Dự án có vườn cây xanh và lối dạo bộ."
+    assert result["answer"] == token_text
+    assert result["requires_review"] is True
+
+
+def test_pending_citation_blocks_an_answer_that_cites_an_id(monkeypatch):
+    original = "Dự án có vườn cây xanh [fe-001]."
+
+    async def stream(merged, history, high_stakes):
+        yield original
+
+    async def pending_guard(answer, facts, sources, routing, meta=None):
+        return OutputGuardResult(
+            confidence="MEDIUM",
+            requires_review=True,
+            verdicts={"citation_grounding": {"status": "pending"}},
+        )
+
+    result, events = _run_wf(
+        monkeypatch, stream=stream, output_guard=pending_guard,
+        project_context=_project_context(), merged_result=_scoped_evidence(),
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+    assert original not in token_text
+    assert result["answer"] == workflow_module.LOW_GROUNDING_MESSAGE
+    assert result["confidence"] == "LOW"
+
+
+def test_verifier_timeout_publishes_a_safe_descriptive_but_blocks_a_number_bearing_one(
+    monkeypatch,
+):
+    """The WARN/BLOCK split is scoped, not global.
+
+    A number-free draft that verification could not check still says nothing the
+    selected evidence does not support, so it ships reviewed. A draft carrying a
+    figure nobody could check does not.
+    """
+    async def slow_guard(answer, facts, sources, routing, meta=None):
+        await asyncio.sleep(0.3)
+        return OutputGuardResult(confidence="HIGH", requires_review=False, verdicts={})
+
+    async def descriptive_stream(merged, history, high_stakes):
+        yield "Dự án có vườn cây xanh và lối dạo bộ."
+
+    result, events = _run_wf(
+        monkeypatch, stream=descriptive_stream, output_guard=slow_guard,
+        output_guard_timeout=0.01,
+        project_context=_project_context(), merged_result=_scoped_evidence(),
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+    assert token_text == "Dự án có vườn cây xanh và lối dạo bộ."
+    assert result["answer"] == token_text
+    assert result["confidence"] == "LOW"
+    assert result["requires_review"] is True
+
+    async def numbered_stream(merged, history, high_stakes):
+        yield "Dự án có 2 tỷ vốn quy mô đầu tư."
+
+    result, events = _run_wf(
+        monkeypatch, stream=numbered_stream, output_guard=slow_guard,
+        output_guard_timeout=0.01,
+        project_context=_project_context(), merged_result=_scoped_evidence(),
+    )
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+    assert "2 tỷ" not in token_text
+    assert result["answer"] == workflow_module.VERIFICATION_FALLBACK_MESSAGE
+    assert result["confidence"] == "LOW"
+    assert result["requires_review"] is True
+
+
+def test_real_verifier_pending_publishes_an_uncited_answer(monkeypatch):
+    """The `pending` branch, proven with the REAL verifier rather than a stub.
+
+    guard_output reaches `pending` when the answer carries no ``[fe-xxx]`` span
+    at all: there is nothing to check, so it neither passes nor fails. That is
+    exactly the case the publish-without-id rule governs, and a canned verdict
+    would only prove the workflow's arithmetic, not that the branch is reachable.
+    """
+    answer = "Dự án có vườn cây xanh và lối dạo bộ."
+    audits: list[dict] = []
+
+    async def stream(merged, history, high_stakes):
+        yield answer
+
+    result, events = _run_wf(
+        monkeypatch, stream=stream, output_guard=guard_output, audits=audits,
+        project_context=_project_context(), merged_result=_scoped_evidence(),
+    )
+    # Non-vacuity: the real verifier really did land on `pending`.
+    assert audits[-1]["guard_verdicts"]["citation_grounding"]["status"] == "pending"
+    token_text = "".join(
+        d.get("text", "") for e, d in events if e == workflow_module.SSE_EVENT_TOKEN
+    )
+    assert token_text == answer
+    assert result["answer"] == answer
+    # Nothing was verified, so it ships flagged rather than clean.
+    assert result["requires_review"] is True

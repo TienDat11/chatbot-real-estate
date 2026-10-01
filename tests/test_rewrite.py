@@ -284,3 +284,24 @@ def test_price_plus_count_forced_documented():
     assert routed.routing["structured_path"] == "affordability"
     assert routed.sql_spec["budget_vnd"] == 4_000_000_000
 
+# P0-04: the facts spec shape the SQL contract depends on survives normalization
+# unchanged, so the server-side builder — not the router — folds subject_type.
+def test_facts_subject_type_and_price_order_survive_rewrite_normalization():
+    routed = _route(
+        {
+            "routing": {"needs_sql": True, "structured_path": "spec"},
+            "sql_spec": {
+                "subject_type": "unit",
+                "source": "facts",
+                "filters": [
+                    {"field": "subject_key", "op": "=", "value": "unit:camellia/CH-03"}
+                ],
+                "order_by": {"field": "price_vnd", "dir": "asc"},
+                "limit": 1,
+            },
+        },
+        query="căn hộ CH-03",
+    )
+    assert routed.routing["structured_path"] == "spec"
+    assert routed.sql_spec["subject_type"] == "unit"
+    assert routed.sql_spec["order_by"] == {"field": "price_vnd", "dir": "asc"}

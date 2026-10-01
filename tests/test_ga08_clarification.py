@@ -58,7 +58,7 @@ async def test_selected_clarification_recovers_intent_but_persists_raw_query():
     assert outcome.resolution_source == ProjectResolutionSource.USER_SELECTION
     assert outcome.project_key == "camellia"
     assert captured["query"] == "Giá căn hai phòng ngủ bao nhiêu?\nChọn dự án thứ nhất"
-    assert captured["project_key"] == "camellia"
+    assert captured["project_context"].project_key == "camellia"
     assert history.appended[0]["user_content"] == request.query
     assert history.appended[0]["resolved_project_key"] == "camellia"
 
@@ -120,7 +120,7 @@ async def test_second_project_selection_does_not_reuse_consumed_intent():
     assert outcome.resolution_source == ProjectResolutionSource.USER_SELECTION
     assert outcome.project_key == "soleil"
     assert captured["query"] == request.query
-    assert captured["project_key"] == "soleil"
+    assert captured["project_context"].project_key == "soleil"
     assert history.appended[1]["user_content"] == request.query
     assert history.appended[1]["resolved_project_key"] == "soleil"
 
@@ -168,7 +168,7 @@ async def test_explicit_switch_wins_over_session_and_selection():
 
     assert outcome.resolution_source == ProjectResolutionSource.EXPLICIT_QUERY
     assert outcome.project_key == "soleil"
-    assert captured["project_key"] == "soleil"
+    assert captured["project_context"].project_key == "soleil"
     assert captured["query"] == request.query
     assert history.appended[0]["resolved_project_key"] == "soleil"
     assert history.appended[0]["user_content"] == request.query

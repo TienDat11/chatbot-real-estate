@@ -30,7 +30,15 @@ from api.application.services.global_project_resolution import (
     ProjectResolutionSource,
     ProjectResolutionStatus,
 )
-from api.interfaces.api.assistant_routes import _stream_assistant
+from api.interfaces.api.assistant_routes import _make_callback, _stream_assistant
+from tests.test_final_answer_integrity import (  # noqa: E402
+    DESCRIPTIVE,
+    _Harness,
+    _long_descriptive,
+    _build_core,
+    sha,
+)
+from tests.test_global_assistant_service import FakeHistory
 
 
 class _FakeRequest:
@@ -510,3 +518,100 @@ async def test_cancellation_during_hung_refund_terminates_boundedly():
 
     # (d) The bounded teardown surfaced exactly one refund attempt.
     assert gate.refunded == 1
+
+
+@pytest.mark.asyncio
+async def test_real_core_bounded_stream_done_and_persisted_bytes_agree(monkeypatch):
+    """P0-05: the SSE token, the `done` payload, the persisted assistant row and
+    the audit hash are the SAME bytes for a real core + real facade.
+
+    The bound is a GA input, not a public HTTP field: it travels core -> facade
+    -> workflow finalization, so it is applied before the answer is tokenized,
+    hashed and audited. Only the LLM provider, the registry pool, history and
+    quota are fakes.
+    """
+    draft = _long_descriptive()
+    harness = _Harness(monkeypatch)
+    harness.install(query="Camellia tiện ích", draft=draft)
+    history = FakeHistory()
+    core = _RealCore(harness, history)
+    gate = _RecordingQuotaGate(turn_context=_ReservedTurnContext("camellia"))
+    queue: asyncio.Queue = asyncio.Queue()
+    input_ = GlobalAssistantInput(
+        query="Camellia tiện ích", session_id="p05-stream", identity_key="anon:t",
+        max_visible_chars=2000, on_event=_make_callback(queue),
+    )
+
+    frames = await _drain(_stream_assistant(
+        request=_FakeRequest(), core=core, input_=input_, queue=queue,
+        quota_gate=gate, x_anon_token=None, staff_principal=None,
+    ))
+
+    parsed = _parse(frames)
+    events = [name for name, _ in parsed]
+    assert events[0] == "ack" and events[1] == "project_context"
+    assert events[-1] == "done"
+    assert parsed[-1][1]["resolution_status"] == "resolved"
+
+    streamed = "".join(d.get("text", "") for name, d in parsed if name == "token")
+    done_answer = parsed[-1][1]["answer"]
+    persisted = history.appended[0]["assistant_content"]
+    expected = streamed.encode("utf-8")
+
+    # One string, four surfaces.
+    # The budget counts characters, not UTF-8 bytes: this Vietnamese answer is
+    # ~1.9k chars and 2.7k bytes, and every surface holds the same string.
+    assert len(streamed) <= 2000
+    assert len(expected) > len(streamed)
+    assert expected.startswith("Căn hộ tại Camellia.".encode("utf-8"))
+    assert done_answer.encode("utf-8") == expected
+    assert persisted.encode("utf-8") == expected
+    assert harness.audits[-1]["answer_hash"] == sha(streamed)
+    # The audit row is keyed by the same trace the `done` payload reports.
+    assert harness.audits[-1]["trace_id"] == parsed[-1][1]["trace_id"]
+    # The turn was delivered, so the reservation is finalized, never refunded.
+    assert gate.prepared == 1 and gate.finalized == 1 and gate.refunded == 0
+
+
+@pytest.mark.asyncio
+async def test_real_core_unbounded_stream_keeps_the_whole_answer(monkeypatch):
+    """No budget means no cut: the whole answer reaches every surface."""
+    harness = _Harness(monkeypatch)
+    harness.install(query="Camellia tiện ích", draft=DESCRIPTIVE)
+    history = FakeHistory()
+    core = _RealCore(harness, history)
+    queue: asyncio.Queue = asyncio.Queue()
+
+    frames = await _drain(_stream_assistant(
+        request=_FakeRequest(), core=core, queue=queue,
+        input_=GlobalAssistantInput(
+            query="Camellia tiện ích", session_id="p05-unbounded", identity_key="anon:t",
+            on_event=_make_callback(queue),
+        ),
+        quota_gate=_RecordingQuotaGate(turn_context=_ReservedTurnContext("camellia")),
+        x_anon_token=None, staff_principal=None,
+    ))
+
+    parsed = _parse(frames)
+    streamed = "".join(d.get("text", "") for n, d in parsed if n == "token")
+    assert streamed == DESCRIPTIVE
+    assert parsed[-1][1]["answer"].encode("utf-8") == DESCRIPTIVE.encode("utf-8")
+    assert history.appended[0]["assistant_content"] == DESCRIPTIVE
+    assert harness.audits[-1]["answer_hash"] == sha(DESCRIPTIVE)
+
+class _RealCore:
+    """The REAL ``GlobalAssistantService`` over a fake history and a real facade.
+
+    Everything between the HTTP frame and the audit row is production code:
+    resolution, the conv facade, the workflow finalization gate, the core
+    watchdog and the history write.
+    """
+
+    def __init__(self, harness: _Harness, history) -> None:
+        self._service = _build_core(harness, history)
+
+    async def prepare_turn(self, request):
+        return await self._service.prepare_turn(request)
+
+    async def execute_prepared_turn(self, prepared):
+        return await self._service.execute_prepared_turn(prepared)

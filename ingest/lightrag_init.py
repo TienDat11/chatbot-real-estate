@@ -25,27 +25,40 @@ LIGHTRAG_READY = False  # read by api/rag_leg.py and /ready
 
 
 def project_workspace(project_key: str | None) -> str | None:
-    """Map a project to its LightRAG workspace (None = historical default instance).
-
-    WHY: the 2026-08-28 soleil-lightrag-scope-repair migration isolates Soleil's
-    LightRAG rows in the `ragre_mvp` workspace. Query AND ingest paths must both
-    honor the mapping or Soleil rows become unreachable/misscoped. Projects
-    without a dedicated workspace keep the pre-existing default instance.
-    """
+    """Map Camellia to the legacy default and other real projects in isolation."""
+    if project_key == "camellia" or project_key is None:
+        return None
     if project_key == "soleil":
         from api.infrastructure.config.config import get_settings  # noqa: PLC0415
 
         ws = get_settings().lightrag_workspace_soleil
-        # Fail closed: the LightRAG ctor default is "" (lightrag/lightrag.py:413)
-        # and PG storage maps empty/falsy to "default" (postgres_impl.py:2700-2702).
-        # Either value would collapse Soleil into the shared default namespace.
         if not ws.strip() or ws.strip().lower() == "default":
             raise ValueError(
                 f"LIGHTRAG_WORKSPACE_SOLEIL resolved to {ws!r} which is the "
                 "shared default namespace -- Soleil must have an isolated workspace"
             )
         return ws
-    return None
+    from api.application.services.project_scope import validate_project_key  # noqa: PLC0415
+
+    validate_project_key(project_key)
+    ws_generic = f"project_{project_key}"
+    # Fail closed: a generic namespace must never collapse into the shared
+    # default namespace or any configured/reserved workspace (Soleil or the
+    # working-dir workspace). A collision means misconfiguration, not a new
+    # project to onboard -- refuse rather than cross-contaminate corpora.
+    from api.infrastructure.config.config import get_settings  # noqa: PLC0415
+
+    cfg = get_settings()
+    if not ws_generic.strip() or ws_generic.strip().lower() == "default":
+        raise ValueError(
+            f"project workspace {ws_generic!r} collides with the shared default namespace"
+        )
+    for reserved in (cfg.lightrag_workspace_soleil, cfg.lightrag_workspace):
+        if isinstance(reserved, str) and reserved.strip() and ws_generic == reserved.strip():
+            raise ValueError(
+                f"project workspace {ws_generic!r} collides with configured workspace {reserved!r}"
+            )
+    return ws_generic
 
 
 def _redact(exc: Exception) -> str:

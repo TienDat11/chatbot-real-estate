@@ -569,11 +569,19 @@ class Settings(BaseSettings):
     chat_history_retention_days: int = 30
     lead_cta_after_turns: int = 3
 
+    # Disable customer chat-session expiration cleanup for a demo revision.
+    # Default on preserves the existing retention behavior.
+    chat_history_retention_enabled: bool = True
+
     # --- Zalo Bot webhook ingress (ZB-01) ---
     # zalo_bot_enabled gates the ingress: when False an authenticated, valid
     # webhook still returns 2xx but performs zero side effects (no DB write,
     # no RAG, no provider outbound). Disabled must never break app startup.
     zalo_bot_enabled: bool = False
+    # Demo-only pause for terminal-event maintenance; fresh inbox processing remains enabled.
+    # Default on preserves existing exhausted-event and terminal-row cleanup behavior.
+    zalo_bot_maintenance_enabled: bool = True
+
     # Shared secret checked via hmac.compare_digest against the
     # X-Bot-Api-Secret-Token header. An empty value fails closed (403) at
     # every webhook. Never log the header or this secret.

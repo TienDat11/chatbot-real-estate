@@ -20,6 +20,9 @@ logger = logging.getLogger("api.guard_output")
 # Numbers with Vietnamese units (tỷ/triệu/ngàn + %/m2); "financial" only when a
 # unit is present or the magnitude is >= 1M (skips articles, years, floors).
 _NUMBER_RE = re.compile(r"(\d[\d.,]*)\s*(tỷ|tỉ|triệu|ngàn|nghìn|đồng|đ|vnđ|%|m2|m²)?", re.IGNORECASE)
+_IDENTIFIER_RE = re.compile(
+    r"(?<![\w])(?:CH-\d{1,2}[A-Z]?|\[fe-\d{3}\])", re.IGNORECASE
+)
 _FINANCIAL_MIN = 1_000_000
 
 _VN_UNITS = {
@@ -138,8 +141,14 @@ def _normalize_amount_text(text: str) -> Decimal | None:
 def _extract_amount_matches(text: str) -> list[tuple[Decimal, str | None, int, int]]:
     """Extract normalized values with units and answer spans."""
     answer = text or ""
+    identifiers = list(_IDENTIFIER_RE.finditer(answer))
     out: list[tuple[Decimal, str | None, int, int]] = []
     for match in _NUMBER_RE.finditer(answer):
+        if any(
+            identifier.start() < match.end() and match.start() < identifier.end()
+            for identifier in identifiers
+        ):
+            continue
         d = _normalize_amount_text(match.group(0))
         if d is None:
             continue
@@ -151,7 +160,7 @@ def _extract_amount_matches(text: str) -> list[tuple[Decimal, str | None, int, i
 
 
 def extract_amounts(text: str) -> list[Decimal]:
-    """Extract normalized financial amounts from the answer."""
+    """Extract financial amounts, excluding digits inside unit/citation IDs."""
     return [amount for amount, _, _, _ in _extract_amount_matches(text)]
 
 
@@ -206,9 +215,9 @@ def _rag_area_match(
         return False
     label = labels[0]
     for evidence in rag_area_evidence:
-        if not isinstance(evidence, (tuple, list)) or len(evidence) != 5:
+        if not isinstance(evidence, (tuple, list)) or len(evidence) not in {5, 6}:
             continue
-        evidence_amount, evidence_label, _, source_title, _ = evidence
+        evidence_amount, evidence_label, _, source_title, _, *_scope = evidence
         if evidence_label != label or _to_decimal(evidence_amount) != amount or not isinstance(source_title, str):
             continue
         title = _normalize_clause_text(source_title)
@@ -218,6 +227,7 @@ def _rag_area_match(
         ):
             return True
     return False
+
 
 def evidence_values(facts: list[dict]) -> list[Decimal]:
     """Normalized field values from FACT_EVIDENCE blocks."""

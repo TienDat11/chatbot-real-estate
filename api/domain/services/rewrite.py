@@ -119,7 +119,10 @@ else:
 _SYSTEM_REWRITE = (
     "Bạn là bộ định tuyến query cho chatbot bất động sản pháp lý Việt Nam. "
     "Nhiệm vụ: viết lại query cho tự chứa (self-contained), quyết định route (RAG/SQL), "
-    "xây sql_spec nếu cần, liệt kê keywords. Trả về ĐÚNG MỘT JSON object, không kèm text khác."
+    "xây sql_spec nếu cần, liệt kê keywords. Trả về ĐÚNG MỘT JSON object, không kèm text khác. "
+    "sql_spec chỉ dùng field/ops đã liệt kê trong ví dụ; KHÔNG đưa "
+    "project_name/project_key (hay bất kỳ metadata danh tính dự án nào) vào sql_spec — "
+    "server tự gắn phạm vi dự án. Vẫn giữ nguyên tên dự án trong rewritten_query/history."
 )
 
 

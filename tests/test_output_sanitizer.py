@@ -27,6 +27,10 @@ from api.domain.value_objects.constants import (
     SSE_EVENT_TOKEN,
 )
 
+from api.application.services.project_context import ProjectContext
+
+_CAMELLIA_CONTEXT = ProjectContext("camellia", "normal", (("camellia", "Camellia"),))
+
 # ==============================================================================
 # 1. Blocked patterns (spec §8 table)
 # ==============================================================================
@@ -525,7 +529,12 @@ async def test_token_deltas_streamed_through_sanitizer_and_metadata_frames_ident
 
     # Metadata frames bypass the sanitizer entirely (byte-identical, same object).
     await wf._emit(SSE_EVENT_SOURCES, sources_frame)
-    result = await wf.run(query="giá căn 2PN", session_id="sess_sanitize_wire", history=[])
+    result = await wf.run(
+        query="giá căn 2PN",
+        session_id="sess_sanitize_wire",
+        history=[],
+        project_context=_CAMELLIA_CONTEXT,
+    )
 
     token_frames = [d for e, d in events if e == SSE_EVENT_TOKEN]
     assert len(token_frames) >= 1
@@ -576,7 +585,10 @@ async def test_done_payload_sources_facts_deep_equal_pre_post():
         },
     )
     result = await wf.run(
-        query="chính sách bán hàng", session_id="sess_sanitize_payload", history=[]
+        query="chính sách bán hàng",
+        session_id="sess_sanitize_payload",
+        history=[],
+        project_context=_CAMELLIA_CONTEXT,
     )
     assert result["answer"] == "Chính sách chiết khấu 7% [1]."
     assert result["sources"] == [{"doc_id": "camellia_x", "title": "CSBH 2024", "section": None}]

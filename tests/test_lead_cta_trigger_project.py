@@ -35,10 +35,17 @@ from api.application.pipelines.conv_workflow import (
     SSE_EVENT_ROUTING,
     RagRgreConvWorkflow,
 )
+from api.application.services.project_context import ProjectContext
+
+
 from api.application.services.conv_state import (
     CTA_VARIANTS,
     get_context,
 )
+
+
+def _project_context(project_key: str) -> ProjectContext:
+    return ProjectContext(project_key, "normal", ((project_key, project_key.title()),))
 
 
 class _ScriptedInner:
@@ -108,7 +115,7 @@ async def test_first_turn_stays_silent_before_any_useful_answer():
         query="bảng giá The Soleil bao nhiêu",
         session_id="cta_proj_first_soleil",
         history=[],
-        project_key="soleil",
+        project_context=_project_context("soleil"),
     )
     routing = _routing_frames(events)
     assert len(routing) == 1
@@ -139,13 +146,13 @@ async def test_second_turn_emits_lead_cta_hint_for_every_project(project_key: st
         query="chính sách bán hàng như thế nào",
         session_id=session_id,
         history=[],
-        project_key=project_key,
+        project_context=_project_context(project_key),
     )
     await wf.run(
         query="tiến độ thanh toán ra sao",
         session_id=session_id,
         history=[{"role": "user", "content": "chính sách bán hàng như thế nào"}],
-        project_key=project_key,
+        project_context=_project_context(project_key),
     )
     routing = _routing_frames(events)
     assert len(routing) == 2
@@ -187,7 +194,7 @@ async def test_all_low_answers_starve_the_cta_forever():
             query=q,
             session_id=session_id,
             history=[{"role": "user", "content": f"q{i}"}] if i else [],
-            project_key="soleil",
+            project_context=_project_context("soleil"),
         )
     routing = _routing_frames(events)
     assert len(routing) == 3
