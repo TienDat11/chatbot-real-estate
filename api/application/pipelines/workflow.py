@@ -629,16 +629,20 @@ logger = logging.getLogger("api.workflow")
 # nl2sql ~8s, rerank 0.3-0.5s, geo 0.5ms, output_guard 0.2-4ms, images ~0.3s.
 # Each value keeps >=1.3x headroom over the observed happy-path time so normal
 # requests are never cut, while still bounding stuck calls so the workflow
-# degrades to its fallback instead of parking. nl2sql 11.0: measured happy-path
-# runs ~8s, so 11.0 leaves >=1.3x headroom (8.0 sat the budget and timed out real
-# requests). sql 3.0: run_sql_leg runs two sequential with_rls_identity(timeout_s=1.5)
+# degrades to its fallback instead of parking. rag 60.0: warm rag settles at
+# 5.9-15s, but a cold LightRAG init adds ~25s of one-time graph/vector setup, so
+# the previous 25.0 sat exactly on the observed 28-40s cold path and cut it into
+# rag_timeout -> the customer saw the fail-closed copy on the first turn after
+# every scale-out. 60.0 covers cold init while still bounding a stuck call.
+# nl2sql 11.0: measured happy-path runs ~8s, so 11.0 leaves >=1.3x headroom (8.0
+# sat the budget and timed out real requests). sql 3.0: run_sql_leg runs two sequential with_rls_identity(timeout_s=1.5)
 # blocks, so the outer budget must cover their combined 3.0s so the inner
 # statement_timeout fires before the workflow cuts. geo 3.0: covers the
 # google_places HTTP TIMEOUT_S of 2.5s.
 STEP_TIMEOUTS = {
     "guard": 1.0,
     "rewrite": 12.0,
-    "rag": 25.0,
+    "rag": 60.0,
     "sql": 3.0,
     "sql_nl2sql": 11.0,
     "rerank": 3.0,

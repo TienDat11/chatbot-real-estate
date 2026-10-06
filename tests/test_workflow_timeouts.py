@@ -14,7 +14,7 @@ from api.application.pipelines.workflow import RagQueryWorkflow, STEP_TIMEOUTS
 EXPECTED_TIMEOUTS = {
     "guard": 1.0,
     "rewrite": 12.0,
-    "rag": 25.0,
+    "rag": 60.0,
     "sql": 3.0,
     "sql_nl2sql": 11.0,
     "rerank": 3.0,
@@ -23,6 +23,9 @@ EXPECTED_TIMEOUTS = {
 }
 
 # Warm-latency ceilings measured by scripts/timing probe (see module docstring).
+# rag is pinned at 60.0, well above the 5.9s warm ceiling: a cold LightRAG init
+# adds ~25s of one-time setup, and the old 25.0 cut that cold path into
+# rag_timeout (measured 28-40s cold turns returning the fail-closed copy).
 MEASURED_MAX = {
     "rewrite": 9.3,
     "rag": 5.9,
