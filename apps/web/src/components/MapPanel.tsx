@@ -241,6 +241,10 @@ export function MapPanel({
     const tracker = createTileFailureTracker();
     (async () => {
       const maplibre = await import("maplibre-gl");
+      // Turbopack rewrites the worker's sibling import to a hashed chunk that
+      // 404s, so the worker never boots and vector sources never load. Serve
+      // the unbundled worker from public/ instead.
+      maplibre.setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
       if (disposed) return;
       const map = new maplibre.Map({
         container: el,

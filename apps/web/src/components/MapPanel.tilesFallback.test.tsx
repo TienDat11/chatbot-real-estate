@@ -81,7 +81,9 @@ vi.mock("maplibre-gl", () => {
   class FakeLngLatBounds {
     extend() {}
   }
-  return { Map: FakeMap, Marker: FakeMarker, Popup: FakePopup, LngLatBounds: FakeLngLatBounds };
+  // MapPanel calls setWorkerUrl before constructing the map; the real module exports it.
+  const setWorkerUrl = () => {};
+  return { Map: FakeMap, Marker: FakeMarker, Popup: FakePopup, LngLatBounds: FakeLngLatBounds, setWorkerUrl };
 });
 
 import { MapPanel } from "@/components/MapPanel";
@@ -118,11 +120,11 @@ afterEach(() => {
 });
 
 describe("MapPanel offline tile fallback", () => {
-  it("serves the OpenFreeMap Positron style URL, not a raster source object", async () => {
+  it("serves the OpenFreeMap Liberty style URL, not a raster source object", async () => {
     const map = await mountPanel();
     expect(harness.maps.length).toBe(1);
     expect(map.opts).toHaveProperty("style");
-    expect(map.opts.style).toBe("https://tiles.openfreemap.org/styles/positron");
+    expect(map.opts.style).toBe("https://tiles.openfreemap.org/styles/liberty");
   });
 
   it("keeps the fallback hidden below the threshold and shows it at the threshold", async () => {
