@@ -2,8 +2,8 @@
  * Tile provider config + failure-tracker unit tests (node env).
  *
  * Pinned here:
- *  1. the built-in default is a Positron style from OpenFreeMap (no API key
- *     needed);
+ *  1. the built-in default is a Liberty style from OpenFreeMap (no API key
+ *     needed, colored OSM basemap);
  *  2. NEXT_PUBLIC_MAP_TILE_URL override wins and trims whitespace;
  *  3. the failure tracker latches exactly at the threshold so repeated tile
  *     errors flip the UI fallback once;
@@ -19,19 +19,19 @@ import {
 } from "@/lib/mapTiles";
 
 describe("tile URL config", () => {
-  it("defaults to OpenFreeMap Positron (no API key)", () => {
+  it("defaults to OpenFreeMap Liberty (no API key)", () => {
     const resolved = resolveMapTileUrl(undefined);
     expect(resolved).toContain("tiles.openfreemap.org");
-    expect(resolved).toContain("styles/positron");
+    expect(resolved).toContain("styles/liberty");
     expect(MAP_TILE_URL).toBe(resolved);
   });
 
   it("honours the env override over the default", () => {
     expect(resolveMapTileUrl(undefined)).toBe(
-      "https://tiles.openfreemap.org/styles/positron"
+      "https://tiles.openfreemap.org/styles/liberty"
     );
     expect(resolveMapTileUrl("   ")).toBe(
-      "https://tiles.openfreemap.org/styles/positron"
+      "https://tiles.openfreemap.org/styles/liberty"
     );
     expect(resolveMapTileUrl("  https://tiles.example.vn/{z}/{x}/{y}.png ")).toBe(
       "https://tiles.example.vn/{z}/{x}/{y}.png"
