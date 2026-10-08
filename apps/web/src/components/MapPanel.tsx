@@ -12,9 +12,7 @@ import {
 } from "@/lib/routeDirections";
 import {
   MAP_TILE_URL,
-  attributionForTileUrl,
   createTileFailureTracker,
-  expandTileUrls,
   isTileFetchError,
 } from "@/lib/mapTiles";
 // Required for maplibre markers (position: absolute, anchoring) and controls.
@@ -246,18 +244,7 @@ export function MapPanel({
       if (disposed) return;
       const map = new maplibre.Map({
         container: el,
-        style: {
-          version: 8,
-          sources: {
-            osm: {
-              type: "raster",
-              tiles: expandTileUrls(tileUrl),
-              tileSize: 256,
-              attribution: attributionForTileUrl(tileUrl),
-            },
-          },
-          layers: [{ id: "osm", type: "raster", source: "osm" }],
-        },
+        style: tileUrl,
         center: [project.lng, project.lat],
         zoom: MAP_PROJECT_ZOOM,
       });
