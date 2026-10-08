@@ -5,8 +5,8 @@
  * The dev/prod network can block the tile CDN; maplibre then surfaces each
  * failed request as an "error" event and the canvas stays gray forever.
  * Pinned here:
- *  1. the default tile source handed to maplibre is the configured provider
- *     (expanded CARTO URLs + correct attribution), not plain OSM direct;
+ *  1. the default style handed to maplibre is the OpenFreeMap Positron
+ *     URL (no API key); there is no raster source object built here.
  *  2. fewer than TILE_FAILURE_THRESHOLD fetch errors keep the fallback hidden;
  *  3. reaching the threshold swaps in a clean panel with the project name,
  *     address and an antd notice — no layout shift (absolute overlay);
@@ -94,7 +94,7 @@ const PROJECT = {
 };
 
 interface FakeMapHandle {
-  opts: { style: { sources: { osm: { tiles: string[]; attribution: string } } } };
+  opts: { style: string };
   errorHandlers: Array<(e: unknown) => void>;
 }
 
@@ -118,15 +118,11 @@ afterEach(() => {
 });
 
 describe("MapPanel offline tile fallback", () => {
-  it("serves the configured default tiles (expanded CARTO URLs), not OSM direct", async () => {
+  it("serves the OpenFreeMap Positron style URL, not a raster source object", async () => {
     const map = await mountPanel();
-    const source = map.opts.style.sources.osm;
-    expect(source.tiles).toHaveLength(4);
-    source.tiles.forEach((url) => {
-      expect(url).toContain("basemaps.cartocdn.com");
-      expect(url).not.toContain("{s}");
-    });
-    expect(source.attribution).toContain("CARTO");
+    expect(harness.maps.length).toBe(1);
+    expect(map.opts).toHaveProperty("style");
+    expect(map.opts.style).toBe("https://tiles.openfreemap.org/styles/positron");
   });
 
   it("keeps the fallback hidden below the threshold and shows it at the threshold", async () => {

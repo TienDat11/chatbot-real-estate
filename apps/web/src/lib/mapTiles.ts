@@ -1,51 +1,17 @@
 /**
- * Single source of truth for the raster basemap tiles the chat map renders.
+ * Single source of truth for the basemap style the chat map renders.
  *
- * Why the default is NOT plain tile.openstreetmap.org: the OSM tile servers
- * are frequently unreachable from Vietnam networks, which left the map a blank
- * gray canvas with console AJAXErrors. The default below serves the same OSM
- * data from CARTO's Voyager raster CDN (reachable in VN); deployments can
- * point anywhere else via NEXT_PUBLIC_MAP_TILE_URL.
+ * Why the default is NOT plain OSM: the OSM tile servers are frequently
+ * unreachable from Vietnam networks, which left the map a blank gray canvas
+ * with console AJAXErrors. The default below serves OpenStreetMap data from
+ * OpenFreeMap (Positron, no API key required, attribution embedded in the
+ * style); deployments can point anywhere else via NEXT_PUBLIC_MAP_TILE_URL.
  */
 
-/** Env-overridable tile template. Requires {z}/{x}/{y}; optional {s} and {r}. */
-export const DEFAULT_MAP_TILE_URL =
-  "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png";
-
-const CARTO_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>';
-const OSM_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-
+/** Env-overridable MapLibre style URL. */
 export function resolveMapTileUrl(raw?: string): string {
   const trimmed = raw?.trim();
-  return trimmed ? trimmed : DEFAULT_MAP_TILE_URL;
-}
-
-/**
- * Expands a template into the concrete URL list maplibre expects.
- * maplibre raster sources do NOT substitute Leaflet-style {s} subdomains nor
- * the retina {r} token, so both are resolved here: {s} fans out over the CARTO
- * subdomains (a-d), {r} collapses to the standard-DPI asset.
- */
-export function expandTileUrls(template: string): string[] {
-  if (!template.includes("{s}")) {
-    return [template.replace(/\{r\}/g, "")];
-  }
-  return ["a", "b", "c", "d"].map((subdomain) =>
-    template.replace("{s}", subdomain).replace(/\{r\}/g, "")
-  );
-}
-
-/**
- * Attribution must credit the provider actually serving the tiles. Unknown
- * custom providers fall back to crediting OpenStreetMap contributors, which is
- * correct for every OSM-derived basemap an operator would self-host or proxy.
- */
-export function attributionForTileUrl(template: string): string {
-  if (/cartocdn\.com|basemaps\.carto\.com/i.test(template)) return CARTO_ATTRIBUTION;
-  if (/openstreetmap\.org/i.test(template)) return OSM_ATTRIBUTION;
-  return OSM_ATTRIBUTION;
+  return trimmed ? trimmed : "https://tiles.openfreemap.org/styles/positron";
 }
 
 /** Resolved config consumed by MapPanel (env read stays inline for Next build inlining). */
