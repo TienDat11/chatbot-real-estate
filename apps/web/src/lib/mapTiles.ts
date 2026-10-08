@@ -4,14 +4,14 @@
  * Why the default is NOT plain OSM: the OSM tile servers are frequently
  * unreachable from Vietnam networks, which left the map a blank gray canvas
  * with console AJAXErrors. The default below serves OpenStreetMap data from
- * OpenFreeMap (Positron, no API key required, attribution embedded in the
- * style); deployments can point anywhere else via NEXT_PUBLIC_MAP_TILE_URL.
+ * OpenFreeMap (Liberty: colored OSM style, no API key required, attribution
+ * embedded in the style); deployments can point anywhere else via NEXT_PUBLIC_MAP_TILE_URL.
  */
 
 /** Env-overridable MapLibre style URL. */
 export function resolveMapTileUrl(raw?: string): string {
   const trimmed = raw?.trim();
-  return trimmed ? trimmed : "https://tiles.openfreemap.org/styles/positron";
+  return trimmed ? trimmed : "https://tiles.openfreemap.org/styles/liberty";
 }
 
 /** Resolved config consumed by MapPanel (env read stays inline for Next build inlining). */
