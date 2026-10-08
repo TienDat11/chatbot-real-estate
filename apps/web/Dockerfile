@@ -75,7 +75,6 @@ ENV NEXT_PUBLIC_FIREBASE_API_KEY=$NEXT_PUBLIC_FIREBASE_API_KEY \
     NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=$NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID \
     NEXT_PUBLIC_FIREBASE_APP_ID=$NEXT_PUBLIC_FIREBASE_APP_ID \
     NEXT_PUBLIC_FIREBASE_VAPID_KEY=$NEXT_PUBLIC_FIREBASE_VAPID_KEY \
-    NEXT_PUBLIC_MEDIA_ORIGINS_JSON=$NEXT_PUBLIC_MEDIA_ORIGINS_JSON \
     NEXT_PUBLIC_MAP_TILE_URL=$NEXT_PUBLIC_MAP_TILE_URL \
     NEXT_PUBLIC_API_PROXY_TARGET=$NEXT_PUBLIC_API_PROXY_TARGET
 
@@ -83,7 +82,7 @@ ENV NEXT_PUBLIC_FIREBASE_API_KEY=$NEXT_PUBLIC_FIREBASE_API_KEY \
 # Fail fast: an empty API_PROXY_TARGET bakes zero rewrites and the deployed
 # FE 404s on every /api/* call — catch it at build, not in production.
 RUN { test -n "$NEXT_PUBLIC_API_PROXY_TARGET" || (echo "FATAL: pass --build-arg NEXT_PUBLIC_API_PROXY_TARGET=<ragre-api Cloud Run URL>" && exit 1); } \
- && { test -n "$NEXT_PUBLIC_MEDIA_ORIGINS_JSON" || (echo "FATAL: pass --build-arg NEXT_PUBLIC_MEDIA_ORIGINS_JSON='<the JSON array from apps/web/.env.local>'" && exit 1); } \
+ && node -e 'const v=JSON.parse(process.env.NEXT_PUBLIC_MEDIA_ORIGINS_JSON||"null"); if(!Array.isArray(v)||v.length===0) throw new Error("NEXT_PUBLIC_MEDIA_ORIGINS_JSON must be a non-empty JSON array"); console.log("media origins:", v.length)' \
  && npm run build --workspace=@rag-ragre/web
 
 

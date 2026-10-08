@@ -279,6 +279,10 @@ jobs:
               missing=1
             fi
           done
+          if ! printf '%s' "$FE_MEDIA_ORIGINS_JSON" | node -e 'const v=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!Array.isArray(v)||v.length===0) process.exit(1)'; then
+            echo "::error::FE_MEDIA_ORIGINS_JSON is not a valid non-empty JSON array; the FE image would ship with no media."
+            missing=1
+          fi
           exit "$missing"
 
       # Substitutions use gcloud's alternate delimiter (^D1^ … D2 …): the

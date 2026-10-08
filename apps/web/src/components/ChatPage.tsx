@@ -1545,6 +1545,15 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
         // project with history swaps back without any re-greeting.
         fireGreeting(key, { force: true });
       }
+      // Notify the host embed shell that a project switch completed (cross-origin
+      // postMessage contract): project key + fresh session id, nothing else. Only
+      // when framed; never emitted when running standalone.
+      if (typeof window !== "undefined" && window.parent !== window) {
+        window.parent.postMessage(
+          { type: "ragre:project-switch", projectKey: key, sessionId: sessionIdRef.current },
+          "*"
+        );
+      }
     },
     [handleSend, fireGreeting, messagesByProject, isTraining]
   );
