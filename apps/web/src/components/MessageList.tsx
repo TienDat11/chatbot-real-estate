@@ -113,9 +113,9 @@ export function MessageList({ messages, streaming, suggestions, excludedProjectN
       ref={scrollRef}
       onScroll={handleScroll}
       className="chat-scroll"
-      style={{ flex: 1, overflowY: "auto", padding: "24px 16px" }}
+      style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "24px 16px" }}
     >
-      <div style={{ maxWidth: 860, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ maxWidth: 860, minWidth: 0, width: "100%", margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
         {messages.map((m) => (
           <MessageBubble key={m.id} message={m} onRetry={onRetry} showTrustDiagnostics={showTrustDiagnostics} />
         ))}

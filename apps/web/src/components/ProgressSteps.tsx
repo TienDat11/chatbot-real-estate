@@ -1,75 +1,62 @@
 "use client";
 
-import { CheckOutlined } from "@ant-design/icons";
-import { C } from "@/lib/tokens";
-
-/**
- * ProgressSteps — 4-step vertical checklist shown while the assistant is
- * working (replaces the plain progress label). Each completed step gets a
- * green tick; the running step shows a small spinner. Senior-first, respects
- * prefers-reduced-motion.
- */
+import { CheckOutlined, DownOutlined, UpOutlined } from "@ant-design/icons";
+import { Button } from "antd";
+import { useId, useState } from "react";
 
 const STEPS = [
-  "Hiểu câu hỏi",
-  "Tra tài liệu",
-  "Đối chiếu số liệu",
+  "Hiểu yêu cầu",
+  "Tìm nguồn phù hợp",
+  "Kiểm tra thông tin",
   "Soạn câu trả lời",
-];
+] as const;
 
 interface ProgressStepsProps {
-  /** 0-based index of the step currently running. */
+  /** 0-based index of the step currently running. Invalid values are clamped. */
   activeStep: number;
 }
 
 export function ProgressSteps({ activeStep }: ProgressStepsProps) {
+  const numericStep = Number.isFinite(activeStep) ? Math.trunc(activeStep) : 0;
+  const safeStep = Math.max(0, Math.min(numericStep, STEPS.length - 1));
+  const [expanded, setExpanded] = useState(false);
+  const timelineId = `response-progress-timeline-${useId().replace(/:/g, "")}`;
+  const currentLabel = `Đang ${STEPS[safeStep].toLocaleLowerCase()}`;
+
+
   return (
-    <ol
-      className="progress-steps"
-      style={{
-        listStyle: "none",
-        margin: 0,
-        padding: 0,
-        display: "flex",
-        flexDirection: "column",
-        gap: 10,
-      }}
-    >
-      {STEPS.map((label, i) => {
-        const done = i < activeStep;
-        const running = i === activeStep;
-        return (
-          <li key={label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span
-              aria-hidden="true"
-              style={{
-                width: 22,
-                height: 22,
-                borderRadius: "50%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 12,
-                fontWeight: 700,
-                background: done ? C.success : running ? C.primarySoft : C.surfaceAlt,
-                color: done ? "#FFFFFF" : running ? C.primary : C.textGhost,
-                border: running ? "2px solid " + C.primary : "1px solid " + C.border,
-              }}
-            >
-              {done ? <CheckOutlined /> : running ? <span className="step-spinner" /> : i + 1}
-            </span>
-            <span
-              style={{
-                fontSize: 15,
-                color: done || running ? C.text : C.textGhost,
-                fontWeight: running ? 600 : 400,
-              }}
-            >
-              {label}
-            </span>
-          </li>
-        );
-      })}
-    </ol>
+    <section className="response-progress" aria-label="Tiến trình trả lời">
+      <div className="response-progress__header">
+        <div className="response-progress__status" aria-live="polite">
+          <span className="response-progress__spinner" aria-hidden="true"><span className="step-spinner" /></span>
+          <span>{currentLabel}</span>
+        </div>
+        <Button
+          type="text"
+          shape="circle"
+          className="response-progress__toggle"
+          aria-label={expanded ? "Thu gọn tiến trình" : "Mở tiến trình"}
+          aria-expanded={expanded}
+          aria-controls={timelineId}
+          onClick={() => setExpanded((value) => !value)}
+          icon={expanded ? <UpOutlined aria-hidden="true" /> : <DownOutlined aria-hidden="true" />}
+        />
+      </div>
+      {expanded && (
+        <ol id={timelineId} className="response-progress__timeline">
+          {STEPS.slice(0, safeStep + 1).map((label, index) => {
+            const done = index < safeStep;
+            return (
+              <li key={label} className={`response-progress__item${done ? " is-complete" : " is-active"}`}>
+                <span className="response-progress__marker" aria-hidden="true">
+                  {done ? <CheckOutlined /> : <span className="step-spinner" />}
+                </span>
+                <span>{label}</span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
   );
 }

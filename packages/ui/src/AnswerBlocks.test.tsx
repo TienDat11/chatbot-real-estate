@@ -347,3 +347,53 @@ describe("[C1] fenced code streaming", () => {
     expect(pre!.textContent).toBe("SELECT * FROM du_an;");
   });
 });
+
+describe("[containment] dynamic answer content stays inside its renderer", () => {
+  it("marks root and pending content as shrinkable, bounded surfaces", () => {
+    const { container } = render(
+      <AnswerBlocks content={"Nội dung đang phát trực tiếp\n## Tiêu đề"} streaming />,
+    );
+    const root = container.querySelector(".rag-answer") as HTMLElement;
+    const pending = container.querySelector(".rag-answer__pending") as HTMLElement;
+    expect(root.style.minWidth).toBe("0px");
+    expect(root.style.maxWidth).toBe("100%");
+    expect(root.style.overflowWrap).toBe("anywhere");
+    expect(pending.style.minWidth).toBe("0px");
+    expect(pending.style.maxWidth).toBe("100%");
+    expect(pending.style.overflowWrap).toBe("anywhere");
+  });
+
+  it("keeps code and tables in their existing internal scroll boundaries", () => {
+    const { container } = render(
+      <AnswerBlocks
+        content={"```text\n" + "x".repeat(180) + "\n```\n\n| Trường | Giá |\n|---|---|\n| Mã dài | " + "y".repeat(180) + " |"}
+      />,
+    );
+    const code = container.querySelector("pre.rag-answer__code") as HTMLElement;
+    const table = container.querySelector("table") as HTMLElement;
+    const tableBoundary = table.parentElement as HTMLElement;
+    expect(code.style.overflowX).toBe("auto");
+    expect(code.querySelector("code")?.style.whiteSpace).toBe("pre");
+    expect(tableBoundary.style.overflowX).toBe("auto");
+    expect(tableBoundary.style.maxWidth).toBe("100%");
+    expect(table.style.width).toBe("max-content");
+    expect(table.style.minWidth).toBe("100%");
+  });
+
+  it("wraps long inline links, code, and definition-card values", () => {
+    const longToken = "https://example.com/" + "a".repeat(160);
+    const { container } = render(
+      <AnswerBlocks
+        content={"Link [" + longToken + "](" + longToken + ") and `" + "z".repeat(160) + "`\n\n| A | B | C | D |\n|---|---|---|---|\n| label | value | extra | " + "q".repeat(160) + " |"}
+      />,
+    );
+    expect((container.querySelector("a") as HTMLElement).style.overflowWrap).toBe("anywhere");
+    expect((container.querySelector("code") as HTMLElement).style.overflowWrap).toBe("anywhere");
+    const cardRow = Array.from(container.querySelectorAll("div")).find(
+      (element) => (element as HTMLElement).style.flexWrap === "wrap",
+    ) as HTMLElement | undefined;
+    expect(cardRow).toBeDefined();
+    expect(cardRow!.style.flexWrap).toBe("wrap");
+    expect(container.textContent).toContain("q".repeat(160));
+  });
+});

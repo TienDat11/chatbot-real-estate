@@ -23,33 +23,33 @@ export function SourcesList({ sources, max }: SourcesListProps) {
   const hiddenCount = max ? Math.max(0, sources.length - max) : 0;
 
   return (
-    <div>
+    <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
       <List
         size="small"
         dataSource={visible}
         split={false}
         renderItem={(source) => (
-          <List.Item style={{ padding: "4px 0", border: "none" }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "flex-start", minWidth: 0 }}>
+          <List.Item style={{ padding: "4px 0", border: "none", minWidth: 0, maxWidth: "100%" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-start", minWidth: 0, maxWidth: "100%" }}>
               <FileTextOutlined
                 style={{ color: "#0E2A47", marginTop: 3, flexShrink: 0, fontSize: 13 }}
               />
-              <div style={{ minWidth: 0 }}>
+              <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
                 <Typography.Text
                   strong
-                  style={{ fontSize: 13, color: "#1A2233", display: "block" }}
+                  style={{ fontSize: 13, color: "#1A2233", display: "block", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}
                   ellipsis={{ tooltip: source.title }}
                 >
                   {source.title}
                 </Typography.Text>
                 {(source.section || source.kind) && (
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12, overflowWrap: "anywhere" }}>
                     {source.section ? `${source.section} · ` : ""}
                     {source.kind}
                   </Typography.Text>
                 )}
                 {source.effective_from && (
-                  <div style={{ marginTop: 2 }}>
+                  <div style={{ marginTop: 2, minWidth: 0, maxWidth: "100%" }}>
                     <Tag
                       style={{
                         fontSize: 11,
@@ -59,6 +59,9 @@ export function SourcesList({ sources, max }: SourcesListProps) {
                         color: "#5B6478",
                         background: "#F3EFE7",
                         border: "1px solid #E9E2D6",
+                        maxWidth: "100%",
+                        whiteSpace: "normal",
+                        overflowWrap: "anywhere",
                       }}
                     >
                       Hiệu lực: {source.effective_from}

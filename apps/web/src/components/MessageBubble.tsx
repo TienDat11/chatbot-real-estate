@@ -5,10 +5,9 @@ import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
 import { useCallback, useState } from "react";
 import { cn, formatLatency } from "@/lib/utils";
 import type { ProjectRedirect } from "@/lib/projectRedirect";
-import { AckChip } from "./AckChip";
-import { ProgressSteps } from "./ProgressSteps";
 import { GreetingMedia } from "./GreetingMedia";
 import { ProjectRedirectCard } from "./ProjectRedirectCard";
+import { ProgressSteps } from "./ProgressSteps";
 import { C, SHADOW, FS } from "@/lib/tokens";
 
 export interface ChatMessage {
@@ -56,31 +55,6 @@ interface MessageBubbleProps {
   showTrustDiagnostics?: boolean;
 }
 
-/**
- * Staged label shown while the assistant works and no answer text has
- * arrived yet. Rotates with progressStep so the wait reads as a pipeline,
- * not a frozen spinner (blend with AckChip + ProgressSteps, no duplicates).
- */
-const WAITING_STAGES = [
-  "Đang phân tích câu hỏi",
-  "Đang tra cứu tài liệu pháp lý",
-  "Đang đối chiếu số liệu dự án",
-  "Đang soạn câu trả lời",
-];
-
-function WaitingIndicator({ progressStep }: { progressStep?: number }) {
-  const stage = WAITING_STAGES[Math.min(progressStep ?? 0, WAITING_STAGES.length - 1)];
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 32 }}>
-      <span className="ack-dots" aria-hidden="true" style={{ display: "inline-flex", gap: 3 }}>
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold }} />
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold }} />
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.gold }} />
-      </span>
-      <span className="streaming-stage-label">{stage}</span>
-    </div>
-  );
-}
 
 /**
  * Renders a single chat message bubble.
@@ -110,10 +84,10 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
 
   if (isUser) {
     return (
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", minWidth: 0, maxWidth: "100%" }}>
         <div
+          className="message-bubble message-bubble--user"
           style={{
-            maxWidth: "72%",
             background: C.primary,
             color: "#FFFFFF",
             borderRadius: "16px 16px 4px 16px",
@@ -121,7 +95,8 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
             fontSize: FS.body,
             lineHeight: FS.bodyLine,
             whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
+            overflowWrap: "anywhere",
+            minWidth: 0,
             boxShadow: SHADOW.primary,
           }}
         >
@@ -130,18 +105,19 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
       </div>
     );
   }
-
   return (
-    <div style={{ display: "flex", justifyContent: "flex-start" }}>
+    <div style={{ display: "flex", justifyContent: "flex-start", minWidth: 0, maxWidth: "100%" }}>
       <div
+        className="message-bubble message-bubble--assistant"
         style={{
-          maxWidth: "86%",
           background: C.surface,
           border: "1px solid " + C.border,
           borderRadius: "16px 16px 16px 4px",
           padding: "16px 18px",
           boxShadow: SHADOW.card,
           width: "100%",
+          minWidth: 0,
+          overflowWrap: "anywhere",
         }}
       >
         {/* Trust-safety (W1-05): on internal surfaces the review flag must be
@@ -186,31 +162,15 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
           )
         ) : (
           <>
-            {message.sources && message.sources.length > 0 && (
-              <SourceSection title="Nguồn tài liệu" sources={message.sources} />
+            {message.facts && message.facts.length > 0 && <FactSection facts={message.facts} />}
+            {message.streaming && (
+              <ProgressSteps activeStep={message.progressStep ?? 0} />
             )}
-            {message.facts && message.facts.length > 0 && (
-              <FactSection facts={message.facts} />
-            )}
-            {message.streaming && !message.content ? (
-              <div className="streaming-placeholder" aria-live="polite">
-                <AckChip visible={!!message.acknowledged} />
-                <div style={{ marginTop: 12 }}>
-                  <WaitingIndicator progressStep={message.progressStep} />
-                </div>
-                {message.acknowledged && (
-                  <div style={{ marginTop: 12 }}>
-                    <ProgressSteps activeStep={message.progressStep ?? 0} />
-                  </div>
-                )}
-              </div>
-            ) : (
-              <AnswerBlocks
-                content={message.content}
-                streaming={message.streaming}
-                className={cn(message.streaming && "typing-caret")}
-              />
-            )}
+            <AnswerBlocks
+              content={message.content}
+              streaming={message.streaming}
+              className={cn(message.streaming && "typing-caret")}
+            />
             {(isGreeting || message.videos?.length || message.images?.length) ? (
               <GreetingMedia
                 videos={message.videos}
@@ -218,20 +178,11 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
                 ready={!message.streaming}
               />
             ) : null}
-            {/* Cross-project guardrail: prominent switch CTA below the answer
-                once the stream is finished; absent field renders nothing. */}
             {message.projectRedirect && !message.streaming && (
               <ProjectRedirectCard redirect={message.projectRedirect} />
             )}
             {!message.streaming && !message.error && message.content.trim().length > 0 && (
-              <div
-                style={{
-                  marginTop: 8,
-                  display: "flex",
-                  justifyContent: "flex-end",
-                }}
-                className="bubble-copy-row"
-              >
+              <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }} className="bubble-copy-row">
                 <Tooltip title={copied ? "Đã sao chép" : "Sao chép câu trả lời"}>
                   <Button
                     type="text"
@@ -246,6 +197,9 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
                 </Tooltip>
               </div>
             )}
+            {!message.streaming && message.sources && message.sources.length > 0 && (
+              <SourceSection title="Nguồn tài liệu" sources={message.sources} />
+            )}
             {!message.streaming && showTrustDiagnostics && (message.confidence || message.traceId || message.latencyMs !== undefined) && (
               <div
                 style={{
@@ -259,15 +213,9 @@ export function MessageBubble({ message, onRetry, showTrustDiagnostics = false }
                   flexWrap: "wrap",
                 }}
               >
-                {/* Backend confidence (done frame or hydrated transcript)
-                    shares the trace footer: LOW is the explicit red warning,
-                    MEDIUM stays neutral, and the banner above is reserved for
-                    actual review decisions. */}
                 {message.confidence && <ConfidenceBadge confidence={message.confidence} />}
                 {message.traceId && <span>trace_id: {message.traceId}</span>}
-                {message.latencyMs !== undefined && (
-                  <span>phản hồi trong {formatLatency(message.latencyMs)}</span>
-                )}
+                {message.latencyMs !== undefined && <span>phản hồi trong {formatLatency(message.latencyMs)}</span>}
               </div>
             )}
           </>

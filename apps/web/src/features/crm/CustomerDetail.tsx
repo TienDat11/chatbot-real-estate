@@ -266,7 +266,7 @@ export function CustomerDetail({
 
   if (!anchorLead) {
     return (
-      <Drawer open={open} onClose={onClose} title="Chi tiết khách hàng" width={520}>
+      <Drawer open={open} onClose={onClose} title="Chi tiết khách hàng" width="min(520px, 100vw)">
         <Typography.Text type="secondary">Chưa chọn lead.</Typography.Text>
       </Drawer>
     );
@@ -495,7 +495,7 @@ export function CustomerDetail({
     <Drawer
       open={open}
       onClose={onClose}
-      width={560}
+      width="min(560px, 100vw)"
       title={`Chi tiết khách hàng — ${anchorLead.name ?? anchorLead.maskedPhone ?? anchorLead.id}`}
     >
       <Space direction="vertical" size="large" style={{ width: "100%" }}>

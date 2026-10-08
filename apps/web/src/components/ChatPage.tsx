@@ -1742,23 +1742,25 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
         display: "flex",
         flexDirection: "column",
         background: C.bg,
+        minWidth: 0,
+        maxWidth: "100%",
+        overflowWrap: "anywhere",
       }}
     >
       <header
-        className="app-header"
+        className="app-header chat-header"
         style={{
-          padding: "12px 24px",
           display: usesSalesShell ? "none" : "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: "8px 12px",
           flexShrink: 0,
-          boxShadow: SHADOW.pop,
           zIndex: 1,
+          minWidth: 0,
+          maxWidth: "100%",
+          overflowWrap: "anywhere",
         }}
       >
+        <div className="chat-header__identity-group">
         <div
-          className="hero-badge"
+          className="chat-header__identity-mark hero-badge"
           style={{
             width: 42,
             height: 42,
@@ -1766,23 +1768,27 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
+            background: C.primarySoft,
+            color: HEADER.badgeText,
             fontSize: 20,
             flexShrink: 0,
           }}
         >
           <SafetyCertificateOutlined />
         </div>
-        <div style={{ minWidth: 0, overflow: "hidden", flex: "1 1 160px" }}>
+        <div className="chat-header__identity">
           <Typography.Title
             level={4}
             style={{
               margin: 0,
               color: HEADER.title,
               fontSize: 17,
-              lineHeight: "24px",
+              lineHeight: "22px",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              minWidth: 0,
+              maxWidth: "100%",
             }}
           >
             {headerTitle}
@@ -1795,12 +1801,15 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
               alignItems: "center",
               gap: 6,
               minWidth: 0,
+              maxWidth: "100%",
               overflow: "hidden",
+              overflowWrap: "anywhere",
             }}
           >
             <span
               style={{
                 minWidth: 0,
+                maxWidth: "100%",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -1821,20 +1830,16 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
             >
               AI hỗ trợ
             </span>
-          </Typography.Text>
+            </Typography.Text>
+          </div>
         </div>
-        <div
-          style={{
-            marginLeft: "auto",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            flexWrap: "wrap",
-            justifyContent: "flex-end",
-            minWidth: 0,
-            maxWidth: "100%",
-          }}
-        >
+          <div
+            className="chat-header__actions"
+            style={{
+              minWidth: 0,
+              maxWidth: "100%",
+            }}
+          >
           {/* Training has no quota surface at all: sales users are unlimited
               there, so no badge and no wall can ever appear. */}
           {!isTraining && quota !== null && (
@@ -1903,7 +1908,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
                   ? `Dự án đang tư vấn: ${projectDisplayName(currentProject)}`
                   : "Chưa chọn dự án"
               }
-              className="header-chip header-chip--accent"
+              className="chat-header__project header-chip header-chip--accent"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -1968,7 +1973,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
               ))}
             </nav>
           ) : null}
-          <AccountControls />
+          <div className="chat-header__account"><AccountControls /></div>
           {!isTraining && !usesSalesShell ? (
             <Button
               type="default"
@@ -2044,7 +2049,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
           />
         </div>
       ) : null}
-      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+      <div style={{ flex: 1, display: "flex", minHeight: 0, minWidth: 0, maxWidth: "100%" }}>
         {/* Column 1: map rail. Always visible and always wide so the canvas
             reads as a balanced peer of the chat column. Training has no map:
             the workspace is document-QA only, so the chat takes the full width. */}
@@ -2057,9 +2062,11 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
                 flexDirection: "column",
                 gap: 12,
                 height: "100%",
+                minWidth: 0,
+                maxWidth: "100%",
               }}
             >
-              <div style={{ flex: 1, minHeight: 0 }}>
+              <div style={{ flex: 1, minHeight: 0, minWidth: 0, maxWidth: "100%" }}>
                 <MapPanel
                   places={places}
                   project={mapProject}
@@ -2148,7 +2155,6 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
                     size="small"
                     style={{ alignSelf: "flex-start" }}
                     onClick={() => {
-                      // Deep-link back to the exact URL after re-login.
                       const next = `${window.location.pathname}${window.location.search}`;
                       router.push(`/login?next=${encodeURIComponent(next)}`);
                     }}
@@ -2158,9 +2164,6 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
                 </div>
               </div>
             )}
-            {/* US-4 hard wall: friendly copy under the frozen composer so the
-                gate reads as an offer (free turns for a phone number), not a
-                dead end. */}
             {showQuotaWall && (
               <div
                 role="alert"
@@ -2169,11 +2172,14 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
                   alignItems: "flex-start",
                   gap: 10,
                   maxWidth: 860,
+                  width: "100%",
+                  minWidth: 0,
                   margin: "10px auto 0",
                   padding: "10px 14px",
                   background: C.goldSoft,
                   border: `1px solid ${C.goldBorder}`,
                   borderRadius: RADIUS.small,
+                  overflowWrap: "anywhere",
                 }}
               >
                 <LockFilled
@@ -2181,7 +2187,7 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
                   aria-hidden="true"
                 />
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
-                  <span style={{ fontSize: 14, lineHeight: "22px", color: C.text }}>
+                  <span style={{ fontSize: 14, lineHeight: "22px", color: C.text, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
                     Anh/chị đã dùng hết lượt tư vấn miễn phí. Để lại số điện thoại trong form dưới đây để nhận
                     thêm lượt miễn phí - chuyên viên sẽ gọi lại trong khoảng 5 phút.
                   </span>
@@ -2198,6 +2204,8 @@ function ChatCanvas({ routeProjectKey, audience = "customer", sessionId, mode = 
                     style={{
                       alignSelf: "flex-start",
                       height: 40,
+                      maxWidth: "100%",
+                      whiteSpace: "normal",
                       padding: "0 18px",
                       border: "none",
                       borderRadius: RADIUS.pill,

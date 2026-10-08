@@ -106,10 +106,13 @@ export function ImageGallery({ images }: ImageGalleryProps) {
         marginTop: 14,
         borderTop: `1px solid ${C.border}`,
         paddingTop: 14,
+        minWidth: 0,
+        maxWidth: "100%",
+        overflowWrap: "anywhere",
       }}
       aria-label={GALLERY_TITLE}
     >
-      <header style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+      <header style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, minWidth: 0, maxWidth: "100%" }}>
         <span
           style={{
             width: 26,
@@ -126,14 +129,14 @@ export function ImageGallery({ images }: ImageGalleryProps) {
         >
           <PictureOutlined />
         </span>
-        <div style={{ minWidth: 0 }}>
+        <div style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
           <Typography.Text
             strong
-            style={{ color: C.text, fontSize: 14, lineHeight: "18px", display: "block" }}
+            style={{ color: C.text, fontSize: 14, lineHeight: "18px", display: "block", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}
           >
             {GALLERY_TITLE}
           </Typography.Text>
-          <Typography.Text style={{ color: C.textMuted, fontSize: 12, lineHeight: "16px" }}>
+          <Typography.Text style={{ color: C.textMuted, fontSize: 12, lineHeight: "16px", overflowWrap: "anywhere" }}>
             Bấm vào ảnh để xem cận cảnh
           </Typography.Text>
         </div>
@@ -148,8 +151,10 @@ export function ImageGallery({ images }: ImageGalleryProps) {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+            gridTemplateColumns: "repeat(auto-fill, minmax(min(150px, 100%), 1fr))",
             gap: 10,
+            minWidth: 0,
+            maxWidth: "100%",
           }}
         >
           {publicImages.map((im) => {
@@ -159,10 +164,13 @@ export function ImageGallery({ images }: ImageGalleryProps) {
                 key={im.image_id}
                 style={{
                   margin: 0,
+                  minWidth: 0,
+                  maxWidth: "100%",
                   background: C.surface,
                   border: `1px solid ${C.border}`,
                   borderRadius: RADIUS.card,
                   overflow: "hidden",
+                  overflowWrap: "anywhere",
                   transition: "transform 0.18s ease, box-shadow 0.18s ease",
                   cursor: "zoom-in",
                   display: "flex",
@@ -178,7 +186,7 @@ export function ImageGallery({ images }: ImageGalleryProps) {
                   e.currentTarget.style.boxShadow = SHADOW.card;
                 }}
               >
-                <div style={{ position: "relative", aspectRatio: "4 / 3", background: C.surfaceAlt }}>
+                <div style={{ position: "relative", aspectRatio: "4 / 3", background: C.surfaceAlt, minWidth: 0, maxWidth: "100%" }}>
                   <AntImage
                     src={im.url_cdn}
                     alt={im.alt_text ?? im.title ?? ""}
@@ -198,6 +206,9 @@ export function ImageGallery({ images }: ImageGalleryProps) {
                     flexDirection: "column",
                     gap: 6,
                     flex: 1,
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    overflowWrap: "anywhere",
                   }}
                 >
                   <Tag
@@ -212,13 +223,16 @@ export function ImageGallery({ images }: ImageGalleryProps) {
                       fontWeight: 600,
                       padding: "0 6px",
                       lineHeight: "20px",
+                      maxWidth: "100%",
+                      whiteSpace: "normal",
+                      overflowWrap: "anywhere",
                     }}
                   >
                     {kind.label}
                   </Tag>
                   <Typography.Text
                     strong
-                    style={{ color: C.text, fontSize: 13, lineHeight: "18px", display: "block" }}
+                    style={{ color: C.text, fontSize: 13, lineHeight: "18px", display: "block", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}
                   >
                     {im.title}
                   </Typography.Text>
@@ -240,6 +254,9 @@ export function ImageGallery({ images }: ImageGalleryProps) {
                           fontWeight: 600,
                           padding: "0 7px",
                           lineHeight: "20px",
+                          maxWidth: "100%",
+                          whiteSpace: "normal",
+                          overflowWrap: "anywhere",
                         }}
                       >
                         {text}
@@ -247,7 +264,7 @@ export function ImageGallery({ images }: ImageGalleryProps) {
                     );
                   })()}
                   {im.caption != null && im.caption.length > 0 && (
-                    <Typography.Text style={{ color: C.textMuted, fontSize: 12, lineHeight: "18px" }}>
+                    <Typography.Text style={{ color: C.textMuted, fontSize: 12, lineHeight: "18px", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
                       {im.caption}
                     </Typography.Text>
                   )}

@@ -71,12 +71,10 @@ export function LoginScreen() {
 
   return (
     <div
-      className="card-in"
+      className="login-shell card-in"
       style={{
         width: "100%",
         maxWidth: 980,
-        display: "grid",
-        gridTemplateColumns: "3fr 2fr",
         background: C.surface,
         borderRadius: 20,
         overflow: "hidden",
@@ -89,7 +87,6 @@ export function LoginScreen() {
         style={{
           minHeight: 520,
           padding: 36,
-          display: "flex",
           alignItems: "flex-end",
           color: "#fff",
           position: "relative",

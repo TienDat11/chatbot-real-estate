@@ -127,18 +127,18 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
       onCancel={onClose}
       footer={null}
       centered
-      width={480}
+      width="min(480px, calc(100vw - 32px))"
       maskClosable
       keyboard
       title={
-        <span style={{ fontSize: 20, fontWeight: 700, color: C.text }}>
+        <span style={{ fontSize: 20, fontWeight: 700, color: C.text, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
           Nhận tư vấn từ chuyên viên
         </span>
       }
-      styles={{ body: { paddingTop: 12 } }}
+      styles={{ body: { paddingTop: 12, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" } }}
     >
       {status === "success" && (
-        <div style={{ textAlign: "center", padding: "12px 0 4px" }} aria-live="polite">
+        <div style={{ textAlign: "center", padding: "12px 0 4px", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }} aria-live="polite">
           <CheckCircleFilled style={{ fontSize: 56, color: C.success }} aria-hidden="true" />
           <p
             style={{
@@ -146,6 +146,9 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
               lineHeight: FS.bodyLine,
               color: C.text,
               margin: "16px 0 20px",
+              minWidth: 0,
+              maxWidth: "100%",
+              overflowWrap: "anywhere",
             }}
           >
             Đã ghi nhận. Chuyên viên sẽ gọi lại trong vòng ~{willCallMinutes} phút, anh/chị vui
@@ -158,14 +161,13 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
           >
             Đóng
           </Button>
-          <p style={{ fontSize: 13, lineHeight: "20px", color: C.textMuted, margin: "12px 0 0" }}>
+          <p style={{ fontSize: 13, lineHeight: "20px", color: C.textMuted, margin: "12px 0 0", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
             Muốn đổi số? Liên hệ hotline 09xx.
           </p>
         </div>
       )}
-
       {status === "duplicate" && (
-        <div style={{ padding: "8px 0 4px" }} aria-live="polite">
+        <div style={{ padding: "8px 0 4px", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }} aria-live="polite">
           <div
             style={{
               display: "flex",
@@ -175,10 +177,13 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
               borderRadius: RADIUS.small,
               padding: 16,
               marginBottom: 20,
+              minWidth: 0,
+              maxWidth: "100%",
+              overflowWrap: "anywhere",
             }}
           >
-            <InfoCircleFilled style={{ fontSize: 22, color: C.warning, marginTop: 2 }} aria-hidden="true" />
-            <p style={{ fontSize: 16, lineHeight: "24px", color: C.text, margin: 0 }}>
+            <InfoCircleFilled style={{ fontSize: 22, color: C.warning, marginTop: 2, flexShrink: 0 }} aria-hidden="true" />
+            <p style={{ fontSize: 16, lineHeight: "24px", color: C.text, margin: 0, minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
               Số này đã đăng ký, chuyên viên sẽ gọi sớm nhất.
             </p>
           </div>
@@ -194,7 +199,7 @@ export function LeadForm({ open, sessionId, deviceId, projectKey, projectName, n
 
       {status === "form" && (
         <>
-          <p style={{ fontSize: 15, lineHeight: "24px", color: C.textMuted, margin: "0 0 16px" }}>
+          <p style={{ fontSize: 15, lineHeight: "24px", color: C.textMuted, margin: "0 0 16px", minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>
             Để lại số điện thoại, chuyên viên của {projectName ?? "dự án"} sẽ gọi tư vấn trong khoảng 5 phút
             (giờ hành chính).
           </p>

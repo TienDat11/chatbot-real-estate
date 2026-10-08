@@ -111,7 +111,7 @@ export function ChatHistoryDrawer({ deviceId, projectKey, mode = "customer", ano
       <Button icon={<HistoryOutlined />} onClick={openHistory} aria-label="Lịch sử chat">
         Lịch sử chat
       </Button>
-      <Drawer title="Lịch sử chat" open={open} onClose={() => setOpen(false)} width={420}>
+      <Drawer title="Lịch sử chat" open={open} onClose={() => setOpen(false)} width="min(420px, calc(100vw - 32px))">
         {error ? (
           <Alert
             type="error"
@@ -121,12 +121,15 @@ export function ChatHistoryDrawer({ deviceId, projectKey, mode = "customer", ano
           />
         ) : loading ? <Spin /> : sessions.length === 0 ? <Empty description="Chưa có đoạn chat nào" /> : (
           <List dataSource={sessions} renderItem={(session) => (
-            <List.Item actions={[<Button key="open" type="link" onClick={() => void selectSession(session)}>Mở</Button>]}>
+            <List.Item
+              style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}
+              actions={[<Button key="open" type="link" onClick={() => void selectSession(session)}>Mở</Button>]}
+            >
               <List.Item.Meta
-                title={session.title || "Đoạn chat"}
-                description={`${session.message_count} tin nhắn`}
+                title={<span style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere", whiteSpace: "normal" }}>{session.title || "Đoạn chat"}</span>}
+                description={<span style={{ minWidth: 0, maxWidth: "100%", overflowWrap: "anywhere" }}>{session.message_count} tin nhắn</span>}
               />
-              {"handed_off" in session && session.handed_off && <Tag color="green">Đã để lại SĐT</Tag>}
+              {"handed_off" in session && session.handed_off && <Tag style={{ maxWidth: "100%", whiteSpace: "normal", overflowWrap: "anywhere" }} color="green">Đã để lại SĐT</Tag>}
             </List.Item>
           )} />
         )}
