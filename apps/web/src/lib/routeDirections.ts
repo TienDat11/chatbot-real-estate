@@ -125,15 +125,29 @@ export function parseOsrmRoute(json: unknown): RouteDirections | null {
 /** Promise wrapper around the Geolocation API so grant/deny paths can be
  *  mocked with plain functions in tests. */
 export function requestUserLocation(
-  geolocation: GeolocationLike | undefined
+  geolocation: GeolocationLike | undefined,
+  // Watchdog: PositionOptions.timeout does not cover the time spent waiting on
+  // the user's permission decision, so a callback can still never arrive.
+  watchdogMs = 20_000
 ): Promise<GeolocationPositionLike> {
-  return new Promise((resolve, reject) => {
-    if (!geolocation) {
-      reject(new Error("Geolocation is not supported"));
-      return;
-    }
-    geolocation.getCurrentPosition(resolve, reject);
-  });
+  const { promise, resolve, reject } = Promise.withResolvers<GeolocationPositionLike>();
+  if (!geolocation) {
+    reject(new Error("Geolocation is not supported"));
+    return promise;
+  }
+  const timer = setTimeout(() => reject(new Error("Geolocation watchdog expired")), watchdogMs);
+  geolocation.getCurrentPosition(
+    (position) => {
+      clearTimeout(timer);
+      resolve(position);
+    },
+    (error) => {
+      clearTimeout(timer);
+      reject(error);
+    },
+    { timeout: 10_000 }
+  );
+  return promise;
 }
 
 /** Fetches the OSRM route with a hard timeout. Throws on any failure so the
