@@ -116,6 +116,7 @@ class GlobalAssistantInput:
     source_event_key: str | None = None
     on_event: EventCallback | None = None
     max_visible_chars: int | None = None
+    resume_pending_intent: bool = True
 
 
 @dataclass(frozen=True)
@@ -412,7 +413,10 @@ class GlobalAssistantService:
         )
 
         effective_query = request.query
-        if resolution.source is ProjectResolutionSource.USER_SELECTION:
+        if (
+            request.resume_pending_intent
+            and resolution.source is ProjectResolutionSource.USER_SELECTION
+        ):
             intent = _pending_neutral_intent(messages)
             if intent and intent != request.query:
                 effective_query = f"{intent}\n{request.query}"

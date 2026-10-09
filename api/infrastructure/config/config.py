@@ -135,6 +135,67 @@ class Settings(BaseSettings):
         for name, value in parsed.items():
             setattr(self, name, value)
 
+    def validate_messenger_runtime(self) -> None:
+        """Reject unsafe Messenger settings at installation, without taking web offline.
+
+        Disabled Messenger never validates credentials or initializes infrastructure.
+        Environment integers are decimal strings; bool/float coercion is forbidden.
+        """
+        if not self.messenger_bot_enabled:
+            return
+        bounds = {
+            "messenger_max_body_bytes": (1, None),
+            "messenger_burst_window_seconds": (1, 300),
+            "messenger_burst_max_events": (1, 10000),
+            "messenger_poll_seconds": (1, None),
+            "messenger_batch_size": (1, 100),
+            "messenger_max_attempts": (1, 100),
+            "messenger_lease_seconds": (30, None),
+            "messenger_core_timeout_seconds": (1, None),
+            "messenger_lease_margin_seconds": (6, None),
+            "messenger_retry_max_age_hours": (1, None),
+            "messenger_terminal_retention_days": (1, None),
+        }
+        parsed = {}
+        for name, (minimum, maximum) in bounds.items():
+            value = getattr(self, name)
+            if isinstance(value, str) and value.isascii() and value.isdecimal():
+                try:
+                    value = int(value)
+                except ValueError:
+                    raise ValueError("MESSENGER_CONFIG_INVALID") from None
+            if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
+                raise ValueError("MESSENGER_CONFIG_INVALID")
+            parsed[name] = value
+        if parsed["messenger_lease_seconds"] <= (
+            parsed["messenger_core_timeout_seconds"] + parsed["messenger_lease_margin_seconds"]
+        ):
+            raise ValueError("MESSENGER_CONFIG_INVALID")
+        identity = self.messenger_identity_secret.get_secret_value()
+        app_secret = self.messenger_app_secret.get_secret_value()
+        page_token = self.messenger_page_access_token
+        verify_token = self.messenger_verify_token.get_secret_value()
+        page_id = self.messenger_page_id
+        if (
+            not isinstance(identity, str) or not 32 <= len(identity) <= 256
+            or not isinstance(app_secret, str) or not 32 <= len(app_secret) <= 256
+            or identity == app_secret
+            or not isinstance(page_token, str) or not page_token.strip()
+            or not isinstance(verify_token, str) or not verify_token.strip()
+            or not isinstance(page_id, str) or not page_id.strip() or not page_id.isascii() or not page_id.isdigit()
+        ):
+            raise ValueError("MESSENGER_CONFIG_INVALID")
+        try:
+            identity.encode("utf-8")
+            app_secret.encode("utf-8")
+            page_token.encode("utf-8")
+            verify_token.encode("utf-8")
+            page_id.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("MESSENGER_CONFIG_INVALID") from None
+        for name, value in parsed.items():
+            setattr(self, name, value)
+
     @model_validator(mode="after")
     def _enforce_approved_llm_provider(self) -> Settings:
         """Enforce the audited worker route only when explicitly enabled."""
@@ -611,6 +672,50 @@ class Settings(BaseSettings):
     # binding (postgres zalo_bot_bindings.authorize is never consulted).
     # Defaults to False; enable only for an explicitly authorized demo window and disable afterward.
     zalo_bot_open_demo_access: bool = Field(default=False, repr=False)
+
+    # --- Messenger bot webhook ingress ---
+    # messenger_bot_enabled gates the ingress: when False an authenticated, valid
+    # webhook still returns 2xx but performs zero side effects (no DB write,
+    # no RAG, no provider outbound). Disabled must never break app startup.
+    messenger_bot_enabled: bool = False
+    # Demo-only pause for terminal-event maintenance; fresh inbox processing remains enabled.
+    # Default on preserves existing exhausted-event and terminal-row cleanup behavior.
+    messenger_maintenance_enabled: bool = True
+    # Webhook verification string echoed back during Meta hub.challenge handshake.
+    # Compared with == only after non-empty check; never logged.
+    messenger_verify_token: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Meta App Secret used to verify X-Hub-Signature-256 on every webhook.
+    # An empty value fails closed at every webhook. Never log this secret.
+    messenger_app_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Page token used for Send API replies; checked locally, never probed at install.
+    messenger_page_access_token: SkipValidation[str] = Field(default="", repr=False)
+    # Stable correlation key, never derived from transport credentials.
+    # Required only at enabled runtime installation; disabled startup stays inert.
+    messenger_identity_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Meta Page ID owning the webhook subscription; ASCII digits only.
+    messenger_page_id: str = ""
+    messenger_graph_api_version: str = "v26.0"
+    messenger_api_base_url: str = "https://graph.facebook.com"
+    # Hard cap (bytes) on an inbound webhook body declared via Content-Length
+    # AND on the body actually read. Prevents unbounded request-body DoS.
+    messenger_max_body_bytes: int = Field(default=65536, gt=0)
+    # Attach appsecret_proof to Send API calls; off by default, enable with stored secret.
+    messenger_appsecret_proof_enabled: bool = Field(default=False, repr=False)
+    # Open-demo bypass: when True, every chat is admitted without a sales binding.
+    # Defaults to False; enable only for an explicitly authorized demo window and disable afterward.
+    messenger_open_demo_access: bool = Field(default=False, repr=False)
+    # Recommended configurable values, NOT approved production settings.
+    # Preserve raw env input until enabled installation can reject it Messenger-only.
+    messenger_burst_window_seconds: SkipValidation[int] = 60
+    messenger_burst_max_events: SkipValidation[int] = 60
+    messenger_poll_seconds: SkipValidation[int] = 5
+    messenger_batch_size: SkipValidation[int] = 20
+    messenger_max_attempts: SkipValidation[int] = 8
+    messenger_lease_seconds: SkipValidation[int] = 120
+    messenger_core_timeout_seconds: SkipValidation[int] = 90
+    messenger_lease_margin_seconds: SkipValidation[int] = 15
+    messenger_retry_max_age_hours: SkipValidation[int] = 24
+    messenger_terminal_retention_days: SkipValidation[int] = 7
 
     @field_validator("trusted_proxy_ips", mode="before")
     @classmethod

@@ -923,25 +923,39 @@ async def _close_persistence_pools() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Preserve web startup; install Zalo independently and stop it before pools."""
-    from api.application.services.zalo_bot_dispatch import reset_scheduler
+    """Preserve web startup; install Zalo and Messenger independently, stop both before pools."""
+    from api.application.services.messenger_bot_dispatch import reset_scheduler as reset_messenger_scheduler
+    from api.application.services.zalo_bot_dispatch import reset_scheduler as reset_zalo_scheduler
+    from api.infrastructure.adapters.messenger_bot_runtime import (
+        start_messenger_runtime,
+        stop_messenger_runtime,
+    )
     from api.infrastructure.adapters.zalo_bot_runtime import start_zalo_runtime, stop_zalo_runtime
     from api.infrastructure.config.config import get_settings
 
-    reset_scheduler()
+    reset_zalo_scheduler()
+    reset_messenger_scheduler()
     await _wire_postgres_rate_limit_port()
     prewarm_task = None
     reconciliation_task = None
     retention_task = None
     zalo_runtime = None
+    messenger_runtime = None
     try:
         try:
             zalo_runtime = await start_zalo_runtime(get_settings())
         except Exception:
             # Zalo-only installation failures must not take the web API offline.
-            reset_scheduler()
+            reset_zalo_scheduler()
             logger.warning("ZALO_RUNTIME_UNAVAILABLE")
         app.state.zalo_runtime = zalo_runtime
+        try:
+            messenger_runtime = await start_messenger_runtime(get_settings())
+        except Exception:
+            # Messenger-only installation failures must not take the web API offline.
+            reset_messenger_scheduler()
+            logger.warning("MESSENGER_RUNTIME_UNAVAILABLE")
+        app.state.messenger_runtime = messenger_runtime
         # Background warmers start only after the Zalo cutover gate has run:
         # they share this event loop and the lead pool, and a concurrent cold
         # RAG init starves the loop long enough to blow the bounded (5s)
@@ -952,11 +966,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             retention_task = asyncio.create_task(_chat_history_retention_loop())
         yield
     finally:
-        reset_scheduler()
+        reset_zalo_scheduler()
+        reset_messenger_scheduler()
         try:
             await stop_zalo_runtime(zalo_runtime)
         finally:
             app.state.zalo_runtime = None
+            try:
+                await stop_messenger_runtime(messenger_runtime)
+            finally:
+                app.state.messenger_runtime = None
             if prewarm_task is not None:
                 prewarm_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -1009,6 +1028,7 @@ def create_app() -> FastAPI:
     from api.interfaces.api.deps import require_training_sales  # noqa: PLC0415
     from api.interfaces.api.hello import router as hello_router  # noqa: PLC0415
     from api.interfaces.api.lead import router as lead_router  # noqa: PLC0415
+    from api.interfaces.api.messenger_bot_routes import router as messenger_bot_router  # noqa: PLC0415
     from api.interfaces.api.notifications import router as notifications_router  # noqa: PLC0415
     from api.interfaces.api.projects import router as projects_router  # noqa: PLC0415
     from api.interfaces.api.sales import router as sales_router  # noqa: PLC0415
@@ -1028,6 +1048,7 @@ def create_app() -> FastAPI:
     app.include_router(notifications_router)
     app.include_router(assistant_router)
     app.include_router(zalo_bot_router)
+    app.include_router(messenger_bot_router)
 
     @app.get("/health")
     async def health() -> dict:

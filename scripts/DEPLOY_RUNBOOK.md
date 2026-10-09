@@ -428,3 +428,140 @@ không chạy core lại. Kiểm chứng real PostgreSQL restart/duplicate trư�
 
 CPU/min instances/revisions/secret bindings, DB capacity/mode, backup/privacy, provider,
 cancellation và clock-discontinuity thực tế đều **NOT-VERIFIED** cho đến khi có evidence được duyệt.
+
+---
+
+## 9. Messenger channel — deploy no-traffic → smoke → promote
+
+Chạy **từ repo root**. BE Messenger dùng chung service `ragre-api`, Dockerfile ở root,
+KHÔNG tạo service mới.
+
+### 9.1. Lệnh candidate (copy arg từ `scripts/deploy-be.ps1` `$DeployArgs`, dòng 45–57)
+
+Cú pháp gốc trong `deploy-be.ps1` (khớp từng arg — đã đối chiếu bằng mắt 2026-10-05):
+`run deploy <service> --source . --region asia-southeast1 --allow-unauthenticated
+--min-instances=1 --cpu-boost --no-cpu-throttling --timeout=360
+--startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080
+--set-secrets=<danh sách> --env-vars-file=env-prod.yaml`.
+
+Candidate Messenger = lệnh trên + `--no-traffic --tag messenger`. Revision đầu tiên
+chạy `MESSENGER_BOT_ENABLED=false` (qua `env-prod.yaml`, xem 9.2):
+
+```bash
+gcloud run deploy ragre-api \
+  --source . \
+  --region asia-southeast1 \
+  --allow-unauthenticated \
+  --min-instances=1 \
+  --cpu-boost \
+  --no-cpu-throttling \
+  --timeout=360 \
+  --startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080 \
+  --set-secrets=POSTGRES_PASSWORD=POSTGRES_PASSWORD:latest,ANON_IDENTITY_SECRET=ANON_IDENTITY_SECRET:latest,LEAD_MIRROR_HMAC_SECRET=LEAD_MIRROR_HMAC_SECRET:latest,LLM_API_KEY=LLM_API_KEY:latest,EMBEDDING_API_KEY=EMBEDDING_API_KEY:latest,RERANK_API_KEY=RERANK_API_KEY:latest,FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY=FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest,R2_ACCESS_KEY_ID=R2_ACCESS_KEY_ID:latest,MESSENGER_VERIFY_TOKEN=MESSENGER_VERIFY_TOKEN:latest,MESSENGER_APP_SECRET=MESSENGER_APP_SECRET:latest,MESSENGER_PAGE_ACCESS_TOKEN=MESSENGER_PAGE_ACCESS_TOKEN:latest,MESSENGER_IDENTITY_SECRET=MESSENGER_IDENTITY_SECRET:latest \
+  --env-vars-file=env-prod.yaml \
+  --no-traffic \
+  --tag messenger
+```
+
+KHÔNG dùng `deploy/cloudbuild-web.yaml` cho BE Messenger — file đó build frontend
+(`apps/web/Dockerfile` ra `ragre-web:latest`), sai context/service cho kênh này.
+
+### 9.2. Secrets (Secret Manager) + env thường
+
+Tạo 4 secret trước deploy (giá trị thật chỉ gõ lúc chạy, KHÔNG commit):
+
+```bash
+printf '%s' '<MESSENGER_VERIFY_TOKEN>' | gcloud secrets create MESSENGER_VERIFY_TOKEN --data-file=-
+printf '%s' '<MESSENGER_APP_SECRET>' | gcloud secrets create MESSENGER_APP_SECRET --data-file=-
+printf '%s' '<MESSENGER_PAGE_ACCESS_TOKEN>' | gcloud secrets create MESSENGER_PAGE_ACCESS_TOKEN --data-file=-
+# MESSENGER_IDENTITY_SECRET: tối thiểu 32 ký tự, ổn định, riêng với app secret/token
+openssl rand -base64 48  # chạy thử để lấy giá trị, dán vào lệnh dưới
+printf '%s' '<MESSENGER_IDENTITY_SECRET>' | gcloud secrets create MESSENGER_IDENTITY_SECRET --data-file=-
+```
+
+Bind qua `--set-secrets` như lệnh 9.1. Non-secret qua env (`env-prod.yaml`):
+`MESSENGER_PAGE_ID`, `MESSENGER_GRAPH_API_VERSION`, `MESSENGER_BOT_ENABLED`,
+`MESSENGER_OPEN_DEMO_ACCESS`. Lưu ý:
+
+- MỖI lần redeploy phải bind lại đủ `--set-secrets` — Cloud Run giữ secret của
+  revision cũ, revision mới thiếu bind = fail-closed lúc runtime.
+- `.env` local KHÔNG cấu hình service đã deploy — chỉ `env-prod.yaml` + secrets
+  lúc `gcloud run deploy` mới có hiệu lực.
+
+### 9.3. Migration TRƯỚC khi bật
+
+Runner lấy DSN từ `get_settings().pg_dsn_sync`, TRỪ KHI có `MESSENGER_MIGRATION_DSN`
+(`apply_messenger_bot_migrations.py::_resolve_dsn`). Chạy local bằng `.env` mặc định là
+`ragre`/`ragre`, KHÁC user của Supabase pooler — nếu để nguyên thì migrate nhầm DB/user,
+`validate_schema` fail và bot fail-closed. Vì vậy luôn đặt DSN tường minh:
+
+```bash
+export MESSENGER_MIGRATION_DSN="<dựng từ env-prod.yaml + secret POSTGRES_PASSWORD>"
+export MESSENGER_BOT_ENABLED=false
+export MESSENGER_MIGRATION_APPROVED=1
+```
+
+1. `--dry-run` TRƯỚC (cổng approval chặn cả dry-run; thiếu biến → exit 2). Đối chiếu
+   host/db/user (đã che) với `env-prod.yaml` trước khi đi tiếp.
+2. `--stage 1..6`, sau đó `--verify` **phải exit 0**.
+3. **Index invalid (D-IDXREPAIR):** nếu một trong `messenger_bot_events_ingress_key_uidx` /
+   `_source_key_uidx` / `_due_idx` / `_terminal_idx` báo `valid=false`, `--verify` chỉ BÁO
+   chứ không tự sửa. Chạy `DROP INDEX CONCURRENTLY IF EXISTS <name>;` trên kết nối **direct**
+   (KHÔNG qua transaction pooler), rồi chạy lại `--stage 5`.
+
+`validate_schema()` fail-closed nếu thiếu bảng: chưa apply đủ migration thì runtime từ chối
+enable, không phục vụ nửa vời.
+
+### 9.4. Verify GET ban đầu trên URL tagged
+
+```text
+https://messenger---ragre-api-<hash>-asia-southeast1.run.app/api/integrations/messenger-bot/webhook
+```
+
+(`<hash>` lấy từ output deploy / `gcloud run services describe ragre-api`.)
+KHÔNG verify trên URL live — live vẫn trỏ revision cũ cho đến khi promote.
+
+### 9.5. Thứ tự cutover
+
+1. Deploy no-traffic (disabled): lệnh 9.1 với `MESSENGER_BOT_ENABLED=false`.
+2. Migration (9.3) + secrets (9.2) + human setup (9.6) xong.
+3. Deploy replacement enabled, vẫn `--no-traffic --tag messenger`, với
+   `MESSENGER_OPEN_DEMO_ACCESS=true` (trong `env-prod.yaml`) để smoke.
+4. Round-trip thật trên Page qua tag: greeting → chọn dự án → câu hỏi scoped +
+   thu bằng chứng runtime-installed trên CHÍNH tag đó.
+5. Promote đúng revision enabled. Trước khi promote, ghi lại revision đang nhận traffic:
+   `PREV=$(gcloud run services describe ragre-api --region asia-southeast1 --format="value(status.traffic[0].revisionName)")`
+   và kiểm `value(status.latestReadyRevisionName)` == revision mang tag `messenger`.
+   Sau đó dùng `--to-latest`, KHÔNG dùng `--to-revisions`:
+   `gcloud run services update-traffic ragre-api --region asia-southeast1 --to-latest`
+   Lý do: sau một lần deploy `--no-traffic`, LATEST sẽ không nhận traffic ở các lần deploy
+   sau cho tới khi `--to-latest` được chạy; promote bằng `--to-revisions` ghim LATEST và mọi
+   lần chạy `deploy-be.ps1` sau đó đều nhận 0% traffic (D-DEPLOYPIN).
+   Rollback: `gcloud run services update-traffic ragre-api --region asia-southeast1 --to-revisions $PREV=100`
+6. Re-verify canonical callback URL (`https://ragre-api-<hash>-asia-southeast1.a.run.app/api/integrations/messenger-bot/webhook`).
+7. Giữ `MESSENGER_OPEN_DEMO_ACCESS=true` (public ON, owner D1); không redeploy.
+
+### 9.6. Cutover gate (đủ mới promote)
+
+- Migration đã applied (`validate_schema()` pass).
+- Secrets đã bound đủ 4 secret Messenger trên revision enabled.
+- Human provisioning xong: verify token, app secret, page token, page id,
+  identity secret, webhook fields `messages` + `messaging_postbacks`, Page subscribed,
+  GET_STARTED profile set, `pages_messaging` Advanced Access Approved VÀ app Live.
+- Access provisioned: public access ON (`MESSENGER_OPEN_DEMO_ACCESS=true`) từ bước 9.5.3
+  và giữ nguyên ON; sales binding chỉ là allowlist nội bộ phủ thêm, KHÔNG phải cổng chặn public.
+- Round-trip thật trên tag + bằng chứng runtime-installed trên tag.
+
+### 9.7. Contingency
+
+Nếu org cấm tagged revision: tạo service preview riêng trỏ test Page, smoke đủ
+round-trip + runtime-installed ở đó, rồi deploy/promote revision tương đương lên
+`ragre-api` theo 9.5.
+
+### 9.8. Giá trị nào lấy ở đâu
+
+| Giá trị | Lấy ở đâu |
+|---|---|
+| Verify token, app secret, page token, page id, identity secret, webhook fields, subscribe, GET_STARTED, Advanced Access, app Live, token scopes | `docs/messenger/MESSENGER_SETUP_HUMAN.md` |
+| Lệnh deploy gốc / arg chuẩn | `scripts/deploy-be.ps1` (`$DeployArgs`, dòng 45–57) |
+| Build context / ignore | `Dockerfile`, `.gcloudignore`, `.dockerignore` |
