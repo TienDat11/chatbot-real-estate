@@ -50,6 +50,7 @@ COPY apps/web/next.config.ts apps/web/tsconfig.json apps/web/postcss.config.mjs 
 # program; its jest-dom/vitest import augments the Assertion matchers the
 # *.test.tsx files rely on. Omitting it makes `next build` typecheck fail.
 COPY apps/web/vitest.setup.ts apps/web/
+COPY apps/web/docker-start.sh apps/web/
 
 # NEXT_PUBLIC_* values are inlined into the client bundle and the route
 # manifest at build time: firebaseEnvironmentConfig.ts throws when the
@@ -65,7 +66,13 @@ ARG NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
 ARG NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
 ARG NEXT_PUBLIC_FIREBASE_APP_ID
 ARG NEXT_PUBLIC_FIREBASE_VAPID_KEY
-ARG NEXT_PUBLIC_MEDIA_ORIGINS_JSON
+# Media allowlist travels base64-encoded: the value is JSON full of quotes and
+# commas, and every hop in front of this build (Windows shells, gcloud
+# --substitutions, Cloud Build substitution records) has silently eaten those
+# quotes before — a mangled value still passes a bare "non-empty" check and
+# ships a FE whose allowlist is empty. Base64 carries no quotes, commas or
+# whitespace, so it survives every hop; the RUN below decodes and validates.
+ARG NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64
 ARG NEXT_PUBLIC_MAP_TILE_URL
 ARG NEXT_PUBLIC_API_PROXY_TARGET
 ENV NEXT_PUBLIC_FIREBASE_API_KEY=$NEXT_PUBLIC_FIREBASE_API_KEY \
@@ -75,15 +82,15 @@ ENV NEXT_PUBLIC_FIREBASE_API_KEY=$NEXT_PUBLIC_FIREBASE_API_KEY \
     NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=$NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID \
     NEXT_PUBLIC_FIREBASE_APP_ID=$NEXT_PUBLIC_FIREBASE_APP_ID \
     NEXT_PUBLIC_FIREBASE_VAPID_KEY=$NEXT_PUBLIC_FIREBASE_VAPID_KEY \
-    NEXT_PUBLIC_MEDIA_ORIGINS_JSON=$NEXT_PUBLIC_MEDIA_ORIGINS_JSON \
     NEXT_PUBLIC_MAP_TILE_URL=$NEXT_PUBLIC_MAP_TILE_URL \
     NEXT_PUBLIC_API_PROXY_TARGET=$NEXT_PUBLIC_API_PROXY_TARGET
 
 # Same command as the project FE build gate (root package.json build script).
 # Fail fast: an empty API_PROXY_TARGET bakes zero rewrites and the deployed
 # FE 404s on every /api/* call — catch it at build, not in production.
-RUN { test -n "$NEXT_PUBLIC_API_PROXY_TARGET" || (echo "FATAL: pass --build-arg NEXT_PUBLIC_API_PROXY_TARGET=<ragre-api Cloud Run URL>" && exit 1); } \
- && { test -n "$NEXT_PUBLIC_MEDIA_ORIGINS_JSON" || (echo "FATAL: pass --build-arg NEXT_PUBLIC_MEDIA_ORIGINS_JSON='<the JSON array from apps/web/.env.local>'" && exit 1); } \
+RUN export NEXT_PUBLIC_MEDIA_ORIGINS_JSON="$(node -e 'process.stdout.write(Buffer.from(process.env.NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64||"","base64").toString("utf8"))')" \
+ && { test -n "$NEXT_PUBLIC_API_PROXY_TARGET" || (echo "FATAL: pass --build-arg NEXT_PUBLIC_API_PROXY_TARGET=<ragre-api Cloud Run URL>" && exit 1); } \
+ && node -e 'let v; try { v = JSON.parse(process.env.NEXT_PUBLIC_MEDIA_ORIGINS_JSON || ""); } catch (e) { throw new Error("NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64 did not decode to JSON: " + e.message); } if (!Array.isArray(v) || v.length === 0) throw new Error("NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64 must decode to a non-empty JSON array"); for (const it of v) { if (!it || typeof it.origin !== "string" || !it.origin.startsWith("https://") || !Array.isArray(it.pathPrefixes) || it.pathPrefixes.length === 0) throw new Error("invalid media origin entry: " + JSON.stringify(it)); } console.log("media origins:", v.length);' \
  && npm run build --workspace=@rag-ragre/web
 
 
@@ -92,16 +99,17 @@ FROM node:22-slim AS runtime
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1
 
-# `next start` needs the media origin env so next.config.ts can derive the
-# same image remotePatterns allowlist used during the build. Empty values
-# intentionally yield an empty allowlist (next/image 400s on R2 assets).
+# Runtime needs the same media allowlist as the build so next.config.ts can
+# derive image remotePatterns. It travels base64 (see the ARG above) and
+# docker-start.sh decodes it before `next start`. Empty values intentionally
+# yield an empty allowlist (next/image 400s on R2 assets).
 # Note rewrites are baked at BUILD time into routes-manifest.json, so
 # NEXT_PUBLIC_API_PROXY_TARGET is a build-arg here and is NOT re-read at
 # runtime despite what the name suggests. Empty strings are safe: the
 # config-local media helper and mapTiles both treat "" as unset.
-ARG NEXT_PUBLIC_MEDIA_ORIGINS_JSON
+ARG NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64
 ARG NEXT_PUBLIC_MAP_TILE_URL
-ENV NEXT_PUBLIC_MEDIA_ORIGINS_JSON=$NEXT_PUBLIC_MEDIA_ORIGINS_JSON \
+ENV NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64=$NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64 \
     NEXT_PUBLIC_MAP_TILE_URL=$NEXT_PUBLIC_MAP_TILE_URL
 WORKDIR /app
 
@@ -122,4 +130,4 @@ WORKDIR /app/apps/web
 # Cloud Run injects PORT (default 8080 here); `--` forwards -p to next start.
 # No HEALTHCHECK: Cloud Run uses its own HTTP probes.
 EXPOSE 8080
-CMD ["sh", "-c", "npm run start -- -p \"${PORT:-8080}\""]
+CMD ["sh", "docker-start.sh"]

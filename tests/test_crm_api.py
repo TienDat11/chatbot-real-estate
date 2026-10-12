@@ -377,7 +377,10 @@ def test_phone_reveal_allowed_for_assigned_sales_and_admin(
     # G3-r6 §10.2 headers: client correlation echoed, private no-store on PII.
     assert owner_response.headers["X-Correlation-ID"] == "corr-9"
     assert owner_response.headers["Cache-Control"] == "no-store, private"
-    assert owner_response.headers["Vary"] == "Authorization"
+    # Vary is additive: starlette >= 1.7 appends Origin for CORS, so the
+    # security contract is that Authorization is among the tokens, not the
+    # whole header value.
+    assert "Authorization" in {token.strip() for token in owner_response.headers["Vary"].split(",")}
     reveal_lines = [
         record
         for record in caplog.records
@@ -451,7 +454,7 @@ def test_lead_conversation_returns_safe_transcript_for_owner_and_admin() -> None
     assert response.status_code == 200
     assert response.headers["X-Correlation-ID"] == "corr-transcript"
     assert response.headers["Cache-Control"] == "no-store, private"
-    assert response.headers["Vary"] == "Authorization"
+    assert "Authorization" in {token.strip() for token in response.headers["Vary"].split(",")}
     assert response.json()["session_id"] == "session-24"
     assert response.json()["messages"][0]["meta"] is None
     assert response.json()["messages"][1]["meta"] == {"sources": ["doc-1"]}
@@ -506,7 +509,7 @@ def test_lead_conversation_returns_linked_session_transcript_for_authorized_role
         }
     ]
     assert response.headers["Cache-Control"] == "no-store, private"
-    assert response.headers["Vary"] == "Authorization"
+    assert "Authorization" in {token.strip() for token in response.headers["Vary"].split(",")}
     assert response.headers["X-Correlation-ID"] == "corr-linked-session"
 
 
@@ -539,7 +542,7 @@ def test_lead_conversation_returns_empty_transcript_200_when_lead_has_no_prior_c
     assert body["messages"] == []
     assert CUSTOMER_PHONE not in response.text
     assert response.headers["Cache-Control"] == "no-store, private"
-    assert response.headers["Vary"] == "Authorization"
+    assert "Authorization" in {token.strip() for token in response.headers["Vary"].split(",")}
     assert response.headers["X-Correlation-ID"] == "corr-no-link"
 
 
@@ -584,7 +587,7 @@ def test_lead_conversation_oversized_body_preserves_security_headers() -> None:
     assert response.status_code == 413
     assert response.json() == {"detail": "Conversation exceeds body limit"}
     assert response.headers["Cache-Control"] == "no-store, private"
-    assert response.headers["Vary"] == "Authorization"
+    assert "Authorization" in {token.strip() for token in response.headers["Vary"].split(",")}
     assert response.headers["X-Correlation-ID"] == "corr-oversized"
 
 
@@ -604,13 +607,13 @@ def test_lead_conversation_returns_403_for_other_sales_and_404_for_missing() -> 
     assert denied.status_code == 403
     assert denied.headers["X-Correlation-ID"] == "corr-denied"
     assert denied.headers["Cache-Control"] == "no-store, private"
-    assert denied.headers["Vary"] == "Authorization"
+    assert "Authorization" in {token.strip() for token in denied.headers["Vary"].split(",")}
     app.dependency_overrides[_require_transcript_sales_or_admin] = lambda: ASSIGNED_SALES_PRINCIPAL
     missing = client.get("/api/crm/leads/999/conversation")
     assert missing.status_code == 404
     assert missing.headers["X-Correlation-ID"].startswith("corr-")
     assert missing.headers["Cache-Control"] == "no-store, private"
-    assert missing.headers["Vary"] == "Authorization"
+    assert "Authorization" in {token.strip() for token in missing.headers["Vary"].split(",")}
 
 
 def test_lead_conversation_masks_nested_raw_phones_but_keeps_legitimate_metadata() -> None:
@@ -969,7 +972,7 @@ def test_transcript_real_auth_rejects_anonymous_and_viewer_with_security_headers
         assert response.status_code == status
         assert response.json() == {"detail": "Authorization failed"}
         assert response.headers["Cache-Control"] == "no-store, private"
-        assert response.headers["Vary"] == "Authorization"
+        assert "Authorization" in {token.strip() for token in response.headers["Vary"].split(",")}
         assert response.headers["X-Correlation-ID"] == correlation_id
 
 
@@ -999,7 +1002,7 @@ def test_transcript_real_auth_allows_mapped_sales_token_end_to_end(
     assert body["messages"] == []
     assert body["session_id"] is None
     assert response.headers["Cache-Control"] == "no-store, private"
-    assert response.headers["Vary"] == "Authorization"
+    assert "Authorization" in {token.strip() for token in response.headers["Vary"].split(",")}
     assert response.headers["X-Correlation-ID"] == "corr-sales-ok"
 
 

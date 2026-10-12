@@ -281,18 +281,26 @@ jobs:
           done
           exit "$missing"
 
-      # Substitutions use gcloud's alternate delimiter (^D1^ … D2 …): the
-      # media-origins value is JSON and contains commas, which the default
-      # comma parser would split into a bogus extra entry
-      # ("Bad syntax for dict arg"). Single quotes keep the braces/quotes in the
-      # JSON away from bash.
+      # Substitutions use gcloud's alternate delimiter (^@^ separators). The
+      # media-origins value is JSON, and plain JSON loses its double quotes on
+      # the way into Cloud Build substitutions — the alternate delimiter does
+      # keep the commas, but a quote-stripped array is unparseable all the same
+      # (build 6363ea95 recorded [{origin:https://...}] that way, so the
+      # deployed FE dropped every R2 image).
+      # It is passed base64-encoded instead: base64 has no quotes, commas,
+      # whitespace or '@', so no hop can mangle it. Single quotes keep the
+      # braces/quotes in the other values away from bash; the base64 value is
+      # spliced in with double quotes.
       - name: Build FE image via Cloud Build
+        env:
+          FE_MEDIA_ORIGINS_JSON: ${{ vars.FE_MEDIA_ORIGINS_JSON }}
         run: |
+          MEDIA_ORIGINS_B64="$(printf '%s' "$FE_MEDIA_ORIGINS_JSON" | base64 -w0)"
           gcloud builds submit \
             --config deploy/cloudbuild-web.yaml \
             --region asia-southeast1 \
             --quiet \
-            --substitutions '^@^_FE_API_KEY=${{ vars.FE_FIREBASE_API_KEY }}@_FE_AUTH_DOMAIN=${{ vars.FE_FIREBASE_AUTH_DOMAIN }}@_FE_PROJECT_ID=${{ vars.FE_FIREBASE_PROJECT_ID }}@_FE_STORAGE_BUCKET=${{ vars.FE_FIREBASE_STORAGE_BUCKET }}@_FE_SENDER_ID=${{ vars.FE_FIREBASE_MESSAGING_SENDER_ID }}@_FE_APP_ID=${{ vars.FE_FIREBASE_APP_ID }}@_FE_VAPID_KEY=${{ vars.FE_FIREBASE_VAPID_KEY }}@_FE_MEDIA_ORIGINS_JSON=${{ vars.FE_MEDIA_ORIGINS_JSON }}@_FE_PROXY_TARGET=${{ vars.FE_API_PROXY_TARGET }}' \
+            --substitutions '^@^_FE_API_KEY=${{ vars.FE_FIREBASE_API_KEY }}@_FE_AUTH_DOMAIN=${{ vars.FE_FIREBASE_AUTH_DOMAIN }}@_FE_PROJECT_ID=${{ vars.FE_FIREBASE_PROJECT_ID }}@_FE_STORAGE_BUCKET=${{ vars.FE_FIREBASE_STORAGE_BUCKET }}@_FE_SENDER_ID=${{ vars.FE_FIREBASE_MESSAGING_SENDER_ID }}@_FE_APP_ID=${{ vars.FE_FIREBASE_APP_ID }}@_FE_VAPID_KEY=${{ vars.FE_FIREBASE_VAPID_KEY }}@_FE_MEDIA_ORIGINS_JSON_B64='"${MEDIA_ORIGINS_B64}"'@_FE_PROXY_TARGET=${{ vars.FE_API_PROXY_TARGET }}' \
             .
 
       # No env flags on purpose: the new revision inherits the live ragre-web

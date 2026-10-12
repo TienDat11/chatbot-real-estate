@@ -170,7 +170,7 @@ File `deploy/cloudbuild-web.yaml` đã tồn tại — KHÔNG cần tự tạo. 
 # (chạy từ repo root)
 gcloud builds submit . \
   --config deploy/cloudbuild-web.yaml \
-  --substitutions _FE_API_KEY=<NEXT_PUBLIC_FIREBASE_API_KEY>,_FE_AUTH_DOMAIN=<NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN>,_FE_PROJECT_ID=<NEXT_PUBLIC_FIREBASE_PROJECT_ID>,_FE_STORAGE_BUCKET=<NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET>,_FE_SENDER_ID=<NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID>,_FE_APP_ID=<NEXT_PUBLIC_FIREBASE_APP_ID>,_FE_VAPID_KEY=<NEXT_PUBLIC_FIREBASE_VAPID_KEY>,_FE_MEDIA_ORIGINS_JSON=<NEXT_PUBLIC_MEDIA_ORIGINS_JSON>,_FE_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app
+  --substitutions _FE_API_KEY=<NEXT_PUBLIC_FIREBASE_API_KEY>,_FE_AUTH_DOMAIN=<NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN>,_FE_PROJECT_ID=<NEXT_PUBLIC_FIREBASE_PROJECT_ID>,_FE_STORAGE_BUCKET=<NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET>,_FE_SENDER_ID=<NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID>,_FE_APP_ID=<NEXT_PUBLIC_FIREBASE_APP_ID>,_FE_VAPID_KEY=<NEXT_PUBLIC_FIREBASE_VAPID_KEY>,_FE_MEDIA_ORIGINS_JSON_B64=$(printf '%s' '<NEXT_PUBLIC_MEDIA_ORIGINS_JSON>' | base64 -w0),_FE_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app
 
 gcloud run deploy ragre-web \
   --image asia-southeast1-docker.pkg.dev/<PROJECT_ID>/ragre/ragre-web:latest \
@@ -183,9 +183,9 @@ gcloud run deploy ragre-web \
 ```
 Ghi chú:
 - `<PROJECT_ID>` = GCP project id đã set ở bước 0.1 (xem bằng `gcloud config get-value project`).
-- ⚠️ `NEXT_PUBLIC_API_PROXY_TARGET` là **build-arg BẮT BUỘC** (đã verify 2026-09-07 trên prod: rewrites `/api/*` được bake vào `routes-manifest.json` lúc build — runtime env KHÔNG recomputed, thiếu build-arg này → mọi call `/api/*` 404 dù `--set-env-vars` có set). Nó cũng được set lại ở runtime qua `--set-env-vars` cho chắc (next.config đọc `??` fallback — chuỗi rỗng không rơi vào fallback). 8 biến còn lại (`NEXT_PUBLIC_FIREBASE_*` ×6, `NEXT_PUBLIC_FIREBASE_VAPID_KEY`, `NEXT_PUBLIC_MEDIA_ORIGINS_JSON`) chỉ cần ở build (đã inline vào bundle client — build thiếu VAPID key làm FCM getToken hỏng, thiếu MEDIA_ORIGINS_JSON làm allowlist ảnh R2 rỗng). Dockerfile giờ có guard fail-fast: build lỗi ngay nếu thiếu API_PROXY_TARGET.
+- ⚠️ `NEXT_PUBLIC_API_PROXY_TARGET` là **build-arg BẮT BUỘC** (đã verify 2026-09-07 trên prod: rewrites `/api/*` được bake vào `routes-manifest.json` lúc build — runtime env KHÔNG recomputed, thiếu build-arg này → mọi call `/api/*` 404 dù `--set-env-vars` có set). Nó cũng được set lại ở runtime qua `--set-env-vars` cho chắc (next.config đọc `??` fallback — chuỗi rỗng không rơi vào fallback). 8 biến còn lại (`NEXT_PUBLIC_FIREBASE_*` ×6, `NEXT_PUBLIC_FIREBASE_VAPID_KEY`, `NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64`) chỉ cần ở build (đã inline vào bundle client — build thiếu VAPID key làm FCM getToken hỏng, thiếu `NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64` làm allowlist ảnh R2 rỗng). Dockerfile giờ có guard fail-fast: build lỗi ngay nếu thiếu API_PROXY_TARGET hoặc nếu base64 của media origins không decode ra JSON array hợp lệ.
 - `--max-instances=2` chặn chi phí khi bị spam; `--cpu-boost` rút ngắn khởi động SSR; FE giữ `min-instances=0` (scale-to-zero, cold start SSR 1–3s chấp nhận được, request-based billing nên idle không mất tiền).
-- ⚠️ `--substitutions` của gcloud tách giá trị theo dấu phẩy nên `_FE_MEDIA_ORIGINS_JSON` (JSON chứa dấu phẩy) KHÔNG truyền được qua flag này. Với biến này: dùng Cách B (build local — đã verify chạy thành công), hoặc đưa giá trị vào khối `substitutions:` mặc định trong `deploy/cloudbuild-web.yaml` (kiểm chứng trước khi tin; nhớ KHÔNG commit giá trị vào git).
+- ✅ Media allowlist đi qua base64 (`_FE_MEDIA_ORIGINS_JSON_B64`) nên dấu ngoặc kép của JSON không còn bị mất ở các tầng trung gian. Bằng chứng (2026-10-12): Cloud Build `6363ea95` ghi substitution đã mất sẵn dấu ngoặc kép — `[{origin:https://…,pathPrefixes:[…]}]`, dấu phẩy vẫn còn — và tái hiện được bằng một build rác: gửi JSON inline qua `--substitutions` thì mọi `\"` biến mất, chỉ `\\\"` mới sống sót. Bundle prod (`ragre-web-00014-vub`) inline chuỗi đã mất quote đó, `JSON.parse` không parse được → `configuredOrigins()` trả `[]` → mọi ảnh R2 bị `filterPublicImages` loại, UI hiện "Media công khai hiện không khả dụng". Base64 + guard trong Dockerfile giờ làm build đỏ ngay nếu giá trị bị hỏng, thay vì ship allowlist rỗng.
 
 ### 3.3. Cách B — Docker cục bộ (nếu máy có Docker)
 ```bash
@@ -198,7 +198,7 @@ docker buildx build --platform linux/amd64 \
   --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=<...> \
   --build-arg NEXT_PUBLIC_FIREBASE_APP_ID=<...> \
   --build-arg NEXT_PUBLIC_FIREBASE_VAPID_KEY=<NEXT_PUBLIC_FIREBASE_VAPID_KEY> \
-  --build-arg NEXT_PUBLIC_MEDIA_ORIGINS_JSON="<NEXT_PUBLIC_MEDIA_ORIGINS_JSON — BẮT BUỘC, copy NGUYÊN giá trị JSON từ .env.local, giữ nguyên dấu ngoặc kép; rỗng = guard trong Dockerfile fail build>" \
+  --build-arg NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64="$(printf '%s' '<NEXT_PUBLIC_MEDIA_ORIGINS_JSON — BẮT BUỘC, copy NGUYÊN giá trị JSON từ .env.local>' | base64 -w0)" \
   --build-arg NEXT_PUBLIC_API_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app \
   --build-arg NEXT_PUBLIC_MAP_TILE_URL="<NEXT_PUBLIC_MAP_TILE_URL nếu có, từ .env.local — rỗng OK>" \
   -t asia-southeast1-docker.pkg.dev/<PROJECT_ID>/ragre/ragre-web:latest \
@@ -224,12 +224,13 @@ gcloud run deploy ragre-web \
   --set-env-vars=NEXT_PUBLIC_API_PROXY_TARGET=https://ragre-api-<HASH>-asia-southeast1.a.run.app
 ```
 Ghi chú Cách B:
-- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON` chứa JSON có khoảng trắng → bắt buộc bọc trong `"..."` như trên; build đã verify baked đúng vào client bundle.
+- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64` là base64 của JSON array (`printf '%s' '<JSON>' | base64 -w0`). Base64 không chứa dấu ngoặc kép, dấu phẩy hay khoảng trắng nên không cần bọc thêm trong shell; giá trị rỗng hoặc hỏng làm `JSON.parse` trong Dockerfile fail → build đỏ.
+- ⚠️ `base64 -w0` chỉ có ở GNU coreutils (Linux, WSL, Git Bash). Trên PowerShell dùng `[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('<JSON>'))` rồi truyền kết quả vào `_FE_MEDIA_ORIGINS_JSON_B64` / `--build-arg NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64=...`.
 - `<PROJECT_ID>` = `sale-chat-ai` (GCP), KHÔNG phải Firebase project id.
 - Các build-arg lấy từ `apps/web/.env.local` (cùng giá trị đã build thử local thành công).
-- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON` giờ là **build-arg bắt buộc** (guard fail-fast trong Dockerfile cạnh guard PROXY_TARGET, verify 2026-09-07). Lưu ý: client bundle inline giá trị lúc BUILD — runtime ENV chỉ phục vụ `next start` (images.remotePatterns). Cả hai nguồn đã verify bake đúng trên revision `ragre-web-00002-6ql`.
+- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64` giờ là **build-arg bắt buộc** (guard fail-fast trong Dockerfile cạnh guard PROXY_TARGET). Builder decode base64 rồi `JSON.parse` nghiêm ngặt; runtime `docker-start.sh` decode lại cho `next start` (images.remotePatterns). Client bundle inline giá trị lúc BUILD. Lần verify 2026-09-07 áp dụng cho scheme plain-JSON cũ; scheme base64 này chưa verify trên prod.
 - ⚠️ Ảnh greeting/chat báo hỏng trên prod (2026-09-07) KHÔNG phải do FE: FE + image cho phép mọi URL R2 allowlist (curl `_next/image` → 200). Nguyên nhân: service **ragre-api** thiếu env `IMAGE_CDN_PROJECT_MAP` (+ `R2_ACCOUNT_ID`/`R2_PUBLIC_URL`) — BE fail-closed ở prod (`_project_media_policy` trả origins rỗng) nên `/llms-hello` trả `images: []` và `videos[].url_cdn: null`, BE log: "media entries resolved to zero valid urls: project_key=camellia entry_count=3 invalid_url_count=3". Fix: `gcloud run services update ragre-api --region asia-southeast1 --set-env-vars=IMAGE_CDN_PROJECT_MAP='<JSON từ .env>'` (thuộc BE session — xem mục 281).
-- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON` + `NEXT_PUBLIC_MAP_TILE_URL` đã được bake vào cả runtime ENV của image (Dockerfile runtime stage) → KHÔNG cần `--set-env-vars` cho chúng lúc deploy. `NEXT_PUBLIC_API_PROXY_TARGET` giờ là **build-arg bắt buộc** (guard fail-fast trong Dockerfile), đồng thời vẫn set ở runtime qua `--set-env-vars`.
+- `NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64` + `NEXT_PUBLIC_MAP_TILE_URL` đã được bake vào cả runtime ENV của image (Dockerfile runtime stage) → KHÔNG cần `--set-env-vars` cho chúng lúc deploy. `NEXT_PUBLIC_API_PROXY_TARGET` giờ là **build-arg bắt buộc** (guard fail-fast trong Dockerfile), đồng thời vẫn set ở runtime qua `--set-env-vars`.
 
 ### 3.4. Mở quyền cho Firebase Hosting gọi được Cloud Run
 ```bash

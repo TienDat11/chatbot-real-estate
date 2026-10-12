@@ -13,7 +13,8 @@
 #   _FE_SENDER_ID        NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
 #   _FE_APP_ID           NEXT_PUBLIC_FIREBASE_APP_ID
 #   _FE_VAPID_KEY        NEXT_PUBLIC_FIREBASE_VAPID_KEY (FCM web push)
-#   _FE_MEDIA_ORIGINS_JSON NEXT_PUBLIC_MEDIA_ORIGINS_JSON (R2 image allowlist)
+#   _FE_MEDIA_ORIGINS_JSON_B64 NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64 (base64 of the R2
+#                        image allowlist JSON array: printf '%s' '<json>' | base64 -w0)
 #   _FE_PROXY_TARGET     NEXT_PUBLIC_API_PROXY_TARGET (Cloud Run URL of ragre-api)
 #   _PROJECT_ID          GCP project id (only needed if the two lines marked
 #                        TODO-PROJECT are not pre-filled)
@@ -22,6 +23,8 @@
 
 steps:
   - name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
     args:
       - build
       - -f
@@ -41,7 +44,7 @@ steps:
       - --build-arg
       - NEXT_PUBLIC_FIREBASE_VAPID_KEY=$_FE_VAPID_KEY
       - --build-arg
-      - NEXT_PUBLIC_MEDIA_ORIGINS_JSON=$_FE_MEDIA_ORIGINS_JSON
+      - NEXT_PUBLIC_MEDIA_ORIGINS_JSON_B64=$_FE_MEDIA_ORIGINS_JSON_B64
       - --build-arg
       - NEXT_PUBLIC_API_PROXY_TARGET=$_FE_PROXY_TARGET
       - -t
