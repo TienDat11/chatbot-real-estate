@@ -42,14 +42,26 @@ $Secrets = @(
     'R2_ACCESS_KEY_ID'
 ) | ForEach-Object { "$_=$_`:latest" }
 
+# Scaling and CPU billing are pinned on purpose. Cloud Run inherits any flag
+# omitted from `deploy` from the currently serving revision, so a flag that
+# exists only in an old revision silently re-applies on every deploy.
+# `--cpu-throttling` bills CPU only while a request is in flight;
+# `--no-cpu-throttling` billed every idle instance 24/7.
+# `--max-instances=2` matches the live service template, so a spam burst cannot
+# scale to the previous ceiling of 20.
+# `--min-instances=0` scales to zero between requests, so an idle window costs
+# nothing. The trade: the first request after a scale-to-zero pays LightRAG's
+# ~30-40s cold init, and a Messenger webhook landing in that window may exceed
+# Meta's delivery timeout.
 $DeployArgs = @(
     'run', 'deploy', $ServiceName,
     '--source', '.',
     '--region', $Region,
     '--allow-unauthenticated',
-    '--min-instances=1',
+    '--cpu-throttling',
+    '--min-instances=0',
+    '--max-instances=2',
     '--cpu-boost',
-    '--no-cpu-throttling',
     '--timeout=360',
     '--startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080',
     "--set-secrets=$($Secrets -join ',')",

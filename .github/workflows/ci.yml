@@ -213,17 +213,28 @@ jobs:
       # inherits env + secretKeyRefs from the currently serving one, which is
       # exactly the behaviour we want.
       #
-      # The flags below match the live ragre-api revision (verified 2026-09-14).
+      # Scaling and CPU billing are pinned explicitly. `gcloud run deploy`
+      # inherits any flag it is not given from the currently serving revision, so
+      # a setting that lives only in an old revision silently re-applies forever.
+      # Pinning --cpu-throttling bills CPU only while a request is in flight;
+      # --no-cpu-throttling billed every idle instance 24/7 and let 36
+      # always-CPU revisions accumulate (2026-10-12 audit).
+      # --max-instances=2 matches the live service template; 20 allowed a spam
+      # burst to multiply the instance count tenfold.
+      # --min-instances=0 scales to zero between requests, so an idle window
+      # costs nothing; the first request after that pays LightRAG's ~30-40s cold
+      # init. Background asyncio tasks (lead mirror reconciliation, chat history
+      # retention) only make progress while a request is in flight.
       - name: Deploy to Cloud Run
         run: >-
           gcloud run deploy ragre-api
           --source .
           --region asia-southeast1
           --quiet
-          --min-instances=1
-          --max-instances=20
+          --cpu-throttling
+          --min-instances=0
+          --max-instances=2
           --cpu-boost
-          --no-cpu-throttling
           --timeout=360
           --startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080
 
