@@ -1446,6 +1446,30 @@ def test_a4_faithful_rate_publishes_in_every_branch(
 
 
 @pytest.mark.parametrize(("config", "section"), AREA_EVIDENCE_CONFIGS)
+@pytest.mark.parametrize(("variant", "chunk_content"), PCT_CHUNK_VARIANTS)
+def test_a6_faithful_rate_and_deposit_in_one_clause_both_publish(
+    monkeypatch, variant, chunk_content, config, section
+):
+    """A rate and a deposit sharing one comma clause are each classified by their own segment.
+
+    Classifying both figures by the whole clause tagged the faithful rate as a
+    deposit and refused a correct answer. Each figure must be judged by the
+    comma segment it sits in, so both publish.
+    """
+    answer = "Lãi suất vay là 7,5%/năm trong 18 tháng, đặt cọc 5% giá bán."
+    result, merged, audit = _run_publication(
+        monkeypatch, answer=answer, chunk_content=chunk_content, section=section
+    )
+    _assert_pct_branch(merged, chunk_content, section)
+    assert (Decimal("7.5"), "rate") in _pct_evidence(merged), variant
+    assert (Decimal("5"), "deposit") in _pct_evidence(merged), variant
+
+    assert result["answer"] not in CANNED_COPIES, (variant, config)
+    assert result["answer"] == answer, (variant, config)
+    assert audit.get("fallback_reason") is None, (variant, config)
+
+
+@pytest.mark.parametrize(("config", "section"), AREA_EVIDENCE_CONFIGS)
 @pytest.mark.parametrize(("variant", "chunk_content"), PCT_MONEY_CHUNK_VARIANTS)
 def test_a5_money_stated_by_the_chunk_is_still_not_licensed_by_it(
     monkeypatch, variant, chunk_content, config, section

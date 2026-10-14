@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -641,3 +642,84 @@ def test_price_cues_still_publish(monkeypatch, answer):
     )
     assert tokens == answer
     assert result["answer"] == answer
+
+
+# --- H: a labelled range answers a price question with no confirmed exact price
+
+
+def _range_row(fact_id: int = 1, *, policy_key: str = "htls") -> dict:
+    return _fact_row(
+        fact_id, value=None, quality="range", trust="estimate", policy_key=policy_key,
+        range_min=1_980_000_000, range_max=2_640_000_000,
+    )
+
+
+def test_labelled_range_answers_a_price_question_with_no_confirmed_price(monkeypatch):
+    """The indicative board is the answer: no "chưa có giá" copy over real evidence."""
+    answer = (
+        "Căn CH-03 có giá ước tính từ 1.980.000.000 đồng đến 2.640.000.000 đồng "
+        "theo phương án HTLS."
+    )
+    result, tokens, _ = _run(
+        monkeypatch, "Giá căn CH-03?", answer, [_range_row()],
+        probe=ConfirmedPriceProbe(True, None, frozenset(), False),
+    )
+    assert tokens == answer
+    assert result["answer"] == answer
+    assert "1.980.000.000" in tokens
+    assert "2.640.000.000" in tokens
+    assert "HTLS" in tokens
+    assert result["answer"] != NO_CONFIRMED_PROJECT_PRICE
+    assert result["confidence"] in {"MEDIUM", "LOW"}
+    assert result["requires_review"] is True
+
+
+def test_range_row_never_licenses_an_exact_single_price(monkeypatch):
+    """A range row authorizes its bounds under a label, never one figure as the price."""
+    answer = "Căn CH-03 có giá 2.850.000.000 đồng."
+    result, tokens, _ = _run(
+        monkeypatch, "Giá căn CH-03?", answer, [_range_row()],
+        probe=ConfirmedPriceProbe(True, None, frozenset(), False),
+    )
+    assert answer not in tokens
+    assert result["answer"] != answer
+    assert result["answer"] != NO_CONFIRMED_PROJECT_PRICE
+    assert result["confidence"] == "LOW"
+
+
+def test_range_bounds_are_not_licensed_by_a_mismatched_range(monkeypatch):
+    """Stated bounds must equal the row's bounds; a wider range is refused."""
+    answer = "Căn CH-03 có giá ước tính từ 1.500.000.000 đồng đến 2.640.000.000 đồng."
+    result, tokens, _ = _run(
+        monkeypatch, "Giá căn CH-03?", answer, [_range_row()],
+        probe=ConfirmedPriceProbe(True, None, frozenset(), False),
+    )
+    assert answer not in tokens
+    assert result["answer"] != answer
+
+
+def test_range_claim_binds_when_a_non_price_key_comes_first():
+    """Binder regression: the scoped key is not necessarily the first key.
+
+    ``build_estimate_evidence`` puts ``display_name`` first, and the range path
+    once read only the first key, so no range claim could ever bind. Any key in
+    ``fields`` that the clause licenses must authorize the bounds.
+    """
+    # display_name first: the pre-fix code read only the first key and refused.
+    row = {
+        "unit": "vnd",
+        "quality": "range",
+        "trust_level": "estimate",
+        "range": {"min": 1_980_000_000, "max": 2_640_000_000},
+        "fields": {
+            "display_name": "Căn hộ Studio",
+            "price_min_vnd": 1_980_000_000,
+            "price_max_vnd": 2_640_000_000,
+        },
+    }
+    clause = "Căn hộ Studio có giá ước tính từ 1.980.000.000 đồng đến 2.640.000.000 đồng"
+    spans = [
+        (Decimal("1980000000"), None, 0, 0),
+        (Decimal("2640000000"), None, 0, 0),
+    ]
+    assert workflow_module._bind_claim(row, clause, spans) is True

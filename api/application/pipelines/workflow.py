@@ -251,8 +251,10 @@ _FIGURE_UNITS = frozenset(
 )
 
 # A figure binds ONLY to the named field its OWN clause names, so a deposit,
-# payment or rate amount can never be licensed by a same-valued price row.
-_PRICE_FIELDS = frozenset({"price_vnd"})
+# payment or rate amount can never be licensed by a same-valued price row. The
+# estimate board keys (price_min_vnd/price_max_vnd) are the range counterpart of
+# price_vnd: they license a labelled range claim, and only one.
+_PRICE_FIELDS = frozenset({"price_vnd", "price_min_vnd", "price_max_vnd"})
 _RATE_FIELDS = frozenset({"interest_rate_pct"})
 _DEPOSIT_PCT_FIELDS = frozenset({"deposit_pct"})
 _DEPOSIT_VND_FIELDS = frozenset({"required_down_payment_vnd"})
@@ -573,7 +575,7 @@ def _chunk_pct_evidence(rows: list[dict]) -> list[tuple[Decimal, str]]:
 
 
 def _pct_claim_bound_by_chunk(
-    clause: str,
+    answer: str,
     spans: list[tuple[Decimal, str | None, int, int]],
     evidence: list[tuple[Decimal, str]],
 ) -> bool:
@@ -585,18 +587,22 @@ def _pct_claim_bound_by_chunk(
     commitment, so an empty or non-matching evidence list refuses it.
 
     The second condition closes the misattribution case where the number is real
-    but the commitment is not: a claim whose own clause names a determinate policy
-    is refused when the chunk attributes that same value only to a DIFFERENT
-    determinate policy. A cue-less clause on either side is not a conflict -- the
-    module already refuses to bind a cue-less percentage to a fact field, and
-    treating "no cue" as disagreement would veto faithful short quotes.
+    but the commitment is not: a figure whose own comma segment names a determinate
+    policy is refused when the chunk attributes that value only to a DIFFERENT
+    determinate policy. A clause can carry several commitments at once
+    ("lãi suất 0%, đặt cọc 30%"), so each figure's cue is read from its own comma
+    segment, not the whole clause. A cue-less segment on either side is not a
+    conflict -- the module already refuses to bind a cue-less percentage to a fact
+    field, and treating "no cue" as disagreement would veto faithful short quotes.
     """
     if not evidence or not spans:
         return False
     if any(unit != "%" for _value, unit, _start, _end in spans):
         return False
-    answer_class = _pct_cue_class(clause)
-    for value, _unit, _start, _end in spans:
+    for value, _unit, start, end in spans:
+        # The cue is read from the figure's own comma segment, not the whole clause,
+        # so one clause can carry several commitments ("lãi suất 0%, đặt cọc 30%").
+        answer_class = _pct_cue_class(_pct_segment_clause(answer, start, end))
         classes = {cue for amount, cue in evidence if amount == value}
         if not classes:
             return False
@@ -671,7 +677,7 @@ def _bind_claim(
         bounds
         and not percent
         and len(spans) == 2
-        and next(iter(fields), None) in scope
+        and any(name in scope for name in fields)
         and _ESTIMATE_LABEL_RE.search(_fold(clause))
     ):
         return bounds == (spans[0][0], spans[1][0])
@@ -722,7 +728,7 @@ def _bind_financial_claims(
         # already licensed keeps exactly the authority it had before this change,
         # so no existing SQL verdict moves.
         if not licensed:
-            licensed = _pct_claim_bound_by_chunk(clause, spans, pct_evidence)
+            licensed = _pct_claim_bound_by_chunk(answer, spans, pct_evidence)
         if licensed:
             bound.update((span[2], span[3]) for span in spans)
     return bound, total, published_estimate
@@ -1884,12 +1890,31 @@ class RagQueryWorkflow(Workflow):
                     for code in dict.fromkeys(requested_units)
                     if probe is not None and code not in probe.confirmed_units
                 ]
+                # A selected, lineage-proven range is evidence the project HAS a price, so
+                # absence must never be asserted while it exists. Only a PRICE range
+                # (not a rate or deposit range) counts: a range row with a bound price
+                # field, scoped to the requested units when a unit was asked for.
+                range_rows = [
+                    row
+                    for row in financial_rows
+                    if _fact_range_bounds(row) is not None
+                    and any(name in _PRICE_FIELDS for name in (row.get("fields") or {}))
+                    and (
+                        not requested_units
+                        or _unit_subject_code(row.get("subject"), retrieval_project)
+                        in requested_units
+                    )
+                ]
                 if probe is None or not probe.completed:
                     answer, limitation_reason = PRICE_LOOKUP_UNCERTAIN, "price_lookup_unavailable"
                 elif probe.any_confirmed and unsupported_figure:
                     # A confirmed price exists but did not validate this figure:
                     # claiming absence would be the less truthful copy.
                     answer, limitation_reason = PRICE_LOOKUP_UNCERTAIN, "unvalidated_confirmed_price"
+                elif range_rows and not probe.any_confirmed:
+                    # Range evidence is real, but this turn cannot quote it as a
+                    # publishable figure, so the copy says "cannot confirm", not absence.
+                    answer, limitation_reason = PRICE_LOOKUP_UNCERTAIN, "range_evidence_unbound"
                 elif missing_units:
                     answer = " ".join(
                         NO_CONFIRMED_UNIT_PRICE.format(unit_code=code) for code in missing_units
