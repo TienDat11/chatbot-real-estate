@@ -1121,7 +1121,15 @@ def test_camellia_amenity_rag_area_publishes_without_sql_facts(monkeypatch):
     cases = [
         (approved, record, True),
         (f"Nhà trẻ rộng 434.2 m² theo {source}.", record, True),
-        (f"Nhà trẻ rộng 434,2 m². Theo {source}.", record, False),
+        # Publishing here is the correct behaviour, not a relaxed assertion: the
+        # figure is grounded by the text of a chunk that already passed scope,
+        # publication and effective-date validation, so WHERE the citation sits is
+        # no longer what authorizes it. The old expectation blocked a factually
+        # true quote (the chunk does state nha_tre 434.2 m2, and the title is the
+        # real source) over a formal clause-placement technicality -- and that
+        # same technicality is one of the causes of the customer-visible bug, in
+        # which an answer faithfully quoting retrieved evidence was withheld.
+        (f"Nhà trẻ rộng 434,2 m². Theo {source}.", record, True),
         (f"Nhà trẻ rộng 434,2 m². Giá căn 99 tỷ theo {source}.", record, False),
         (f"Nhà trẻ giá 99 tỷ theo {source}.", record, False),
         (f"Nhà trẻ rộng 434,3 m² theo {source}.", record, False),

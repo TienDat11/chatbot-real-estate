@@ -10,6 +10,7 @@ delegates to api.nl2sql_guard when structured_path == 'nl2sql'.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import unicodedata
 import urllib.parse
@@ -65,6 +66,8 @@ ALLOWED_FIELDS: dict[str, tuple[str, ...]] = {
         "quality",
         "policy_key",
         "campaign_key",
+        "attrs_type",
+        "attrs_bedrooms",
     ),
 }
 
@@ -327,6 +330,27 @@ def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
         params.append(v)
         return f"${len(params)}"
 
+    # facts: unit type and bedroom count are JSONB attributes on the subject
+    # (fs.attrs), not fact columns. Handled before every generic branch for two
+    # reasons: JSONB extraction is text even for a numeric key, so str(value)
+    # keeps '=' / 'in' text-to-text; and allocating the generic placeholder
+    # first would append a parameter that never appears in the SQL, which makes
+    # asyncpg fail with "could not determine data type of parameter $N".
+    #
+    # The comparison folds case on both sides: the stored vocabulary is
+    # free-form and inconsistent ("Studio" on camellia, "Stu"/"1BR"/"2BR" on
+    # soleil), so a user typing "studio" would otherwise match nothing and the
+    # turn would fall back to the canned message even though the subject exists.
+    if not is_vnd and field_name in ("attrs_type", "attrs_bedrooms"):
+        col = "fs.attrs->>'bedrooms'" if field_name == "attrs_bedrooms" else "fs.attrs->>'type'"
+        if op == "in":
+            return f"lower({col}) = ANY({next_param([str(v).casefold() for v in value])})"
+        if op in ("=", "!="):
+            return f"lower({col}) {op} {next_param(str(value).casefold())}"
+        raise SpecError(
+            f"attrs filter chỉ hỗ trợ op '=', '!=' hoặc 'in' (field={field_name}, op={op})"
+        )
+
     if op == "between":
         lo, hi = value
         if is_vnd:
@@ -440,6 +464,7 @@ def build_sql(
         # eligible-price predicates belong to the P0-04 SQL contract.
         sql = (
             "SELECT f.id AS fact_id, fs.subject_key, fs.subject_type, fs.display_name, "
+            "fs.attrs AS subject_attrs, "
             "f.fact_key, f.policy_key, f.campaign_key, f.value_num, f.value_text, f.unit, f.quality, "  # noqa: E501
             "f.range_min, f.range_max, f.effective_from, f.effective_to, "
             "f.source_doc_id, f.source_chunk_id, f.trust_level, "
@@ -523,6 +548,21 @@ def _effective_limit(spec: dict, query: str) -> int:
 def _row_value(row: dict, field_name: str) -> Any:
     if field_name in row:
         return row[field_name]
+    # JSONB unit attributes: the predicate runs in SQL (fs.attrs->>'type'), and
+    # the Python post-filter must read the same value or it drops every matching
+    # row. Values arrive as text from the extraction, so compare as text.
+    if field_name in ("attrs_type", "attrs_bedrooms"):
+        attrs = row.get("subject_attrs")
+        if isinstance(attrs, str):
+            try:
+                attrs = json.loads(attrs)
+            except ValueError:
+                return None
+        if isinstance(attrs, dict):
+            key = "bedrooms" if field_name == "attrs_bedrooms" else "type"
+            raw = attrs.get(key)
+            return None if raw is None else str(raw)
+        return None
     if "value_num" in row and row.get("value_num") is not None:
         return row["value_num"]
     return row.get("value_text")
@@ -548,8 +588,35 @@ def match_semantics(row: dict, field_name: str, op: str, value: Any) -> bool:
     if field_name == "subject_key" and isinstance(value, str):
         # Storage/query representation is normalized; compare the persisted form.
         value = normalize_subject_key(value)
+
+    # JSONB unit attributes describe the SUBJECT, not the fact row's value, so
+    # they are resolved before the range/approx branch. Otherwise every
+    # price_vnd row (quality='range') would fail a `attrs_type =` filter and the
+    # post-filter would drop the whole subject even though the SQL matched it.
+    # Text is free-form ("Studio" vs "Stu") and the SQL side folds case with
+    # lower(); mirror that here.
+    if field_name in ("attrs_type", "attrs_bedrooms"):
+        v = _row_value(row, field_name)
+        if v is None:
+            return False
+        if isinstance(value, (list, tuple)):
+            if op == "in":
+                return str(v).casefold() in {str(x).casefold() for x in value}
+            return False
+        if op == "=":
+            return str(v).casefold() == str(value).casefold()
+        if op == "!=":
+            return str(v).casefold() != str(value).casefold()
+        return False
+
     quality = row.get("quality")
-    if quality in ("range", "approx"):
+    if quality in ("range", "approx") and field_name in SEMANTIC_FACT_FIELDS:
+        # Range semantics describe a row's own numeric VALUE, so this branch only
+        # applies to the semantic fact fields. Applying it to every field meant a
+        # subject-level filter (subject_type, subject_key) evaluated against a
+        # price row returned False, which silently dropped every price_vnd row
+        # from the answer — the reason a studio question could resolve the right
+        # subject and still publish no price.
         rmin, rmax = row.get("range_min"), row.get("range_max")
         if op == "in":
             return False

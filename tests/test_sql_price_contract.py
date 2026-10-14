@@ -49,11 +49,12 @@ from api.application.services.sql_leg import (
     SpecError,
     SqlLegResult,
     build_sql,
+    match_semantics,
     run_sql_leg,
     validate_spec,
 )
 from api.domain.services.guard_input import GuardResult as InputGuardResult
-from api.domain.services.rewrite import RoutedResult
+from api.domain.services.rewrite import RoutedResult, _normalize_routed
 from ingest.subject_key import normalize_subject_key
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1030,3 +1031,478 @@ def test_a_disobedient_model_still_cannot_widen_scope(monkeypatch):
 
         _ctx, calls = _drive_route(monkeypatch, "diện tích lớn", routed.sql_spec)
         assert bool(calls) is expect_sql, value
+
+
+# --- F. estimate-label range binding ----------------------------------------
+
+
+def _range_row(low: int, high: int) -> dict:
+    return {
+        "subject": "unit:camellia/ch01",
+        "subject_display": "CH-01",
+        "policy_key": "pol",
+        "policy_display": "pol",
+        "quality": "range",
+        "trust_level": "estimate",
+        "unit": "vnd",
+        "range": {"min": low, "max": high},
+        "fields": {"price_vnd": high},
+    }
+
+
+def test_range_label_variants_bind_two_span_clauses():
+    """khoảng / dao động / tầm all license a two-span price range."""
+    from api.application.pipelines.workflow import _bind_financial_claims
+
+    row = _range_row(1_900_000_000, 2_530_000_000)
+    labels = ("khoảng", "dao động", "tầm", "ước tính")
+    for label in labels:
+        answer = f"Giá căn CH-01 {label} 1,9 tỷ đến 2,53 tỷ."
+        bound, total, published = _bind_financial_claims(
+            [row], answer, "Giá căn CH-01?", "camellia"
+        )
+        assert total == 2, (label, total)
+        assert len(bound) == 2, (label, bound)
+        assert published is True, label
+
+
+def test_unlabelled_range_does_not_bind():
+    """A clause without any estimate word stays unsupported."""
+    from api.application.pipelines.workflow import _bind_financial_claims
+
+    row = _range_row(1_900_000_000, 2_530_000_000)
+    answer = "Giá căn CH-01 từ 1,9 tỷ đến 2,53 tỷ."
+    bound, total, _published = _bind_financial_claims(
+        [row], answer, "Giá căn CH-01?", "camellia"
+    )
+    assert total == 2
+    assert len(bound) == 0, "unlabelled range must not bind"
+
+
+def _strong_chunks_raw(raw_chunks: list[dict], selected_ids) -> int:
+    """Mirror of the merge step's strong-chunk count (same threshold as live)."""
+    from api import get_cfg
+
+    threshold = float(get_cfg("rerank_strong_threshold", 0.5))
+    return sum(
+        1
+        for chunk_id in (selected_ids or ())
+        if float(next((c for c in raw_chunks if c.get("id") == chunk_id), {}).get("score", 0.0))
+        >= threshold
+    )
+
+def test_publish_blocked_warning_fires_without_draft_text(caplog, monkeypatch):
+    """publish-blocked warning names reason + counts; draft stays out of WARNING.
+
+    Drives the real output_guard step (publication-invariant pattern): a draft
+    whose unlabelled range does not bind is blocked, so the logging branch runs.
+    """
+    import logging
+    import time
+
+    import api.application.pipelines.workflow as wf
+    import api.application.services.merge as merge_module
+    import api.application.services.project_config as project_config_module
+    from api.application.pipelines.workflow import (
+        GeneratedEv,
+        RagQueryWorkflow,
+    )
+    from api.application.services.generate import build_messages
+    from api.application.services.merge import merge_context
+    from api.application.services.sql_leg import build_fact_evidence
+    from api.domain.services.guard_output import GuardResult as OutputGuardResult
+    from llama_index.core.workflow import Context
+    from api import get_cfg
+
+    AS_OF = date(2026, 10, 12)
+    SCOPE = "camellia"
+    DOC_ID = "project-camellia-2026q4"
+    CHUNK_ID = "project-camellia-2026q4:1:1"
+    CHUNK_CONTENT = "Dự án The Camellia Sơn Trà: thông tin tiện ích và chính sách."
+    TITLE = "Hồ sơ tổng quan dự án The Camellia Sơn Trà - Đà Nẵng"
+    QUERY = "Dự án The Camellia có những tiện ích gì?"
+
+    # An unlabelled range fact: quality range but the draft below writes its
+    # numbers WITHOUT any estimate word, so unsupported_figure fires and the
+    # gate takes the grounding_block branch (where the logging lives).
+    leg_row = {
+        "fact_id": 1,
+        "subject_key": f"unit:{SCOPE}/CH-03",
+        "policy_key": "htls",
+        "campaign_key": "camellia-2026q4",
+        "fact_key": "price_vnd",
+        "value_num": None,
+        "value_text": None,
+        "unit": "vnd",
+        "quality": "range",
+        "range_min": 1_900_000_000,
+        "range_max": 2_530_000_000,
+        "effective_from": "2020-01-01",
+        "effective_to": None,
+        "source_doc_id": DOC_ID,
+        "source_chunk_id": None,
+        "trust_level": "estimate",
+        "source_doc_status": "published",
+        "source_doc_effective_from": "2026-09-01",
+        "source_doc_effective_to": None,
+        "source_doc_project_key": SCOPE,
+        "campaign_project_key": SCOPE,
+        "campaign_status": "active",
+        "campaign_effective_from": "2026-09-01",
+        "campaign_effective_to": None,
+        "campaign_source_doc_id": DOC_ID,
+        "campaign_source_doc_status": "published",
+        "campaign_source_doc_effective_from": "2026-09-01",
+        "campaign_source_doc_effective_to": None,
+        "campaign_source_doc_project_key": SCOPE,
+    }
+    facts = build_fact_evidence([leg_row], "facts", AS_OF)
+
+    registry_row = {
+        "chunk_id": CHUNK_ID,
+        "registry_content": CHUNK_CONTENT,
+        "doc_id": DOC_ID,
+        "title": TITLE,
+        "section": "Tổng quan",
+        "kind": "project",
+        "project_key": SCOPE,
+        "status": "published",
+        "effective_from": "2026-09-01",
+        "effective_to": None,
+    }
+
+    class _Connection:
+        async def fetch(self, _sql, ids):
+            return [row for row in [registry_row] if row["chunk_id"] in ids]
+
+        async def fetchrow(self, *_args, **_kwargs):
+            return None
+
+    class _Pool:
+        def acquire(self):
+            conn = _Connection()
+
+            class _Acquire:
+                async def __aenter__(self_inner):
+                    return conn
+
+                async def __aexit__(self_inner, *_args):
+                    return None
+
+            return _Acquire()
+
+    monkeypatch.setattr(merge_module, "get_ro_pool", lambda: _Pool())
+    monkeypatch.setattr(
+        project_config_module, "fetch_project_identity", lambda _key: {}
+    )
+
+    async def fake_write_audit(_entry):
+        return None
+
+    async def fake_guard_output(answer, observed_facts, sources, routing, meta=None):
+        return OutputGuardResult(confidence="MEDIUM", requires_review=False, verdicts={})
+
+    monkeypatch.setattr(wf, "guard_output", fake_guard_output)
+    monkeypatch.setattr(wf, "write_audit", fake_write_audit)
+
+    raw_chunks = [{"id": CHUNK_ID, "content": CHUNK_CONTENT, "score": 0.91}]
+    merged = asyncio.run(
+        merge_context(QUERY, raw_chunks, facts, AS_OF, SCOPE)
+    )
+    merged.meta.update(
+        query=QUERY,
+        rewritten=QUERY,
+        as_of=AS_OF.isoformat(),
+        project_key=SCOPE,
+        retrieval_project_key=SCOPE,
+        degraded=[],
+        sql_row_count=len(facts),
+        strong_chunks=_strong_chunks_raw(raw_chunks, merged.meta.get("selected_chunk_ids")),
+        has_approx=False,
+        geo_places=0,
+        answer_mode="normal",
+    )
+    merged.meta["_fact_evidence"] = facts
+    build_messages(merged, [])
+
+    from api.domain.services.rewrite import RoutedResult
+
+    routed = RoutedResult(
+        rewritten=QUERY,
+        routing={
+            "needs_rag": True,
+            "needs_sql": False,
+            "structured_path": "none",
+            "needs_geo": False,
+        },
+        sql_spec=None,
+        hl_keywords=[],
+        ll_keywords=[],
+        high_stakes=False,
+        as_of=None,
+    )
+
+    # Unlabelled: "từ" is not an estimate word, so the two figures stay
+    # unsupported and the gate blocks the draft.
+    draft = "Giá căn CH-03 từ 1,9 tỷ đến 2,53 tỷ."
+
+    async def _go():
+        wf_instance = RagQueryWorkflow()
+        ctx = Context(workflow=wf_instance)
+        seeded = {
+            "merged": merged,
+            "answer": draft,
+            "routed": routed,
+            "sql_result": None,
+            "visible_limit": None,
+            "audit": {},
+            "t0": time.perf_counter(),
+            "degraded": [],
+            "trace_id": "t-warn-test",
+            "presentation_images": [],
+            "presentation_facts": [],
+            "geo_result": None,
+            "as_of_date": AS_OF,
+        }
+        for key, value in seeded.items():
+            await ctx.store.set(key, value)
+        await wf_instance.output_guard(ctx, GeneratedEv())
+
+    with caplog.at_level(logging.WARNING, logger="api.workflow"):
+        asyncio.run(_go())
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    blocked = [r for r in warnings if "publish blocked" in r.getMessage()]
+    assert blocked, f"no publish-blocked warning in {[r.getMessage() for r in warnings]}"
+    message = blocked[0].getMessage()
+    assert "reason=" in message
+    assert "answer_chars=" in message
+    assert "unsupported=" in message
+    # The draft itself must not ride a WARNING record (customer data).
+    for record in warnings:
+        assert draft not in record.getMessage()
+
+
+# --- G. unit-attribute (JSONB) filters and price-rank intent -----------------
+
+
+def _facts_unit_type_spec(field: str, value, op: str = "=") -> dict:
+    return {
+        "subject_type": "unit",
+        "source": "facts",
+        "filters": [{"field": field, "op": op, "value": value}],
+        "limit": 10,
+    }
+
+
+def test_router_alias_field_is_coerced_before_the_closed_validator():
+    """A hallucinated `unit_type` filter must reach the builder as `attrs_type`.
+
+    Production specs used names the builder never accepted, so the route died at
+    validate_spec and the turn fell back to the canned message even though the
+    subject existed.
+    """
+    routed = _normalize_routed(
+        {
+            "routing": {"needs_sql": True, "structured_path": "spec"},
+            "sql_spec": _facts_unit_type_spec("unit_type", "studio"),
+        },
+        "Giới thiệu các căn studio giúp tôi",
+        None,
+    )
+    assert routed.sql_spec["filters"] == [{"field": "attrs_type", "op": "=", "value": "studio"}]
+    assert "sql_filter_coerced" in routed.degraded
+    validate_spec(routed.sql_spec)  # must not raise
+
+
+def test_bedrooms_alias_maps_to_the_jsonb_bedroom_key():
+    routed = _normalize_routed(
+        {
+            "routing": {"needs_sql": True, "structured_path": "spec"},
+            "sql_spec": _facts_unit_type_spec("bedrooms", 2),
+        },
+        "căn 2 ngủ",
+        None,
+    )
+    assert routed.sql_spec["filters"] == [{"field": "attrs_bedrooms", "op": "=", "value": 2}]
+    validate_spec(routed.sql_spec)
+
+
+def test_unknown_filter_field_is_preserved_so_the_route_fails_loudly():
+    """Unknown fields must NOT be dropped: dropping silently narrows the answer.
+
+    `project_name` is normalized later by the workflow (a wildcard there is a
+    scope-widening attack), so a coercion that stripped it would bypass that
+    guard.
+    """
+    routed = _normalize_routed(
+        {
+            "routing": {"needs_sql": True, "structured_path": "spec"},
+            "sql_spec": {
+                "source": "facts",
+                "filters": [
+                    {"field": "project_name", "op": "=", "value": "%Camellia%"},
+                    {"field": "area_m2", "op": ">", "value": 40},
+                ],
+                "limit": 10,
+            },
+        },
+        "diện tích lớn",
+        None,
+    )
+    fields = [f["field"] for f in routed.sql_spec["filters"]]
+    assert fields == ["project_name", "area_m2"]
+    with pytest.raises(SpecError):
+        validate_spec(routed.sql_spec)
+
+
+def test_attrs_type_filter_compiles_and_uses_the_jsonb_key():
+    sql, params = build_sql(validate_spec(_facts_unit_type_spec("attrs_type", "studio")), None, PROJECT)
+    assert "fs.attrs->>'type'" in sql
+    assert "studio" in params
+
+
+def test_attrs_filter_binds_every_placeholder_it_allocates():
+    """A placeholder allocated but never referenced breaks asyncpg.
+
+    The generic path used to reserve `$N` for the raw value before the JSONB
+    branch allocated its own, leaving a dangling parameter and
+    "could not determine data type of parameter $N" at execution time.
+    """
+    sql, params = build_sql(validate_spec(_facts_unit_type_spec("attrs_type", "studio")), None, PROJECT)
+    used = {int(m) for m in re.findall(r"\$(\d+)", sql)}
+    assert used == set(range(1, len(params) + 1))
+
+
+def test_attrs_type_comparison_folds_case():
+    """Stored vocabulary is free-form ("Studio" on camellia, "Stu" on soleil)."""
+    sql, params = build_sql(validate_spec(_facts_unit_type_spec("attrs_type", "Studio")), None, PROJECT)
+    assert "lower(fs.attrs->>'type')" in sql
+    assert "studio" in params
+
+
+def test_attrs_filter_rejects_unsupported_operator():
+    with pytest.raises(SpecError):
+        build_sql(validate_spec(_facts_unit_type_spec("attrs_type", "studio", op=">")), None, PROJECT)
+
+
+def test_price_rank_is_stripped_when_the_user_did_not_ask_to_rank():
+    """A gratuitous price sort must not empty the answer.
+
+    Ordering a facts spec by price applies ELIGIBLE_PRICE_PREDICATES
+    (exact + confirmed + active campaign). Camellia's studio subject has seven
+    facts and zero eligible price rows, so the sort alone turned "giới thiệu các
+    căn studio" into zero rows.
+    """
+    routed = _normalize_routed(
+        {
+            "routing": {"needs_sql": True, "structured_path": "spec"},
+            "sql_spec": {
+                **_facts_unit_type_spec("unit_type", "studio"),
+                "order_by": {"field": "price_vnd", "dir": "asc"},
+            },
+        },
+        "Giới thiệu các căn studio giúp tôi",
+        None,
+    )
+    assert "order_by" not in routed.sql_spec
+    assert "sql_price_rank_stripped" in routed.degraded
+
+
+def test_price_rank_survives_when_the_user_asks_for_it():
+    routed = _normalize_routed(
+        {
+            "routing": {"needs_sql": True, "structured_path": "spec"},
+            "sql_spec": {
+                **_facts_unit_type_spec("unit_type", "studio"),
+                "order_by": {"field": "price_vnd", "dir": "asc"},
+            },
+        },
+        "căn studio nào rẻ nhất",
+        None,
+    )
+    assert routed.sql_spec["order_by"] == {"field": "price_vnd", "dir": "asc"}
+    assert "sql_price_rank_stripped" not in routed.degraded
+
+
+def test_exact_unit_spec_keeps_its_price_rank():
+    """An exact-unit selector is the ranking target; its price is meant to be exact."""
+    routed = _normalize_routed(
+        {
+            "routing": {"needs_sql": True, "structured_path": "spec"},
+            "sql_spec": {
+                "subject_type": "unit",
+                "source": "facts",
+                "filters": [{"field": "subject_key", "op": "=", "value": "unit:camellia/CH-03"}],
+                "order_by": {"field": "price_vnd", "dir": "asc"},
+                "limit": 1,
+            },
+        },
+        "căn hộ CH-03",
+        None,
+    )
+    assert routed.sql_spec["order_by"] == {"field": "price_vnd", "dir": "asc"}
+    assert "sql_price_rank_stripped" not in routed.degraded
+
+
+# --- H. subject-level filters vs range rows ----------------------------------
+
+
+def _range_price_row(**over) -> dict:
+    row = {
+        "fact_key": "price_vnd",
+        "quality": "range",
+        "range_min": 1_900_000_000,
+        "range_max": 2_530_000_000,
+        "value_num": None,
+        "value_text": None,
+        "subject_type": "unit",
+        "subject_attrs": {"type": "Studio", "bedrooms": 0},
+        "unit": "vnd",
+    }
+    row.update(over)
+    return row
+
+
+def test_subject_type_filter_is_not_defeated_by_range_rows():
+    """A subject-level filter must hold on price rows too.
+
+    Range semantics describe a row's own numeric VALUE. Applying them to every
+    field made `subject_type = 'unit'` evaluate against a price row and return
+    False, which dropped every price_vnd row from the answer — a studio question
+    could resolve the right subject and still publish no price.
+    """
+    row = _range_price_row()
+    assert match_semantics(row, "subject_type", "=", "unit") is True
+
+
+def test_attrs_type_filter_matches_a_range_price_row():
+    row = _range_price_row()
+    assert match_semantics(row, "attrs_type", "=", "studio") is True
+    assert match_semantics(row, "attrs_type", "=", "1br") is False
+
+
+def test_attrs_filter_reads_the_jsonb_attributes():
+    row = _range_price_row(subject_attrs={"type": "Stu", "bedrooms": 2})
+    assert match_semantics(row, "attrs_bedrooms", "=", 2) is True
+    assert match_semantics(row, "attrs_type", "=", "stu") is True
+
+
+def test_attrs_filter_accepts_a_json_string_payload():
+    """asyncpg can hand back a raw JSON string for a jsonb column."""
+    row = _range_price_row(subject_attrs='{"type": "Studio", "bedrooms": 0}')
+    assert match_semantics(row, "attrs_type", "=", "Studio") is True
+
+
+def test_attrs_in_operator_is_categorical():
+    row = _range_price_row(subject_attrs={"type": "Studio", "bedrooms": 0})
+    assert match_semantics(row, "attrs_type", "in", ["studio", "1br"]) is True
+    assert match_semantics(row, "attrs_type", "in", ["1br", "2br"]) is False
+
+
+def test_numeric_range_filter_still_uses_range_semantics():
+    """The gate must not disable range handling for real value fields."""
+    row = _range_price_row()
+    assert match_semantics(row, "price_vnd", "<", 2_000_000_000) is True
+    assert match_semantics(row, "price_vnd", ">", 2_600_000_000) is False
+    assert match_semantics(row, "price_vnd", "=", 1_900_000_000) is False

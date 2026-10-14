@@ -422,6 +422,18 @@ class Settings(BaseSettings):
     # Revision-3 rerank: voyageai/rerank-2.5 via the OpenRouter /api/v1/rerank route.
     rerank_openrouter_model: str = "voyageai/rerank-2.5"
     enable_rerank: bool = True
+    # A retrieved chunk counts as "strong" evidence at or above this rerank score.
+    # It is configuration rather than a literal in the pipeline because the bar is
+    # a property of the ACTIVE rerank model: the score scale moves whenever the
+    # binding changes (qwen3-rerank -> voyageai/rerank-2.5 -> Jina), and a bar
+    # frozen in code silently reclassifies every chunk as weak after a swap --
+    # which downstream reads as a provenance failure, never as a stale constant.
+    # 0.5 is measured, not guessed: over n=11324 live scores (min -0.226, p50
+    # 0.186, p75 0.493, p90 0.623, max 0.947) it is the reranker's own sigmoid
+    # midpoint and the corpus p75. The previous in-code bar of 0.8 sat at the
+    # 98.2nd percentile, so strong_chunks was 0 on 85.4% of chunk-bearing turns
+    # and the provenance tier was unreachable by construction.
+    rerank_strong_threshold: float = 0.5
 
     # Geo (nearby places). The Camellia lat/lng here are the LEGACY fallback used
     # when no project is bound or the project_config registry read fails

@@ -58,6 +58,8 @@ from api.domain.services.guard_input import GuardResult as InputGuardResult
 from api.domain.services.guard_input import guard_input, rule_screen
 from api.domain.services.guard_output import GuardResult as OutputGuardResult
 from api.domain.services.guard_output import (
+    _chunk_binding_evidence,
+    _chunk_numeric_match,
     _clause_for_span,
     _extract_amount_matches,
     _rag_area_match,
@@ -266,7 +268,13 @@ _PAYMENT_CUE_RE = re.compile(
     r"(?<!\w)(?:tra gop|tra thang|thanh toan|hang thang|monthly payment"
     r"|khoan vay|so tien vay|goc vay|du no|tra no)(?!\w)"
 )
-_ESTIMATE_LABEL_RE = re.compile(r"(?<!\w)uoc tinh(?!\w)")
+# The range gate's label must cover the estimate wording sql_leg's `_facts_note`
+# hands the model ("khoảng min–max (dữ liệu range)") or a correctly-cited range
+# is dropped at publish time. The alternation is anchored to whole folded words
+# so bare "tạm tính" (folds to "tam tinh...") is the only known collision,
+# acceptable because it is still an estimate label and the exact+confirmed
+# branch returns before the label is ever consulted.
+_ESTIMATE_LABEL_RE = re.compile(r"(?<!\w)(?:uoc tinh|khoang|dao dong|tam)(?!\w)")
 # A cue-less monetary clause is NOT a price. Failing open to _PRICE_FIELDS
 # would let any loan/debt noun outside _PAYMENT_CUE_RE ("khoan vay", "du no",
 # "goc vay") bind to a same-valued price_vnd row — and db/schema.sql makes
@@ -501,6 +509,103 @@ def _claim_field_scope(clause: str, is_percent: bool) -> frozenset[str]:
     return _PRICE_FIELDS if _PRICE_CUE_RE.search(folded) else frozenset()
 
 
+# A percentage's cue is classified COARSER than _claim_field_scope's field set on
+# purpose. The field set answers "which SQL row may license this", and is empty
+# for the payment and cue-less cases -- an empty answer that cannot be compared
+# with anything. The chunk authority needs the opposite: a label for what the text
+# itself says, so the chunk's clause and the answer's clause can be checked for
+# agreement even when one of them names no bindable field.
+_PCT_CUE_OTHER = "other"
+
+
+def _pct_cue_class(clause: str) -> str:
+    """Classify which policy a percentage clause names, or ``other``.
+
+    Ordered exactly like ``_claim_field_scope`` so the two never disagree about a
+    clause that names more than one cue.
+    """
+    folded = _fold(clause or "")
+    if _RATE_CUE_RE.search(folded):
+        return "rate"
+    if _DEPOSIT_CUE_RE.search(folded):
+        return "deposit"
+    if _PAYMENT_CUE_RE.search(folded):
+        return "payment"
+    return _PCT_CUE_OTHER
+
+
+def _pct_segment_clause(text: str, start: int, end: int) -> str:
+    """The comma-bounded segment around a span, expressed as a clause.
+
+    Commas do not end a clause, so a payment schedule written on one line is a
+    single clause that names several cues at once -- "đặt cọc 5%, thanh toán 30%"
+    classifies as a deposit clause for every figure in it. Rewriting commas to a
+    clause break recovers the narrower segment a figure actually sits in, and
+    re-uses the guard's own splitter rather than re-deriving its boundaries. The
+    rewrite is one character for one, so the span offsets stay valid.
+    """
+    return _clause_for_span(text.replace(",", "."), start, end)
+
+
+def _chunk_pct_evidence(rows: list[dict]) -> list[tuple[Decimal, str]]:
+    """(percentage, cue class) pairs stated by the validated chunk texts.
+
+    The percentage counterpart of the guard's chunk authority: a percentage is a
+    dimension a validated chunk may legitimately state, so the value's presence in
+    a scope-validated chunk is what makes it real. Both the figure's own clause and
+    its narrower comma segment are recorded, because a one-line schedule puts
+    several cues in one clause: keeping both granularities lets a faithful short
+    quote match the chunk without letting an unrelated cue through.
+    """
+    out: list[tuple[Decimal, str]] = []
+    for row in rows:
+        content = row.get("content")
+        if not isinstance(content, str):
+            continue
+        for amount, unit, start, end in _extract_amount_matches(content):
+            if unit != "%":
+                continue
+            out.append((amount, _pct_cue_class(_clause_for_span(content, start, end))))
+            segment = _pct_segment_clause(content, start, end)
+            if segment:
+                out.append((amount, _pct_cue_class(segment)))
+    return out
+
+
+def _pct_claim_bound_by_chunk(
+    clause: str,
+    spans: list[tuple[Decimal, str | None, int, int]],
+    evidence: list[tuple[Decimal, str]],
+) -> bool:
+    """True when a validated chunk states EVERY percentage of this claim.
+
+    Two conditions, and the first is the one that must never weaken: the value has
+    to occur as a percentage in a chunk that passed scope validation. A rate or a
+    deposit percentage that no retrieved chunk states is a fabricated financial
+    commitment, so an empty or non-matching evidence list refuses it.
+
+    The second condition closes the misattribution case where the number is real
+    but the commitment is not: a claim whose own clause names a determinate policy
+    is refused when the chunk attributes that same value only to a DIFFERENT
+    determinate policy. A cue-less clause on either side is not a conflict -- the
+    module already refuses to bind a cue-less percentage to a fact field, and
+    treating "no cue" as disagreement would veto faithful short quotes.
+    """
+    if not evidence or not spans:
+        return False
+    if any(unit != "%" for _value, unit, _start, _end in spans):
+        return False
+    answer_class = _pct_cue_class(clause)
+    for value, _unit, _start, _end in spans:
+        classes = {cue for amount, cue in evidence if amount == value}
+        if not classes:
+            return False
+        determinate = classes - {_PCT_CUE_OTHER}
+        if answer_class != _PCT_CUE_OTHER and determinate and answer_class not in determinate:
+            return False
+    return True
+
+
 def _financial_claims(
     text: str,
 ) -> list[tuple[str, list[tuple[Decimal, str | None, int, int]]]]:
@@ -574,30 +679,52 @@ def _bind_claim(
 
 
 def _bind_financial_claims(
-    rows: list[dict], answer: str, query_text: str, project_key: Any
+    rows: list[dict],
+    answer: str,
+    query_text: str,
+    project_key: Any,
+    meta: dict | None = None,
 ) -> tuple[set[tuple[int, int]], int, bool]:
     """Bind every money/rate claim in the answer to one selected fact row.
 
     Returns ``(bound_span_keys, total_span_count, published_an_estimate)``.
+
+    A percentage also has the chunk authority the guard already grants it: when no
+    fact row licenses the claim, a value the validated chunk texts state is
+    accepted under the conditions in ``_pct_claim_bound_by_chunk``. Money is NOT
+    extended this way -- an exact sale price exists only as a fact row, and a chunk
+    merely mentioning a figure is not evidence of it.
+
+    ``meta`` defaults to no chunk authority rather than to the permissive reading,
+    so a caller that cannot supply the validated evidence refuses percentages
+    instead of licensing them.
     """
     if not isinstance(project_key, str) or not project_key.strip():
         return set(), 0, False
+    pct_evidence = (meta or {}).get("_chunk_pct_evidence") or []
     bound: set[tuple[int, int]] = set()
     published_estimate = False
     total = 0
     for clause, spans in _financial_claims(answer):
         total += len(spans)
+        licensed = False
         subject, policy = _resolve_claim_identity(rows, clause, query_text, project_key)
-        if subject is None or policy is None:
-            continue
-        for row in rows:
-            if str(row.get("subject") or "") != subject or str(row.get("policy_key") or "") != policy:
-                continue
-            if not _bind_claim(row, clause, spans):
-                continue
+        if subject is not None and policy is not None:
+            for row in rows:
+                if str(row.get("subject") or "") != subject or str(row.get("policy_key") or "") != policy:
+                    continue
+                if not _bind_claim(row, clause, spans):
+                    continue
+                licensed = True
+                published_estimate = published_estimate or _fact_range_bounds(row) is not None
+                break
+        # The chunk leg is a FALLBACK, never a replacement: a claim the fact leg
+        # already licensed keeps exactly the authority it had before this change,
+        # so no existing SQL verdict moves.
+        if not licensed:
+            licensed = _pct_claim_bound_by_chunk(clause, spans, pct_evidence)
+        if licensed:
             bound.update((span[2], span[3]) for span in spans)
-            published_estimate = published_estimate or _fact_range_bounds(row) is not None
-            break
     return bound, total, published_estimate
 
 
@@ -609,17 +736,168 @@ def _verifier_orphan_spans(
     The aggregate ``numeric_grounding`` verdict and its ``orphan_numbers`` string
     stay verbatim in the audit; the BLOCK/WARN decision is taken per span, so it
     never parses that display text.
+
+    The chunk authority is replayed here because the verifier grants it: a
+    recomputation that stopped at the fact values would re-orphan exactly the
+    non-money figure the verifier just authorized, and the final recheck below
+    would then refuse a correct answer the first check had already accepted.
+    The figure's own clause is hoisted and shared with both authority calls
+    because the chunk path vetoes a labelled value that contradicts the
+    registry: passing no clause silently disables that authority, which would
+    make this recomputation disagree with the verdict it exists to replay.
     """
     evidence = evidence_values(facts or [])
     area_evidence = (meta or {}).get("_rag_area_evidence", [])
+    chunk_evidence = (meta or {}).get("_chunk_numeric_evidence") or []
+    binding_evidence = (meta or {}).get("_chunk_binding_evidence") or []
     orphans: list[tuple[int, int]] = []
     for amount, unit, start, end in _extract_amount_matches(answer or ""):
         if any(amount == value for value in evidence):
             continue
-        if _rag_area_match(amount, unit, _clause_for_span(answer, start, end), area_evidence):
+        clause = _clause_for_span(answer, start, end)
+        if _rag_area_match(amount, unit, clause, area_evidence):
+            continue
+        if _chunk_numeric_match(
+            amount, unit, chunk_evidence, clause, area_evidence, binding_evidence
+        ):
             continue
         orphans.append((start, end))
     return orphans
+
+
+def _outage_figures_grounded(answer: str, facts: list[dict], meta: dict | None) -> bool:
+    """Structural figure check for a turn whose verifier never answered.
+
+    When verification is unavailable there is no ``numeric_grounding`` verdict to
+    consult, so the answer's figures have to be checked here or not at all.
+    Every figure must be authorized by a value in the observed FACT evidence, by
+    a labelled amenity area, or -- for a figure that is not money -- by a value
+    stated in the scope-validated chunk texts.
+
+    This mirrors the verifier's own authority set exactly, and that is the point:
+    the question is "would the verifier have passed this answer?", so the outage
+    path can never authorize a figure the normal path would have refused. Money
+    is excluded from chunk authority by ``_chunk_numeric_match`` itself, which is
+    why the money rule is reused rather than restated here -- an outage must not
+    become the one turn where an unbacked price reaches a customer.
+
+    The clause is hoisted and passed to both authority calls because the chunk
+    path vetoes a figure whose clause names a subject the chunk or registry binds
+    to a different value, and it declines authority outright when the clause is
+    missing. The binding evidence is passed for the same reason: this check has
+    to run the verifier's FULL authority set, or an outage turn would authorize a
+    misattributed figure that the ordinary turn refuses.
+    """
+    evidence = evidence_values(facts or [])
+    area_evidence = (meta or {}).get("_rag_area_evidence", [])
+    chunk_evidence = (meta or {}).get("_chunk_numeric_evidence") or []
+    binding_evidence = (meta or {}).get("_chunk_binding_evidence") or []
+    for amount, unit, start, end in _extract_amount_matches(answer or ""):
+        if any(amount == value for value in evidence):
+            continue
+        clause = _clause_for_span(answer, start, end)
+        if _rag_area_match(amount, unit, clause, area_evidence):
+            continue
+        if _chunk_numeric_match(
+            amount, unit, chunk_evidence, clause, area_evidence, binding_evidence
+        ):
+            continue
+        return False
+    return True
+
+
+def _chunk_numeric_evidence(rows: list[dict]) -> list[Decimal]:
+    """Every normalized figure the retrieved chunk TEXTS actually state.
+
+    The verifier's only numeric evidence source is the SQL/fact projection, so a
+    figure the answer quotes faithfully from a retrieved chunk has nothing to be
+    checked against and is reported as an orphan -- a grounding failure that
+    refuses a correct, sourced answer. The chunk text is the missing source, and
+    the caller passes rows that ``_prompt_evidence_integrity`` has already
+    validated for scope, status and effective dates, so they carry authority; an
+    unvalidated chunk must never reach here.
+
+    Extraction reuses the verifier's own ``_extract_amount_matches`` so the
+    values collected here are the very ones it later compares against. A second,
+    independent number parser would drift from the orphan check and silently
+    stop authorizing the figures it exists to authorize.
+    """
+    values: list[Decimal] = []
+    for row in rows or ():
+        content = row.get("content") if isinstance(row, dict) else None
+        if not isinstance(content, str):
+            continue
+        values.extend(
+            amount for amount, _unit, _start, _end in _extract_amount_matches(content)
+        )
+    return values
+
+
+# Every reason the pipeline may substitute a canned copy for the drafted answer.
+# The set is closed on purpose. The owner invariant is "selected chunks + a
+# resolved scope + intact evidence integrity => an answer ships", and a turn in
+# that state must publish with NO reason at all; so a value appearing here is a
+# claim that one specific evidence-side fact was true, and never a place to
+# record a vague "something went wrong".
+FALLBACK_REASONS = frozenset({
+    "no_evidence",
+    "unresolved_scope",
+    "cross_project_evidence",
+    "integrity_failed",
+    "numeric_ungrounded",
+    "citation_ungrounded",
+    "unsupported_figure",
+    "price_unanswered",
+    "verification_unavailable",
+    "visible_bound_dropped_qualification",
+    "final_recheck_ungrounded",
+})
+
+
+def _canned_fallback_reason(
+    *,
+    grounding_block: bool,
+    verification_failed: bool,
+    outage_figure_unbacked: bool,
+    unresolved_scope: bool,
+    cross_project_evidence: bool,
+    integrity_failed: bool,
+    numeric_ungrounded: bool,
+    citation_ungrounded: bool,
+    unsupported_figure: bool,
+) -> str:
+    """Name the single evidence-side fact that forced a canned copy.
+
+    Precedence follows the copy rule itself. ``grounding_block`` is what selects
+    the grounding copy, so inside it only a grounding axis can be the reason --
+    the scope and integrity axes are already excluded by the time that flag is
+    formed, and the residual case is a draft that asserted facts while no
+    selected evidence supported them.
+
+    Outside it the copy is the verification fallback, which exists for an
+    unavailable verifier; the remaining values then describe why no publishable
+    evidence was established at all.
+    """
+    if grounding_block:
+        if numeric_ungrounded:
+            return "numeric_ungrounded"
+        if citation_ungrounded:
+            return "citation_ungrounded"
+        if unsupported_figure:
+            return "unsupported_figure"
+        return "no_evidence"
+    if verification_failed:
+        # An outage that ALSO failed the structural figure check is named for the
+        # figure: that check is what decided the turn, and reporting the outage
+        # alone would hide an unbacked number behind a coincidence.
+        return "numeric_ungrounded" if outage_figure_unbacked else "verification_unavailable"
+    if unresolved_scope:
+        return "unresolved_scope"
+    if cross_project_evidence:
+        return "cross_project_evidence"
+    if integrity_failed:
+        return "integrity_failed"
+    return "no_evidence"
 
 
 logger = logging.getLogger("api.workflow")
@@ -1145,6 +1423,10 @@ class RagQueryWorkflow(Workflow):
             ctx_conv = get_context(session_id, device_id)
             conv_dir = conv_directive(ctx_conv.state, project_key)
             conv_state_str = ctx_conv.state
+        # The strong-chunk bar belongs to the active rerank model, not to this
+        # module: reading it from config keeps a rerank swap a configuration
+        # change instead of a code change (see rerank_strong_threshold).
+        strong_threshold = float(get_cfg("rerank_strong_threshold", 0.5))
         merged.meta.update(
             query=guard.clean,
             rewritten=routed.rewritten,
@@ -1162,7 +1444,7 @@ class RagQueryWorkflow(Workflow):
                 for chunk_id in (merged.meta.get("selected_chunk_ids") or ())
                 if float(
                     next((c for c in chunks if c.get("id") == chunk_id), {}).get("score", 0.0)
-                ) >= 0.8
+                ) >= strong_threshold
             ),
             answer_mode=project_context.answer_mode,
             conversation_directive=conv_dir,
@@ -1367,6 +1649,33 @@ class RagQueryWorkflow(Workflow):
         )
         merged.meta["selected_prompt_chunk_ids"] = [row.get("id") for row in rag_rows]
         merged.meta["selected_prompt_fact_ids"] = [row.get("fact_id") for row in fact_rows]
+        # SAFETY INTERLOCK, not an optimisation: a chunk set that failed scope,
+        # provenance, status or date validation authorizes NOTHING. Publishing a
+        # figure because a foreign or expired chunk happened to state it is
+        # exactly the cross-project leak the integrity gate exists to stop, so
+        # the empty list is the fail-closed answer and must not be relaxed.
+        merged.meta["_chunk_numeric_evidence"] = (
+            _chunk_numeric_evidence(rag_rows) if rag_valid else []
+        )
+        # Same interlock, same `rag_valid`: a figure being PRESENT in a chunk is
+        # not proof it BELONGS to the subject the answer names, and this list is
+        # what lets the verifier veto a misattribution. Sharing the one validity
+        # decision is the point -- deriving it from a second condition would let
+        # the two authorities disagree about which chunks may speak at all.
+        merged.meta["_chunk_binding_evidence"] = (
+            _chunk_binding_evidence(rag_rows) if rag_valid else []
+        )
+        # Same interlock, same `rag_valid`. The verifier already treats a
+        # percentage as a dimension a validated chunk may state (`_CURRENCY_UNITS`
+        # excludes "%"), while the financial claim binder classified every
+        # percentage as a claim only a SQL fact row could license. That split is
+        # what withheld answers whose percentage was quoted faithfully from a
+        # retrieved chunk: one gate authorized the figure and the other canned the
+        # turn. Feeding the binder the chunk's own percentages closes the gap
+        # without loosening money, which stays fact-only.
+        merged.meta["_chunk_pct_evidence"] = (
+            _chunk_pct_evidence(rag_rows) if rag_valid else []
+        )
         # An exact-unit price question verifies against the lineage-proven rows
         # for the requested units only; every other turn keeps the whole UI
         # projection so registry-backed amenity areas stay groundable.
@@ -1451,7 +1760,7 @@ class RagQueryWorkflow(Workflow):
         # SQL-confirmed, currently lineaged row whose OWN clause names it; an
         # aggregate HIGH verdict never grants authority for an unbound figure.
         bound_spans, claim_span_total, published_estimate = _bind_financial_claims(
-            financial_rows, answer, query_text, retrieval_project
+            financial_rows, answer, query_text, retrieval_project, merged.meta
         )
         unsupported_figure = claim_span_total > len(bound_spans)
         verdicts = guard_res.verdicts or {}
@@ -1462,18 +1771,23 @@ class RagQueryWorkflow(Workflow):
         pending_citation_without_id = citation_status == "pending" and not re.search(
             r"\[fe-\d{3}\]", answer
         )
+        # The grounding axes are named individually rather than left fused in one
+        # expression because the audit flag below must report WHICH axis refused
+        # the turn; an anonymous boolean can only ever say "it was blocked".
+        orphan_spans = _verifier_orphan_spans(answer, observed_facts, merged.meta)
+        numeric_ungrounded = self._claim_level_numeric_failure(
+            verdicts, orphan_spans, bound_spans
+        )
+        citation_ungrounded = citation_status == "fail" or (
+            citation_status == "pending" and not pending_citation_without_id
+        )
         grounding_failed = (
-            self._claim_level_numeric_failure(
-                verdicts,
-                _verifier_orphan_spans(answer, observed_facts, merged.meta),
-                bound_spans,
-            )
-            or citation_status == "fail"
+            numeric_ungrounded
+            or citation_ungrounded
             or unsupported_figure
             or factual_answer_without_evidence
             or integrity_failed
             or unresolved_scope
-            or (citation_status == "pending" and not pending_citation_without_id)
         )
 
         price_question = is_unit_price_query(query_text)
@@ -1486,11 +1800,31 @@ class RagQueryWorkflow(Workflow):
             and not sql_result.meta.get("error")
             and sql_result.meta.get("mode") != "none"
         )
-        safe_number_free = self._number_free_descriptive(query_text) and self._number_free_descriptive(answer)
-        # Verifier outage is WARN-only for low-stakes descriptive answers; a
-        # high-stakes turn must never publish unverified content -- BLOCK to
-        # the deterministic safe fallback instead.
-        verifier_warning = verification_failed and safe_number_free and usable_evidence and not routed.high_stakes
+        # Verifier outage is a WARN, not a BLOCK -- but only while the answer's
+        # figures can still be checked without the verifier. `safe_number_free`
+        # used to stand in for that check and demanded a figure-FREE draft, which
+        # is the opposite of a useful answer: every grounded price, area or unit
+        # count disqualified itself, so a correct answer was deleted and replaced
+        # by canned copy precisely because it was informative. The structural
+        # check below replaces it and is strictly better targeted -- each figure
+        # must still be authorized, money by a fact alone.
+        #
+        # `usable_evidence` is already the conjunction of scope soundness and
+        # evidence integrity (`not unresolved_scope and not cross_project_evidence
+        # and not integrity_failed`), so the outage path needs no second guard
+        # against those: it cannot fire on a turn whose scope never resolved.
+        # High-stakes turns keep blocking outright: an unavailable verifier must
+        # not become the route by which a legal or financial answer ships
+        # unchecked.
+        outage_figure_unbacked = verification_failed and not _outage_figures_grounded(
+            answer, observed_facts, merged.meta
+        )
+        verifier_warning = (
+            verification_failed
+            and usable_evidence
+            and not routed.high_stakes
+            and not outage_figure_unbacked
+        )
         # A price-availability question must be answered with a price or with a
         # proven absence. A draft that quietly ignores the question is not a
         # grounded answer to it, however well formed it verifies.
@@ -1504,6 +1838,15 @@ class RagQueryWorkflow(Workflow):
             and not price_question_unanswered
             and (not verification_failed or verifier_warning)
         )
+        # The invariant this flag exists to prove is "selected chunks + a
+        # resolved scope + intact evidence integrity => an answer ships".
+        # Asserting that in prose proves nothing, so the decision records its own
+        # reason: the value stays None exactly when the DRAFT was published, and
+        # otherwise names the one evidence-side fact that refused it. That makes
+        # a legitimate refusal distinguishable from the regression this flag was
+        # added to catch, and no canned copy can ship without accounting for
+        # itself. Values come from ``FALLBACK_REASONS``.
+        fallback_reason: str | None = None
         if published_estimate or pending_citation_without_id:
             # A bound estimate and an uncheckable-but-uncited answer both ship as
             # reviewed content: the figures are authenticated, the verdict is not.
@@ -1557,6 +1900,7 @@ class RagQueryWorkflow(Workflow):
                 else:
                     answer, limitation_reason = PRICE_LOOKUP_UNCERTAIN, "price_lookup_unavailable"
                 publish_limitation = True
+                fallback_reason = "price_unanswered"
             else:
                 grounding_block = (
                     not verification_failed
@@ -1565,6 +1909,28 @@ class RagQueryWorkflow(Workflow):
                     and grounding_failed
                 )
                 answer = LOW_GROUNDING_MESSAGE if grounding_block else VERIFICATION_FALLBACK_MESSAGE
+                fallback_reason = _canned_fallback_reason(
+                    grounding_block=grounding_block,
+                    verification_failed=verification_failed,
+                    outage_figure_unbacked=outage_figure_unbacked,
+                    unresolved_scope=unresolved_scope,
+                    cross_project_evidence=cross_project_evidence,
+                    integrity_failed=integrity_failed,
+                    numeric_ungrounded=numeric_ungrounded,
+                    citation_ungrounded=citation_ungrounded,
+                    unsupported_figure=unsupported_figure,
+                )
+            # Observability only: a rejected draft must be diagnosable from the
+            # log without shipping customer data at WARNING. The draft body is
+            # DEBUG-bounded (first 500 chars) because WARNING records reach
+            # operator dashboards where customer query text must not appear.
+            logger.warning(
+                "publish blocked: reason=%s answer_chars=%d unsupported=%s",
+                fallback_reason,
+                len(answer),
+                unsupported_figure,
+            )
+            logger.debug("publish blocked draft: %.500s", answer)
             # Every replaced answer is a canned safe copy, so it never inherits
             # the verifier's tier: that tier describes the REJECTED draft. A HIGH
             # verdict on an unverifiable price claim must still ship LOW/review.
@@ -1613,14 +1979,23 @@ class RagQueryWorkflow(Workflow):
         # complete number-free uncertainty copy rather than truncated.
         qualified = bool(published_estimate or routed.high_stakes or _financial_claims(answer))
         shortened = bounded != canonical
-        final_blocked = bool(shortened and qualified)
+        # Two independent causes reach the substitution below, and they are NOT
+        # the same failure. (a) A caller-imposed visible bound clipped the
+        # qualification that made a qualified answer publishable. (b) The final
+        # recheck found a figure the finished string cannot ground -- which a
+        # sanitizer pass can create by removing an internal marker that was
+        # separating a number from its unit. Reporting both under the bound's
+        # token named an event that never happened and hid a grounding failure
+        # behind it, so each cause is tracked and reported on its own.
+        visible_bound_dropped = bool(shortened and qualified)
+        final_blocked = visible_bound_dropped
         changed = final_answer != answer
         if changed and not final_blocked:
             # D2.6: re-check the real final string. The evidence selected on
             # this turn is the input; no new absence proof is invented here. An
             # unchanged answer reuses its completed check.
             final_bound, final_total, _ = _bind_financial_claims(
-                financial_rows, final_answer, query_text, retrieval_project
+                financial_rows, final_answer, query_text, retrieval_project, merged.meta
             )
             final_orphans = _verifier_orphan_spans(final_answer, observed_facts, merged.meta)
             # No citation gate here on purpose: `final_answer` has already been
@@ -1642,10 +2017,26 @@ class RagQueryWorkflow(Workflow):
             final_answer = LOW_GROUNDING_MESSAGE
             publish_rag = False
             publish_facts = False
+            # Whichever cause fired names itself. `visible_bound_dropped` was
+            # decided before the recheck ran and the recheck only runs when it
+            # was False, so the two are mutually exclusive by construction and
+            # this choice cannot mislabel a grounding failure as a bound event.
+            fallback_reason = (
+                "visible_bound_dropped_qualification"
+                if visible_bound_dropped
+                else "final_recheck_ungrounded"
+            )
             guard_res = OutputGuardResult(
                 confidence="LOW", requires_review=True, verdicts=guard_res.verdicts,
             )
         answer = final_answer
+        if fallback_reason is not None:
+            # Two records, two readers: `degraded` is the channel operators
+            # already watch, and the audit field written below is the
+            # machine-checkable one the publication test reads. Both are emitted
+            # at the decision branch, so neither can drift from the answer that
+            # actually shipped.
+            await self._flag(ctx, f"fallback_reason:{fallback_reason}")
         # A safety copy is never truncated, so one can still outgrow the budget
         # (the per-unit price copy grows with the number of units asked about,
         # and MIN_VISIBLE_CHARS only bounds the STATIC copies). Emitting it
@@ -1662,12 +2053,18 @@ class RagQueryWorkflow(Workflow):
                 **(guard_res.verdicts or {}),
                 "L1": "reject", "reason": "safe_copy_exceeds_visible_limit",
             }
+            audit["fallback_reason"] = fallback_reason
             await ctx.store.set("audit", audit)
             await self._write_audit(ctx)
             raise QueryRejected("bản an toàn dài hơn giới hạn hiển thị")
         audit = await ctx.store.get("audit")
         audit.update(
             confidence=guard_res.confidence,
+            # None is the proof: the drafted answer was published. Any other
+            # value names the evidence-side fact that replaced it with canned
+            # copy, so this single field is what makes the owner invariant
+            # checkable after the fact instead of merely asserted in a comment.
+            fallback_reason=fallback_reason,
             guard_verdicts={
                 **(guard_res.verdicts or {}),
                 # D5: final-visible diagnostics live under their own key so a
