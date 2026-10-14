@@ -35,6 +35,7 @@ from llama_index.core.workflow import (
 from api import get_cfg
 from api.application.services.audit import write_audit
 from api.application.services.conv_state import conv_directive, get_context
+from api.application.services.fact_display import POLICY_DISPLAY
 from api.application.services.generate import stream_answer
 from api.application.services.image_search import (
     fetch_price_board_images,
@@ -329,6 +330,19 @@ def _fold(text: str) -> str:
     return " ".join(stripped.casefold().split())
 
 
+# Every registered policy label, longest first so a longer label is handled
+# before a shorter one that is its prefix. Built from the single source
+# (fact_display.POLICY_DISPLAY) so a new policy key cannot silently keep
+# mis-classifying the clause that names it.
+_POLICY_LABELS = tuple(
+    sorted(
+        {label for label in POLICY_DISPLAY.values() if label},
+        key=len,
+        reverse=True,
+    )
+)
+
+
 def _as_decimal(value: Any) -> Decimal | None:
     """Numeric value of a fact field; None for bools, text and non-numbers."""
     if value is None or isinstance(value, bool):
@@ -452,7 +466,11 @@ def _sole_policy(rows: list[dict]) -> str | None:
 
 
 def _resolve_claim_identity(
-    rows: list[dict], clause: str, query_text: str, project_key: str
+    rows: list[dict],
+    clause: str,
+    query_text: str,
+    project_key: str,
+    context: str = "",
 ) -> tuple[str | None, str | None]:
     """(subject, policy_key) for one claim, or (None, None) when unresolved.
 
@@ -462,6 +480,13 @@ def _resolve_claim_identity(
     naming two units is not a conflict — it is what makes the clause necessary.
     An ambiguous clause, or two candidate policies, stays unsupported rather
     than being silently resolved.
+
+    ``context`` is the answer text PRECEDING the clause, used only when the
+    clause names no subject itself. An answer groups its rows under a heading
+    ("**Căn hộ Studio:**" followed by one bullet per payment method), so the
+    bullet that states a price legitimately inherits the heading's unit — the
+    alternative is refusing every grouped answer. A context that names two
+    subjects is still ambiguous and resolves to nothing.
     """
 
     def _decide(named: set[str], fallback: str | None) -> str | None:
@@ -475,13 +500,17 @@ def _resolve_claim_identity(
             return None
         return next(iter(named)) if named else fallback
 
+    clause_subjects = _named_keys(rows, clause, "subject_display", "subject", project_key)
     subject = _decide(
-        _named_keys(rows, clause, "subject_display", "subject", project_key),
-        _sole(_named_keys(rows, query_text, "subject_display", "subject", project_key)),
+        clause_subjects,
+        _sole(_named_keys(rows, context, "subject_display", "subject", project_key))
+        or _sole(_named_keys(rows, query_text, "subject_display", "subject", project_key)),
     )
     policy = _decide(
         _named_keys(rows, clause, "policy_display", "policy_key"),
-        _sole(_named_keys(rows, query_text, "policy_display", "policy_key")) or _sole_policy(rows),
+        _sole(_named_keys(rows, context, "policy_display", "policy_key"))
+        or _sole(_named_keys(rows, query_text, "policy_display", "policy_key"))
+        or _sole_policy(rows),
     )
     return subject, policy
 
@@ -498,8 +527,17 @@ def _claim_field_scope(clause: str, is_percent: bool) -> frozenset[str]:
     NOTHING. Defaulting a bare monetary clause to _PRICE_FIELDS would license
     loan/debt figures on price authority, because ``loan_amount_vnd`` is
     derived from the price and therefore numerically equals it.
+
+    The clause is scrubbed of every registered policy label first. A policy NAME
+    carries the cue words it describes ("Phương án thanh toán sớm 95%",
+    "Phương án hỗ trợ lãi suất (HTLS)"), and an answer that names the method it
+    is quoting — which the prompt REQUIRES — would otherwise be classified as a
+    payment or rate claim and its price figure refused. Only the label is
+    removed: any cue the writer stated independently still governs.
     """
     folded = _fold(clause)
+    for label in _POLICY_LABELS:
+        folded = re.sub(rf"(?<!\w){re.escape(_fold(label))}(?!\w)", " ", folded)
     if _RATE_CUE_RE.search(folded):
         return _RATE_FIELDS
     if _DEPOSIT_CUE_RE.search(folded):
@@ -612,6 +650,29 @@ def _pct_claim_bound_by_chunk(
     return True
 
 
+def _inside_policy_label(
+    text: str, span: tuple[Decimal, str | None, int, int]
+) -> bool:
+    """True when a figure sits INSIDE a registered policy label.
+
+    ``som95`` is displayed as "Phương án thanh toán sớm 95%", so the label itself
+    carries a percentage. Counting it as a claim makes the clause hold a percent
+    span beside its price spans, which makes ``_bind_claim`` refuse the whole
+    clause (one claim may not mix units) — the price band is then reported as an
+    unsupported figure. The figure belongs to the method's NAME, not to the
+    answer's own arithmetic.
+
+    Matched on the ORIGINAL text, not the folded form: folding strips accents and
+    collapses whitespace, so its offsets do not address the source string.
+    """
+    _value, _unit, start, end = span
+    for label in _POLICY_LABELS:
+        for hit in re.finditer(re.escape(label), text, re.IGNORECASE):
+            if hit.start() <= start and end <= hit.end():
+                return True
+    return False
+
+
 def _financial_claims(
     text: str,
 ) -> list[tuple[str, list[tuple[Decimal, str | None, int, int]]]]:
@@ -630,19 +691,60 @@ def _financial_claims(
         for match in _extract_amount_matches(text or "")
         if match[1] is None or match[1] in _FIGURE_UNITS
     ]
+    spans = [span for span in spans if not _inside_policy_label(text or "", span)]
     if not spans:
         return []
     masked = list(text)
     for _value, _unit, start, end in spans:
         masked[start:end] = "\x00" * (end - start)
     masked_text = "".join(masked)
-    claims: list[tuple[str, list[tuple[Decimal, str | None, int, int]]]] = []
+    claims: list[tuple[str, list[tuple[Decimal, str | None, int, int]], bool, str]] = []
     for span in spans:
-        clause = _clause_for_span(masked_text, span[2], span[3])
-        if not claims or claims[-1][0] != clause:
-            claims.append((clause, []))
+        clause = _clause_for_span(masked_text, span[2], span[3], source=text)
+        # A clause may carry two kinds of figure: the price band plus the
+        # deposit/rate the same policy attaches to it ("khoảng 1,98 – 2,64 tỷ
+        # (vốn tự có 30%, hỗ trợ lãi suất 0% trong 18 tháng)"). One claim must be
+        # all-money or all-percent, because a single fact row licenses one kind,
+        # so a mixed clause is split at the change of kind. Both halves keep the
+        # SAME clause text, so each is still judged by the cue the writer stated.
+        #
+        # Percentages split further, by the cue of their own comma segment: one
+        # clause states several distinct commitments ("vốn tự có 30%, lãi suất
+        # 0% trong 18 tháng"), and no single row licenses both a deposit and a
+        # rate. Grouping them by the whole clause's cue left the figure whose cue
+        # the clause did not name first unbound, which refused the entire answer.
+        kind = span[1] == "%"
+        cue = (
+            _pct_cue_class(_pct_segment_clause(text, span[2], span[3]))
+            if kind
+            else ""
+        )
+        if (
+            not claims
+            or claims[-1][0] != clause
+            or claims[-1][2] != kind
+            or claims[-1][3] != cue
+        ):
+            claims.append((clause, [], kind, cue))
         claims[-1][1].append(span)
-    return claims
+    return [(clause, group) for clause, group, _kind, _cue in claims]
+
+
+def _policy_named_in_clause(row: dict, clause: str) -> bool:
+    """True when the clause names THIS row's policy and states no other cue.
+
+    An answer is required (prompt rule 9) to present each payment method on its
+    own row, which yields the bullet form "*Phương án thanh toán sớm 95%:* 1,72
+    – 2,30 tỷ". The label IS the only cue such a clause carries, and it names the
+    method rather than a field, so the scope lookup returns nothing and the
+    price band is refused. Binding it to the price fields is safe because the
+    caller still requires the clause to name this exact row's policy and the row
+    to carry the licensed field: a loan or deposit row stays refused.
+    """
+    label = row.get("policy_display")
+    if not isinstance(label, str) or not label.strip():
+        return False
+    return bool(re.search(rf"(?<!\w){re.escape(_fold(label))}(?!\w)", _fold(clause)))
 
 
 def _bind_claim(
@@ -657,6 +759,25 @@ def _bind_claim(
     if (row.get("unit") or "").casefold() != expected_unit:
         return False
     scope = _claim_field_scope(clause, percent)
+    fields = row.get("fields") or {}
+    if (
+        not percent
+        and _fact_range_bounds(row) is not None
+        and not any(name in scope for name in fields)
+        and (
+            _ESTIMATE_LABEL_RE.search(_fold(clause))
+            or _policy_named_in_clause(row, clause)
+        )
+    ):
+        # The indicative band shares its clause with the method's other terms
+        # ("khoảng 1,98 – 2,64 tỷ (vốn tự có 30%, lãi suất 0% trong 18 tháng)"),
+        # so the cue scan classifies the whole clause by those terms and the
+        # price bounds find no licensed field. The clause either labels the band
+        # an estimate or names this row's OWN policy — the two things that make
+        # a band indicative rather than settled. Safe because a rate or deposit
+        # row carries no range bounds and never reaches this branch, and the
+        # bounds must still equal this row's exactly (checked below).
+        scope = _PRICE_FIELDS
     if not scope:
         return False
     fields = row.get("fields") or {}
@@ -672,16 +793,115 @@ def _bind_claim(
         return all(any(_as_decimal(fields.get(name)) == span[0] for name in scope) for span in spans)
     # A RANGE row authorizes bounds only under the field its own clause named,
     # so a price range can never license a same-valued deposit/payment range.
+    # The estimate label may also be the row's OWN policy name: an answer that
+    # presents each method as its own bullet ("*Phương án thanh toán sớm 95%:*
+    # 1,72 – 2,30 tỷ") states the label on the intro line, not in the bullet, and
+    # requiring it per clause refused a correct band. Naming the method is what
+    # makes the bounds indicative rather than settled, and the bounds must still
+    # equal the row's exactly.
     bounds = _fact_range_bounds(row)
     if (
         bounds
         and not percent
         and len(spans) == 2
         and any(name in scope for name in fields)
-        and _ESTIMATE_LABEL_RE.search(_fold(clause))
+        and (
+            _ESTIMATE_LABEL_RE.search(_fold(clause))
+            or _policy_named_in_clause(row, clause)
+        )
     ):
         return bounds == (spans[0][0], spans[1][0])
     return False
+
+
+def _bind_clause_for_spans(
+    answer: str, clause: str, spans: list[tuple[Decimal, str | None, int, int]]
+) -> str:
+    """The text a claim is judged by: a percentage narrows to its own segment.
+
+    One clause states several distinct commitments ("vốn tự có 30%, hỗ trợ lãi
+    suất 0% trong 18 tháng"), and ``_claim_field_scope`` takes the FIRST cue it
+    finds, so the deposit figure is classified by the rate cue beside it and
+    finds no licensed field. The comma segment is the text the figure's own
+    commitment is written in; the chunk leg already reads it this way, so both
+    legs must agree on which cue governs.
+    """
+    if spans and spans[0][1] == "%":
+        segment = _pct_segment_clause(answer, spans[0][2], spans[0][3])
+        if segment:
+            return segment
+    return clause
+
+
+def _bind_claim_across_policy(
+    rows: list[dict],
+    clause: str,
+    spans: list[tuple[Decimal, str | None, int, int]],
+    policy: str,
+) -> bool:
+    """True when EVERY row of one policy authorizes the same PERCENTAGE claim.
+
+    The project-level counterpart of ``_bind_claim``: a clause that names the
+    project's policy and no unit ("dự án The Camellia đang áp dụng chính sách hỗ
+    trợ lãi suất với mức 0%/năm trong 18 tháng") resolves a policy but no
+    subject, so there is no unit to walk rows by — yet the commitment is stated
+    for every unit of that policy.
+
+    Percentages only. A rate or deposit term IS a policy-wide commitment, so
+    "every unit of this policy carries it" is the honest reading; a price is
+    per-unit evidence, and licensing one from a project-level clause is how the
+    price of CH-03 would authorize a claim about CH-11. Money stays subject-bound.
+
+    Requiring ALL candidate rows to license it is what keeps this from
+    generalizing one unit's figure to the whole policy: a policy whose units
+    disagree leaves the claim unbound, exactly as before. Rows that do not carry
+    the licensed field (a ``term_months`` row beside an ``interest_rate_pct``
+    one) are not candidates, so they cannot veto a claim they say nothing about.
+    """
+    if not spans or any(span[1] != "%" for span in spans):
+        return False
+    candidates = [
+        row
+        for row in rows
+        if str(row.get("policy_key") or "") == policy
+        and (row.get("unit") or "").casefold() == "pct"
+    ]
+    if not candidates:
+        return False
+    return all(_bind_claim(row, clause, spans) for row in candidates)
+
+
+def _claim_context(
+    answer: str, position: int, rows: list[dict], project_key: str
+) -> str:
+    """Identity text a bullet's own clause omits, or "".
+
+    Two sources, in the order the answer states them:
+
+    * the rest of the bullet line BEFORE the figure — where the payment method
+      is named ("Phương án thanh toán sớm 95%: khoảng ");
+    * the nearest PRECEDING line that names a unit — the group heading. The line
+      is found by asking the row set which line names a subject, not by a
+      markdown shape: answers head their groups as "**Căn hộ Studio:**",
+      "1. **Căn hộ Studio** (diện tích khoảng 27,8 – 31,4 m²):" and other
+      equally valid spellings, and a shape-based matcher misses the ones it was
+      not written for. The scan stops at the first naming line, so an earlier
+      group's heading never leaks in.
+    """
+    if position <= 0:
+        return ""
+    line_start = answer.rfind("\n", 0, position) + 1
+    parts = [answer[line_start:position]]
+    cursor = line_start
+    while cursor > 0:
+        previous_end = cursor - 1
+        previous_start = answer.rfind("\n", 0, previous_end) + 1
+        line = answer[previous_start:previous_end]
+        if _named_keys(rows, line, "subject_display", "subject", project_key):
+            parts.append(line)
+            break
+        cursor = previous_start
+    return " ".join(parts)
 
 
 def _bind_financial_claims(
@@ -714,16 +934,42 @@ def _bind_financial_claims(
     for clause, spans in _financial_claims(answer):
         total += len(spans)
         licensed = False
-        subject, policy = _resolve_claim_identity(rows, clause, query_text, project_key)
+        # The identity a bullet's own clause omits: the payment method named
+        # earlier on its line, and the unit named by the nearest preceding
+        # heading line. The whole preceding answer would name several units and
+        # policies, which resolves to nothing.
+        preceding = (
+            _claim_context(answer, spans[0][2], rows, project_key) if spans else ""
+        )
+        subject, policy = _resolve_claim_identity(
+            rows, clause, query_text, project_key, context=preceding
+        )
         if subject is not None and policy is not None:
+            # A percentage is judged by the cue of its OWN comma segment, not the
+            # whole clause. One clause states several commitments ("vốn tự có 30%,
+            # hỗ trợ lãi suất 0% trong 18 tháng"), and the cue scan takes the first
+            # match, so the deposit figure was classified by the rate cue beside it
+            # and found no licensed field. The segment is what the figure's own
+            # commitment is written in; the chunk leg below already reads it this
+            # way, and both must agree on which cue governs.
+            bind_clause = _bind_clause_for_spans(answer, clause, spans)
             for row in rows:
                 if str(row.get("subject") or "") != subject or str(row.get("policy_key") or "") != policy:
                     continue
-                if not _bind_claim(row, clause, spans):
+                if not _bind_claim(row, bind_clause, spans):
                     continue
                 licensed = True
                 published_estimate = published_estimate or _fact_range_bounds(row) is not None
                 break
+        elif policy is not None:
+            # A project-level clause names the policy but no unit ("dự án The
+            # Camellia áp dụng chính sách hỗ trợ lãi suất với mức 0%/năm trong 18
+            # tháng"), so there is no subject to walk rows by. The commitment is
+            # stated for every unit of that policy, so every candidate row must
+            # license it -- see _bind_claim_across_policy.
+            licensed = _bind_claim_across_policy(
+                rows, _bind_clause_for_spans(answer, clause, spans), spans, policy
+            )
         # The chunk leg is a FALLBACK, never a replacement: a claim the fact leg
         # already licensed keeps exactly the authority it had before this change,
         # so no existing SQL verdict moves.
@@ -732,6 +978,100 @@ def _bind_financial_claims(
         if licensed:
             bound.update((span[2], span[3]) for span in spans)
     return bound, total, published_estimate
+
+
+# A sentence ends at terminal punctuation followed by whitespace, or at a line
+# break. The lookbehind keeps the separator with the sentence it closes, and the
+# whitespace requirement is what stops a thousands dot ("1.980.000") from
+# splitting a figure in half.
+_SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _drop_ungrounded_sentences(
+    answer: str,
+    rows: list[dict],
+    query_text: str,
+    project_key: str,
+    meta: dict | None,
+) -> str | None:
+    """The answer without its ungrounded sentences, or None when nothing is droppable.
+
+    A draft can be grounded everywhere except one closing paragraph: the prompt
+    asks for a short benefit summary, and the model writes it by combining bounds
+    from several payment methods ("từ 1,72 tỷ đến 2,64 tỷ") or by naming a method
+    it abbreviates past recognition. No single fact row authorizes such a figure,
+    so the claim is refused -- and refusing the CLAIM used to delete the whole
+    answer, including the per-method bands that bound perfectly.
+
+    Only sentences carrying an ungrounded figure are removed, and only when the
+    remainder re-binds clean: the candidate is re-checked against the same rows
+    before it is offered, so this can never launder an unbound figure. A repair
+    that would leave no figure at all returns None, which keeps the existing
+    canned copy for a draft that was ungrounded from the start.
+
+    Boundaries are located on the ORIGINAL string and the kept segments are
+    re-joined verbatim, so every character outside a dropped sentence survives
+    byte for byte -- a rewritten string could drop the qualification that made
+    another sentence publishable.
+    """
+    bound, total, _ = _bind_financial_claims(rows, answer, query_text, project_key, meta)
+    if total == len(bound):
+        return None
+    cuts = [0] + [match.end() for match in _SENTENCE_BREAK_RE.finditer(answer)] + [len(answer)]
+    drop: set[int] = set()
+    for _clause, spans in _financial_claims(answer):
+        for span in spans:
+            if (span[2], span[3]) in bound:
+                continue
+            for index in range(len(cuts) - 1):
+                if cuts[index] <= span[2] < cuts[index + 1]:
+                    drop.add(index)
+                    break
+    if not drop:
+        return None
+    repaired = _strip_dangling_table_headers(
+        "".join(
+            answer[cuts[index] : cuts[index + 1]]
+            for index in range(len(cuts) - 1)
+            if index not in drop
+        ).strip()
+    )
+    if not repaired:
+        return None
+    repaired_bound, repaired_total, _ = _bind_financial_claims(
+        rows, repaired, query_text, project_key, meta
+    )
+    if repaired_total == 0 or repaired_total > len(repaired_bound):
+        return None
+    return repaired
+
+
+_TABLE_HEADER_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEPARATOR_LINE_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
+
+def _strip_dangling_table_headers(text: str) -> str:
+    """Remove a markdown table header left with no data row.
+
+    ``_drop_ungrounded_sentences`` removes the LINES carrying an unbound figure,
+    and a table's data row is one such line. When every data row of a table is
+    dropped, its header and separator survive alone — a malformed table the
+    reader sees as an empty grid. A header is only meaningful with a row under
+    it, so the pair goes too.
+    """
+    lines = text.split("\n")
+    keep = [True] * len(lines)
+    for index in range(len(lines) - 1):
+        if not _TABLE_HEADER_LINE_RE.match(lines[index]):
+            continue
+        if not _TABLE_SEPARATOR_LINE_RE.match(lines[index + 1]):
+            continue
+        following = next(
+            (line for line in lines[index + 2 :] if line.strip()), ""
+        )
+        if not following.lstrip().startswith("|"):
+            keep[index] = keep[index + 1] = False
+    return "\n".join(line for line, alive in zip(lines, keep) if alive).strip()
 
 
 def _verifier_orphan_spans(
@@ -759,6 +1099,13 @@ def _verifier_orphan_spans(
     orphans: list[tuple[int, int]] = []
     for amount, unit, start, end in _extract_amount_matches(answer or ""):
         if any(amount == value for value in evidence):
+            continue
+        # A figure INSIDE a registered policy label is the method's NAME, not the
+        # answer's own arithmetic ("Phương án thanh toán sớm 95%"). The claim
+        # binder already excludes it, so counting it here made the two gates
+        # disagree: every method-labelled answer carried an orphan the binder
+        # could never bind, and the publish gate refused it as ungrounded.
+        if _inside_policy_label(answer or "", (amount, unit, start, end)):
             continue
         clause = _clause_for_span(answer, start, end)
         if _rag_area_match(amount, unit, clause, area_evidence):
@@ -1694,6 +2041,29 @@ class RagQueryWorkflow(Workflow):
             if exact_price_request
             else merged.facts
         )
+        # One ungrounded closing sentence must not cost the whole answer. The
+        # prompt asks for a short benefit summary, and the model writes it by
+        # combining bounds from several methods ("từ 1,72 tỷ đến 2,64 tỷ"), which
+        # no single row authorizes. Dropping exactly those sentences keeps the
+        # per-method bands that bound, and the helper re-binds the remainder
+        # before offering it -- so a repair that would launder a figure is
+        # refused and the canned copy below still runs.
+        #
+        # This runs BEFORE the verifier, not after: the guard's verdicts and
+        # orphan list are what the publish gate reads, and a verdict taken on a
+        # string that is then replaced would refuse a turn whose shipped answer
+        # grounds clean. The verifier must judge the string that ships.
+        repaired = _drop_ungrounded_sentences(
+            answer, financial_rows, query_text, retrieval_project, merged.meta
+        )
+        if repaired is not None:
+            logger.warning(
+                "draft repaired: dropped %d chars of ungrounded prose",
+                len(answer) - len(repaired),
+            )
+            await self._flag(ctx, "draft_repaired_ungrounded_prose")
+            answer = repaired
+            await ctx.store.set("answer", answer)
         verification_failed = False
         try:
             guard_res = await asyncio.wait_for(

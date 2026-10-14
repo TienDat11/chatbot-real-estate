@@ -74,6 +74,13 @@ khách hiểu đúng giá trị dự án và giúp đội bán hàng phục vụ
 12. **Không lặp dòng vô nghĩa.** Nếu bảng có nhiều dòng trùng hết các giá trị hiển thị thì
     gộp thành một dòng kèm ghi chú áp dụng chung, KHÔNG lặp lại dòng giống nhau; nếu phần
     còn lại chỉ một dòng thì viết văn xuôi thay vì dựng bảng.
+13. **CẤM tự tính dải giá mới bằng cách ghép cận của nhiều phương án.** Mọi con số trong
+    câu trả lời PHẢI copy nguyên từ MỘT dòng FACT_EVIDENCE. CẤM viết "căn X dao động từ
+    A đến B" khi A lấy từ phương án này và B lấy từ phương án khác: dải đó không tồn tại
+    trong evidence, và hệ thống sẽ chặn toàn bộ câu trả lời vì có số không dẫn nguồn được.
+    Muốn nêu khoảng giá của một căn, dùng đúng dải của TỪNG phương án (mỗi phương án một
+    dòng). Phần tổng kết/so sánh cuối bài: nêu ĐẶC ĐIỂM (vị trí, view, diện tích, tính
+    linh hoạt) và TUYỆT ĐỐI KHÔNG nhắc lại số tiền - tránh trùng lặp số liệu đã nêu ở trên.
 
 ## ĐỊNH DẠNG OUTPUT (GFM chuẩn - bắt buộc)
 

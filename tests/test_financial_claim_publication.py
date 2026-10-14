@@ -723,3 +723,326 @@ def test_range_claim_binds_when_a_non_price_key_comes_first():
         (Decimal("2640000000"), None, 0, 0),
     ]
     assert workflow_module._bind_claim(row, clause, spans) is True
+
+
+# --- G: the price answer survives the model's own closing prose -------------
+#
+# A price answer presents one band per payment method, then the model adds a
+# short benefit summary. The summary is written by COMBINING bounds from several
+# methods ("từ 1,72 tỷ đến 2,64 tỷ"), and no single fact row states that span, so
+# the claim is refused. Refusing the claim used to delete the whole answer,
+# including the per-method bands that bound perfectly -- the customer asked for a
+# price and got "cannot confirm".
+
+
+def _band_row(
+    fact_id: int,
+    *,
+    unit_code: str,
+    policy_key: str,
+    low: int,
+    high: int,
+) -> dict:
+    """A labelled indicative band as the pipeline actually projects it.
+
+    The binder reads the PROJECTED row (``build_fact_evidence`` output), not the
+    raw SQL row, so a hand-built dict here would test a shape no turn ever sees.
+    """
+    return build_fact_evidence(
+        [_fact_row(
+            fact_id,
+            unit_code=unit_code,
+            policy_key=policy_key,
+            fact_key="price_vnd",
+            value=None,
+            quality="range",
+            trust="estimate",
+            range_min=low,
+            range_max=high,
+        )],
+        "facts",
+        TODAY,
+    )[0]
+
+
+def test_ungrounded_closing_prose_does_not_delete_the_price_bands():
+    """The repair keeps every bound band and drops only the invented span.
+
+    The dropped sentence is the one carrying the unbound figure; the bands
+    survive byte for byte. The remainder is re-bound before it is offered, so
+    this can never launder a figure.
+    """
+    answer = (
+        "1. **Căn hộ Studio**\n"
+        "   - **Phương án thanh toán sớm 95%:** Khoảng 1,72 - 2,30 tỷ đồng.\n"
+        "\n"
+        "*So sánh nhanh:* Căn Studio là lựa chọn tối ưu dòng vốn nhất "
+        "(chỉ từ 1,72 tỷ đồng), căn 1.5PN đáp ứng tốt nhu cầu ở linh hoạt "
+        "(từ 2,85 tỷ đồng)."
+    )
+    rows = [
+        _band_row(1, unit_code="studio", policy_key="som95", low=1_720_000_000, high=2_300_000_000),
+        _band_row(2, unit_code="1p1", policy_key="som95", low=2_850_000_000, high=3_580_000_000),
+    ]
+    repaired = workflow_module._drop_ungrounded_sentences(
+        answer, rows, "Giá căn hộ The Camellia Sơn Trà bao nhiêu?", "camellia", None
+    )
+    assert repaired is not None
+    # The band that grounds survives with its exact text.
+    assert "Khoảng 1,72 - 2,30 tỷ đồng" in repaired
+    # The invented span is gone with the sentence that stated it.
+    assert "1,72 tỷ đồng), căn 1.5PN" not in repaired
+    # And the remainder is fully bound -- the repair is never a laundering step.
+    bound, total, _ = workflow_module._bind_financial_claims(
+        rows, repaired, "Giá căn hộ The Camellia Sơn Trà bao nhiêu?", "camellia", None
+    )
+    assert total > 0
+    assert total == len(bound)
+
+
+def test_repair_refuses_when_nothing_would_remain_grounded():
+    """A draft whose ONLY sentence is ungrounded still gets the canned copy."""
+    answer = "*So sánh nhanh:* Căn hộ dao động từ 1,72 tỷ đến 2,64 tỷ đồng."
+    rows = [
+        _band_row(1, unit_code="studio", policy_key="som95", low=1_720_000_000, high=2_300_000_000),
+    ]
+    assert (
+        workflow_module._drop_ungrounded_sentences(
+            answer, rows, "Giá căn hộ?", "camellia", None
+        )
+        is None
+    )
+
+
+def test_a_fully_grounded_answer_is_never_repaired():
+    """No ungrounded span means no rewrite at all: the string is untouched."""
+    answer = (
+        "1. **Căn hộ Studio**\n"
+        "   - **Phương án thanh toán sớm 95%:** Khoảng 1,72 - 2,30 tỷ đồng.\n"
+    )
+    rows = [
+        _band_row(1, unit_code="studio", policy_key="som95", low=1_720_000_000, high=2_300_000_000),
+    ]
+    assert (
+        workflow_module._drop_ungrounded_sentences(
+            answer, rows, "Giá căn hộ?", "camellia", None
+        )
+        is None
+    )
+
+
+# --- H: the two gates agree about a policy label's own percentage -----------
+#
+# "Phương án thanh toán sớm 95%" is a method's NAME, and the figure belongs to
+# the label rather than to the answer's arithmetic. The claim binder already
+# excluded it; the orphan recomputation did not, so every method-labelled answer
+# carried an orphan the binder could never bind and the publish gate refused a
+# correct answer as ungrounded.
+
+
+def test_policy_label_percentage_is_not_an_orphan_figure():
+    """The method's NAME percentage must not be reported as an ungrounded figure.
+
+    The band's own bounds are still orphans to the verifier -- a range row carries
+    no value in ``fields``, which is documented and handled by the bound-span
+    accounting. What must NOT appear is the "95%" inside the policy label: the
+    binder excludes it, so counting it here made the two gates disagree and every
+    method-labelled answer was refused as ungrounded.
+    """
+    answer = (
+        "1. **Căn hộ Studio**\n"
+        "   - **Phương án thanh toán sớm 95%:** Khoảng 1,72 - 2,30 tỷ đồng.\n"
+    )
+    facts = [_band_row(1, unit_code="studio", policy_key="som95", low=1_720_000_000, high=2_300_000_000)]
+    orphans = workflow_module._verifier_orphan_spans(answer, facts, None)
+    orphan_texts = [answer[start:end] for start, end in orphans]
+    assert "95%" not in orphan_texts
+    assert not any("%" in text for text in orphan_texts)
+
+
+# --- I: one clause may state two different percentage commitments -----------
+#
+# The HTLS plan writes the deposit and the rate in one clause ("vốn tự có 30%,
+# lãi suất 0% trong 18 tháng"). Grouping both figures into one claim left the
+# figure whose cue the clause did not name first unbound, and one unbound figure
+# refuses the whole clause -- so the rate could never be quoted beside the
+# deposit it belongs with.
+
+
+def test_two_percentage_commitments_in_one_clause_split_by_their_own_cue():
+    """Each figure is classified by its own comma segment, not the whole clause.
+
+    The money band, the deposit percentage and the rate become THREE claims: no
+    single row licenses a deposit and a rate together, so a merged claim would be
+    refused as a whole and the rate could never be stated beside the deposit it
+    belongs with.
+    """
+    clause = "khoảng 1,98 - 2,64 tỷ đồng (vốn tự có 30%, lãi suất 0% trong 18 tháng)"
+    claims = workflow_module._financial_claims(clause)
+    percent_claims = [
+        sorted((str(span[0]), span[1]) for span in spans)
+        for _clause, spans in claims
+        if all(span[1] == "%" for span in spans)
+    ]
+    assert sorted(percent_claims) == [[("0", "%")], [("30", "%")]]
+    # The band is its own claim, and it is not merged with either percentage.
+    assert any(
+        all(span[1] != "%" for span in spans) and len(spans) == 2 for _clause, spans in claims
+    )
+
+
+def test_deposit_percentage_beside_a_rate_is_classified_by_its_own_segment():
+    """A figure's cue comes from its own comma segment, not the clause it shares.
+
+    ``_claim_field_scope`` reads one cue per clause, and one clause states several
+    commitments ("đặt cọc 30%, lãi suất 0% trong 18 tháng"). Read from the whole
+    clause the rate cue wins, so the deposit figure found no licensed field and
+    the whole clause was refused. The segment is what a figure's own commitment
+    is written in.
+    """
+    clause = "đặt cọc 30%, lãi suất 0% trong 18 tháng"
+    # Whole clause: the rate cue governs, so the deposit finds no field at all.
+    assert workflow_module._claim_field_scope(clause, True) == frozenset({"interest_rate_pct"})
+    deposit_start = clause.index("30%")
+    rate_start = clause.index("0% trong")
+    assert workflow_module._pct_cue_class(
+        workflow_module._pct_segment_clause(clause, deposit_start, deposit_start + 3)
+    ) == "deposit"
+    assert workflow_module._pct_cue_class(
+        workflow_module._pct_segment_clause(clause, rate_start, rate_start + 2)
+    ) == "rate"
+
+
+def test_an_unrecognised_commitment_word_still_refuses_its_percentage():
+    """A cue the registry does not know binds to nothing — the allowlist holds.
+
+    "vốn tự có" is the buyer's own capital, but no fact field is registered under
+    that name, so the figure stays unbound rather than being guessed onto the
+    deposit row it resembles. Refusing is the correct outcome, not a gap.
+    """
+    clause = "khoảng 1,98 - 2,64 tỷ đồng (vốn tự có 30%, lãi suất 0% trong 18 tháng)"
+    deposit_start = clause.index("30%")
+    segment = workflow_module._pct_segment_clause(clause, deposit_start, deposit_start + 3)
+    assert workflow_module._pct_cue_class(segment) == "other"
+    assert workflow_module._claim_field_scope(segment, True) == frozenset()
+
+
+# --- J: a policy-wide percentage binds without naming a unit -----------------
+#
+# An answer opens with the project's policy ("dự án The Camellia đang áp dụng
+# chính sách hỗ trợ lãi suất với mức 0%/năm trong 18 tháng"), which names no
+# unit. The identity walk then had no subject to follow and refused the figure,
+# so a correct project-level rate was canned. A rate IS a policy-wide term, so
+# every candidate row of that policy must carry it; a price is per-unit evidence
+# and stays subject-bound.
+
+
+def _pct_row(
+    fact_id: int,
+    *,
+    unit_code: str = "studio",
+    policy_key: str = "htls",
+    fact_key: str = "interest_rate_pct",
+    value: int = 0,
+    unit: str = "pct",
+) -> dict:
+    """A percentage fact as the pipeline projects it, not as the DB stores it."""
+    return build_fact_evidence(
+        [_fact_row(
+            fact_id, unit_code=unit_code, policy_key=policy_key,
+            fact_key=fact_key, value=value, unit=unit,
+        )],
+        "facts",
+        TODAY,
+    )[0]
+
+
+def test_policy_level_rate_binds_when_every_unit_of_that_policy_agrees():
+    """The clause names the policy and no unit; every unit carries the same rate."""
+    rows = [
+        _pct_row(1, unit_code="studio"),
+        _pct_row(2, unit_code="1p1"),
+        _pct_row(3, unit_code="2pn-noi-khu"),
+    ]
+    clause = "dự án The Camellia áp dụng chính sách hỗ trợ lãi suất với mức 0%/năm"
+    spans = workflow_module._financial_claims(clause)[0][1]
+    assert workflow_module._bind_claim_across_policy(rows, clause, spans, "htls") is True
+
+
+def test_policy_level_rate_is_refused_when_one_unit_disagrees():
+    """One unit carrying a different rate makes the claim a generalization."""
+    rows = [
+        _pct_row(1, unit_code="studio", value=0),
+        _pct_row(2, unit_code="1p1", value=3),
+    ]
+    clause = "dự án The Camellia áp dụng chính sách hỗ trợ lãi suất với mức 0%/năm"
+    spans = workflow_module._financial_claims(clause)[0][1]
+    assert workflow_module._bind_claim_across_policy(rows, clause, spans, "htls") is False
+
+
+def test_policy_level_money_claim_is_never_bound_across_units():
+    """A price is per-unit evidence: a project-level clause must not license it.
+
+    Licensing CH-03's price from a clause that names no unit is exactly how a
+    figure would be attributed to CH-11.
+    """
+    rows = [_fact_row(1, unit_code="CH-03")]
+    clause = "dự án The Camellia có mức giá 2.850.000.000 đồng"
+    spans = workflow_module._financial_claims(clause)[0][1]
+    assert workflow_module._bind_claim_across_policy(rows, clause, spans, "htls") is False
+
+
+def test_policy_level_rate_ignores_rows_that_do_not_carry_the_field():
+    """A ``term_months`` row beside the rate rows cannot veto a rate claim."""
+    rows = [
+        _pct_row(1, unit_code="studio", value=0),
+        _pct_row(2, unit_code="1p1", value=0),
+        _pct_row(3, unit_code="studio", fact_key="term_months", value=18, unit="months"),
+    ]
+    clause = "dự án The Camellia áp dụng chính sách hỗ trợ lãi suất với mức 0%/năm"
+    spans = workflow_module._financial_claims(clause)[0][1]
+    assert workflow_module._bind_claim_across_policy(rows, clause, spans, "htls") is True
+
+
+# --- K: a table whose only data row is dropped leaves no empty grid ----------
+#
+# The repair removes the LINES carrying an unbound figure, and a table's data
+# row is one such line. When it was the table's only row the header and
+# separator survived alone, shipping a malformed empty table to the reader.
+
+
+def test_dropped_table_row_takes_its_header_with_it():
+    text = "Mở đầu.\n\n| Loại căn hộ | Lãi suất |\n| :--- | :---: |\n\nKết."
+    stripped = workflow_module._strip_dangling_table_headers(text)
+    assert "|" not in stripped
+    assert "Mở đầu." in stripped and "Kết." in stripped
+
+
+def test_a_table_with_a_data_row_keeps_its_header():
+    text = "| A | B |\n| --- | --- |\n| 1 | 2 |\nSau."
+    assert workflow_module._strip_dangling_table_headers(text) == text
+
+
+def test_text_without_a_table_is_untouched():
+    text = "Đoạn văn không bảng."
+    assert workflow_module._strip_dangling_table_headers(text) == text
+
+
+def test_repair_drops_the_orphan_row_and_the_empty_table_with_it():
+    """End to end: the unbound row goes, and no header survives it."""
+    answer = (
+        "Giá tham khảo:\n"
+        "| Loại căn | Giá |\n"
+        "| :--- | :--- |\n"
+        "| Studio | 9.999.999.999 đồng |\n"
+    )
+    rows = [
+        _band_row(1, unit_code="studio", policy_key="som95",
+                  low=1_720_000_000, high=2_300_000_000),
+    ]
+    repaired = workflow_module._drop_ungrounded_sentences(
+        answer, rows, "Giá căn hộ The Camellia Sơn Trà bao nhiêu?", "camellia", None
+    )
+    # No groundable figure survives, so the repair declines and the canned copy
+    # stays; the point is that it never returns a bare header.
+    assert repaired is None or "|" not in repaired

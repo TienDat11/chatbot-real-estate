@@ -42,6 +42,14 @@ _NUMBER_RE = re.compile(
 _IDENTIFIER_RE = re.compile(
     r"(?<![\w])(?:CH-\d{1,2}[A-Z]?|\[fe-\d{3}\])", re.IGNORECASE
 )
+# A range that states its unit once: "1,72 – 2,30 tỷ", "32,5 – 68,4 m2". Group 1
+# is the LEFT bound (which inherits the unit), group 3 the unit stated on the
+# right bound. The dash is the en/em range separator the writer actually uses.
+_RANGE_SHARED_UNIT_RE = re.compile(
+    r"(\d[\d.,]*)\s*(?:[\u2013\u2014-]|đến|toi|to)\s*(\d[\d.,]*)\s*"
+    r"(tỷ|tỉ|triệu|ngàn|nghìn|đồng|đ|vnđ|m2|m²)",
+    re.IGNORECASE,
+)
 _FINANCIAL_MIN = 1_000_000
 
 _VN_UNITS = {
@@ -291,6 +299,31 @@ def _normalize_amount_text(text: str) -> Decimal | None:
     return d if d.is_finite() else None
 
 
+def _range_shared_unit_spans(
+    text: str, covered: set[tuple[int, int]]
+) -> list[tuple[Decimal, str, int, int]]:
+    """Left bounds that inherit their unit from the range's right bound.
+
+    Vietnamese writes a band with the unit stated once ("1,72 – 2,30 tỷ",
+    "32,5 – 68,4 m2"). The left bound is then a bare decimal below
+    ``_FINANCIAL_MIN``, so the main pass drops it: the range arrives as one
+    figure, no two-bound claim can form, and a correct answer is refused as an
+    unsupported number. The unit is read from the right bound and applied to the
+    left one; a bound that states its own unit never matches here.
+    """
+    out: list[tuple[Decimal, str, int, int]] = []
+    for match in _RANGE_SHARED_UNIT_RE.finditer(text):
+        start, end = match.span(1)
+        if any(start >= s and end <= e for s, e in covered):
+            continue
+        unit = match.group(3).lower()
+        value = _normalize_amount_text(f"{match.group(1)} {unit}")
+        if value is None:
+            continue
+        out.append((value, unit, start, end))
+    return out
+
+
 def _extract_amount_matches(text: str) -> list[tuple[Decimal, str | None, int, int]]:
     """Extract normalized values with units and answer spans."""
     answer = _as_text(text)
@@ -315,6 +348,10 @@ def _extract_amount_matches(text: str) -> list[tuple[Decimal, str | None, int, i
         if unit is None and abs(d) < _FINANCIAL_MIN:
             continue
         out.append((d, unit.lower() if unit else None, start, end))
+    inherited = _range_shared_unit_spans(answer, {(s, e) for _, _, s, e in out})
+    if inherited:
+        out.extend(inherited)
+        out.sort(key=lambda span: span[2])
     return out
 
 
@@ -344,8 +381,38 @@ _AMENITY_LABELS = {
 # "," is deliberately NOT a clause boundary: one price clause spans it
 # ("2.850.000.000 đồng, tức 2,85 tỷ"), so splitting there would orphan the price.
 # The comma-joined amenity list is handled inside _rag_area_match instead.
-_CLAUSE_PUNCTUATION = ".;:!?。；！？—–\r\n"
+_CLAUSE_PUNCTUATION = ".;:!?。；！？\r\n"
 _CLAUSE_BREAK_RE = re.compile("[%s]" % re.escape(_CLAUSE_PUNCTUATION))
+# A dash BETWEEN two digits is a range separator, not a clause boundary: a writer
+# states one price band as "1.720.000.000 – 2.300.000.000" or "1,5–2 tỷ", and
+# breaking there splits one claim into two single-figure clauses that carry
+# neither the range's label nor its second bound, so the whole band is orphaned
+# and the answer is refused as an unsupported figure. Dashes elsewhere stay
+# boundaries, matching the prose use ("— lưu ý").
+_DASH_CHARS = "\u2014\u2013"
+# Anchored on the dash itself so the reported position is the dash, not the
+# leading whitespace: _clause_breaks compares that position against the
+# boundary set, and a range separator must be excluded from it.
+# The neighbour may be a digit or the mask character: _financial_claims blanks
+# every numeric span with "\x00" before asking for clause boundaries, so a range
+# arriving from that path has "\x00 \u2013 \x00" around the dash and a
+# digit-only lookbehind would never match it.
+_RANGE_DASH_RE = re.compile(
+    "(?<=[\\d\\x00])[\\s]*([%s])[\\s]*(?=[\\d\\x00])" % _DASH_CHARS
+)
+_DASH_BREAK_RE = re.compile("[%s]" % _DASH_CHARS)
+# A "." between digits is a thousands separator, not a sentence end: Vietnamese
+# writes 1.720.000.000, and treating each dot as a boundary shredded the figure
+# into unparseable fragments. Same class of defect as the range dash above.
+_THOUSANDS_DOT_RE = re.compile(r"(?<=\d)\.(?=\d)")
+# A ":" that closes a LABEL immediately before a figure is not a clause
+# boundary either: an answer formats its rows as markdown ("*Phương án HTLS:*
+# 1.980.000.000 đồng – 2.640.000.000 đồng"), and breaking at that colon hands
+# the figures a clause with neither the price cue nor the estimate label, so
+# both bounds are refused although the row is correct. A colon followed by
+# prose stays a boundary ("Lưu ý: giá có thể thay đổi").
+_LABEL_COLON_RE = re.compile(r":(?=[\s*_]*[\d\x00])")
+_COLON_BREAK_RE = re.compile(":")
 # A clause carries a figure when a number is followed by an area unit; used to
 # decide whether an amenity label in that clause actually governs an area.
 _AMOUNT_FOR_LABEL_RE = re.compile(r"\d[\d.,]*\s*m(?:2|²)(?!\w)", re.IGNORECASE)
@@ -372,12 +439,41 @@ def _clause_breaks(text: str) -> tuple[int, ...]:
     Cached because the guard asks for one clause per orphan figure: rescanning the
     whole answer character by character for every orphan made the check quadratic
     on a long, sparsely punctuated answer.
+
+    A dash joining two digits is skipped: it separates the bounds of ONE range
+    ("1.720.000.000 – 2.300.000.000"), so treating it as a boundary would split a
+    single labelled claim into two unlabelled single-figure clauses and orphan
+    both bounds. Every other dash is a boundary as before.
     """
-    return tuple(match.start() for match in _CLAUSE_BREAK_RE.finditer(text))
+    joined = {match.start(1) for match in _RANGE_DASH_RE.finditer(text)}
+    thousands = {match.start() for match in _THOUSANDS_DOT_RE.finditer(text)}
+    labels = {match.start() for match in _LABEL_COLON_RE.finditer(text)}
+    breaks = [
+        match.start()
+        for match in _CLAUSE_BREAK_RE.finditer(text)
+        if match.start() not in thousands and match.start() not in labels
+    ]
+    breaks.extend(
+        match.start()
+        for match in _DASH_BREAK_RE.finditer(text)
+        if match.start() not in joined
+    )
+    return tuple(sorted(breaks))
 
 
-def _clause_for_span(text: str, start: int, end: int) -> str:
-    """Return the punctuation-bounded clause containing a numeric span."""
+def _clause_for_span(
+    text: str, start: int, end: int, source: str | None = None
+) -> str:
+    """Return the punctuation-bounded clause containing a numeric span.
+
+    ``source`` is the text the clause is SLICED from when it differs from the
+    text the boundaries were computed on. The caller masks every figure before
+    asking for boundaries (so a thousands-separated amount is not punctuation),
+    and slicing that mask would hand back "phuong an thanh toan som \\x00\\x00"
+    for a policy named "…sớm 95%" — the label no longer matches anything, so the
+    clause lost the very cue it states. Boundaries from the mask, characters
+    from the original.
+    """
     answer = _as_text(text)
     # A span from a stale or external caller must clamp, never index: the previous
     # character walk raised IndexError on an out-of-range start.
@@ -388,7 +484,12 @@ def _clause_for_span(text: str, start: int, end: int) -> str:
     left = breaks[cut - 1] + 1 if cut else 0
     right_index = bisect_left(breaks, end)
     right = breaks[right_index] if right_index < len(breaks) else len(answer)
-    return _normalize_clause_text(answer[left:right])
+    body = answer if source is None else _as_text(source)
+    if len(body) != len(answer):
+        # A source of a different length cannot be sliced with these offsets;
+        # fall back to the boundary text rather than returning a shifted clause.
+        body = answer
+    return _normalize_clause_text(body[left:right])
 
 
 def _is_money_claim(amount: Decimal, unit: str | None) -> bool:
