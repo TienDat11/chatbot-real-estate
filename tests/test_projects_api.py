@@ -54,12 +54,45 @@ _CONTRACT_KEYS = {
 
 
 def _make_client(monkeypatch, projects: list[dict]) -> TestClient:
-    """App with the catalogue loader stubbed so the DB never runs."""
+    """App with the catalogue loader stubbed so the DB never runs.
+
+    ``/query`` resolves scope against ``fetch_active_project_records`` (the
+    registry snapshot), not ``project_config.fetch_projects``, so both seams
+    must be stubbed: the endpoint reads one, the 422 body reads the other.
+    """
     monkeypatch.setattr(
         "api.application.services.project_config.fetch_projects",
         lambda: projects,
     )
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _fake_records(projects),
+    )
     return TestClient(create_app())
+
+
+def _fake_records(projects: list[dict]):
+    """Registry records for the same catalogue the loader stub returns."""
+    from api.application.ports.project_registry import ProjectRegistryRecord
+
+    async def fetch_active_project_records():
+        return [
+            ProjectRegistryRecord(
+                project_key=p["project_key"],
+                ten_thuong_mai=p["name"],
+                ten_phap_ly=None,
+                vi_tri=None,
+                hotline=None,
+                location=p["location"],
+                geo_center_lat=p["lat"],
+                geo_center_lng=p["lng"],
+                is_hot=p["is_hot"],
+                status="active",
+            )
+            for p in projects
+        ]
+
+    return fetch_active_project_records
 
 
 # --- GET /api/projects -------------------------------------------------------
@@ -196,6 +229,13 @@ def test_query_422_project_scope_includes_projects(monkeypatch) -> None:
     monkeypatch.setattr(
         "api.application.services.project_config.fetch_projects",
         lambda: list(_CATALOGUE),
+    )
+    # /query resolves scope against the registry snapshot and shapes the 422
+    # body from those records, so the snapshot must be stubbed too — otherwise
+    # the test only passes on a machine with a reachable project registry.
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _fake_records(list(_CATALOGUE)),
     )
     client = TestClient(create_app())
     resp = client.post("/query", json={"query": "giá 2PN bao nhiêu?"})

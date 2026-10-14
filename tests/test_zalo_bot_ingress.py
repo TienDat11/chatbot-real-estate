@@ -717,7 +717,13 @@ def test_invalid_secret_safe_on_all_validation_surfaces(secret, markers, wrapped
         if any(marker in rendered for marker in markers)
     }
     assert leaked == set()
-    assert values["zalo_bot_webhook_secret"] == (SecretStr(secret) if wrapped else secret)
+    # Compare the wrapped value, not the SecretStr objects: pydantic >= 2.14
+    # implements SecretStr.__eq__ via secrets.compare_digest, which calls
+    # .encode() on the stored value and raises for the non-str payloads this
+    # test deliberately feeds in. The contract under test is that the caller's
+    # input is never mutated, which the unwrapped value states directly.
+    stored = values["zalo_bot_webhook_secret"]
+    assert stored.get_secret_value() == secret if wrapped else stored == secret
 
 
 @pytest.mark.parametrize("mapping_type", ["UserDict", "MappingProxyType", "custom"],

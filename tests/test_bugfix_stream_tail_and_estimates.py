@@ -40,6 +40,39 @@ from api.domain.services.rewrite import RoutedResult
 _ACTIVE_CATALOGUE = (("camellia", "Camellia"),)
 
 
+def _stub_registry_snapshot(monkeypatch) -> None:
+    """Pin the registry snapshot /query resolves scope against.
+
+    ``/query`` reads ``fetch_active_project_records`` before scope resolution
+    and builds ``ProjectContext`` from it; an empty snapshot raises
+    ``active_catalogue must not be empty``. Without this stub the test only
+    passes where a live project registry happens to be reachable.
+    """
+    from api.application.ports.project_registry import ProjectRegistryRecord
+
+    async def _fetch_records():
+        return [
+            ProjectRegistryRecord(
+                project_key=key,
+                ten_thuong_mai=name,
+                ten_phap_ly=None,
+                vi_tri=None,
+                hotline=None,
+                location=None,
+                geo_center_lat=None,
+                geo_center_lng=None,
+                is_hot=key == "camellia",
+                status="active",
+            )
+            for key, name in _ACTIVE_CATALOGUE
+        ]
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _fetch_records,
+    )
+
+
 def _project_context(project_key="camellia") -> ProjectContext:
     return ProjectContext(project_key, "normal", _ACTIVE_CATALOGUE)
 
@@ -242,6 +275,7 @@ def test_asgi_sse_done_replaces_partial_after_midstream_death(monkeypatch):
     async def _fake_resolve(project_key, *, active_projects=None):
         return project_key or "camellia"
 
+    _stub_registry_snapshot(monkeypatch)
     monkeypatch.setattr("api.application.pipelines.conv_workflow.RagQueryPipelineConv", FailingPipe)
     monkeypatch.setattr("api.application.services.project_scope.resolve_project_key", _fake_resolve)
     client = TestClient(create_app())
@@ -299,6 +333,7 @@ def test_asgi_sse_normal_completion_done_answer_equals_streamed_text(monkeypatch
     async def _fake_resolve(project_key, *, active_projects=None):
         return project_key or "camellia"
 
+    _stub_registry_snapshot(monkeypatch)
     monkeypatch.setattr("api.application.pipelines.conv_workflow.RagQueryPipelineConv", OkPipe)
     monkeypatch.setattr("api.application.services.project_scope.resolve_project_key", _fake_resolve)
     client = TestClient(create_app())

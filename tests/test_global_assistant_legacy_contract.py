@@ -95,6 +95,27 @@ async def _fake_resolve(project_key, *, active_projects=None):
     return project_key
 
 
+def _registry_records():
+    """Two active registry records — the DB snapshot /query resolves against."""
+    from api.application.ports.project_registry import ProjectRegistryRecord
+
+    return [
+        ProjectRegistryRecord(
+            project_key=row["project_key"],
+            ten_thuong_mai=row["display_name"],
+            ten_phap_ly=None,
+            vi_tri=None,
+            hotline=None,
+            location=None,
+            geo_center_lat=None,
+            geo_center_lng=None,
+            is_hot=row["is_hot"],
+            status="active",
+        )
+        for row in _CATALOGUE_2_ACTIVE
+    ]
+
+
 def _install_offline_seams(monkeypatch, *, quota_gate: Any = None):
     _FakePipeline.last_project_key = None
     _FakePipeline.calls = []
@@ -106,6 +127,16 @@ def _install_offline_seams(monkeypatch, *, quota_gate: Any = None):
     )
     monkeypatch.setattr(
         "api.application.services.project_scope.resolve_project_key", _fake_resolve
+    )
+    # /query reads the registry snapshot before scope resolution and refuses an
+    # empty catalogue (ProjectContext raises). Without this stub the suite only
+    # passes where a live project registry is reachable.
+    async def _fetch_records():
+        return _registry_records()
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _fetch_records,
     )
     monkeypatch.setattr(
         "api.application.pipelines.conv_workflow.RagQueryPipelineConv", _FakePipeline
