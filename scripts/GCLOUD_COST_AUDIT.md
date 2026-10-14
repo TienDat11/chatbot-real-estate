@@ -4,8 +4,8 @@
 
 **Nguồn đo** [ĐO]: Cloud Monitoring API, `run.googleapis.com/container/{cpu/allocation_time, memory/allocation_time, request_count, instance_count}`, cửa sổ 24h và 1h gần nhất, kết thúc `2026-10-14T05:50Z`. Đơn giá [SKU] như mục 1 (chưa đối chiếu hoá đơn).
 
-**Traffic hiện tại** [GCP, 2026-10-14]:
-- `ragre-api`: 100% → `00044-qbb` (`cpu-throttling=true`, minScale=1). Tag `messenger` → `00079-hib` (`cpu-throttling=false`, không có minScale). Tag `messenger-rc2` → `00066-jic` (`cpu-throttling=true`, không có minScale).
+**Traffic hiện tại** [GCP, 2026-10-14; tag re-read 2026-10-14 sau `gcloud run services describe`]:
+- `ragre-api`: 100% → `00044-qbb` (`cpu-throttling=true`, minScale=1). Tag `messenger` → **`00080-mub`** (`cpu-throttling=false`, không có minScale; đổi từ `00079-hib` sau lần deploy kế tiếp cùng ngày). Tag `messenger-rc2` → `00066-jic` (`cpu-throttling=true`, không có minScale).
 - `ragre-web`: 100% → `00013-gxv` (không phải `00014-vub` như bản cũ ghi). Tag `candidate-web` → `00009-pos`, `liberty-check` → `00014-vub`, `fixcheck` → `00013-gxv`.
 
 **Bảng theo revision** [ĐO 24h + SKU]. Mode: `instance-based` = throttling tắt; `request-based` = throttling bật (memory khi có min-instance tính theo đơn giá min-instance $0.0000035/GiB-s).
