@@ -1029,6 +1029,7 @@ def create_app() -> FastAPI:
     from api.interfaces.api.hello import router as hello_router  # noqa: PLC0415
     from api.interfaces.api.lead import router as lead_router  # noqa: PLC0415
     from api.interfaces.api.messenger_bot_routes import router as messenger_bot_router  # noqa: PLC0415
+    from api.interfaces.api.messenger_permission_probe_routes import router as messenger_permission_probe_router  # noqa: PLC0415
     from api.interfaces.api.notifications import router as notifications_router  # noqa: PLC0415
     from api.interfaces.api.projects import router as projects_router  # noqa: PLC0415
     from api.interfaces.api.sales import router as sales_router  # noqa: PLC0415
@@ -1049,6 +1050,7 @@ def create_app() -> FastAPI:
     app.include_router(assistant_router)
     app.include_router(zalo_bot_router)
     app.include_router(messenger_bot_router)
+    app.include_router(messenger_permission_probe_router)
 
     @app.get("/health")
     async def health() -> dict:

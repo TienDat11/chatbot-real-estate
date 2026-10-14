@@ -33,8 +33,13 @@ from api.application.services.messenger_bot_processor import (
 )
 from api.infrastructure.adapters.postgres_messenger_events import (
     MessengerEvent,
+    decode_messenger_cache,
     valid_messenger_cache,
 )
+from api.application.ports.messenger_bot import MessengerSendError
+from api.application.services.messenger_bot_rendering import to_messenger_plain
+from api.infrastructure.adapters.postgres_messenger_events import MessengerStorageError
+
 
 CHAT = "private-chat-not-for-logs"
 TOKEN = "test-provider-token-not-for-logs"
@@ -200,6 +205,12 @@ class FakeSender:
     async def send_quick_replies(self, psid, text, options):
         self.calls.append(("send_quick_replies", psid, text, options))
         return f"mid.qr.{len(self.calls)}"
+
+    async def send_image(self, psid, url):
+        """Record an image attachment send and return its provider message id."""
+        self.calls.append(("send_image", psid, url))
+        return f"mid.img.{len(self.calls)}"
+
 
 
 class FakeAdmission:
@@ -420,3 +431,212 @@ def test_record_selection_committed_before_core_run(rig):
     core_call = next(i for i, c in enumerate(log) if c[0] == "core.run")
     assert selection < core_call, "selection must be committed before the core request"
     assert log[core_call] == ("core.run",)
+
+
+def test_to_messenger_plain_table_three_columns_preserves_cells():
+    """3-column markdown table: separator row dropped, no pipes left, all cell text kept."""
+    table = (
+        "| dự án | giá | diện tích |\n"
+        "|---|---|---|\n"
+        "| Camellia | 3 tỷ | 100 m² |\n"
+        "| Soleil | 2 tỷ | 80 m² |"
+    )
+    out = to_messenger_plain(table)
+    assert "|" not in out
+    assert "dự án — giá — diện tích" in out
+    assert "Camellia — 3 tỷ — 100 m²" in out
+    assert "Soleil — 2 tỷ — 80 m²" in out
+
+
+def test_to_messenger_plain_strips_bold_heading_bullets():
+    """Bold, underlined bold, ATX headings and bullets are normalized."""
+    md = (
+        "**bold text** and __also bold__\n"
+        "# Heading One\n"
+        "## Subheading\n"
+        "- bullet one\n"
+        "- bullet two\n"
+        "* bullet star\n"
+        "+ bullet plus\n"
+        "1. first ordered\n"
+        "2. second ordered"
+    )
+    out = to_messenger_plain(md)
+    assert out == (
+        "bold text and also bold\n"
+        "Heading One\n"
+        "Subheading\n"
+        "• bullet one\n"
+        "• bullet two\n"
+        "• bullet star\n"
+        "• bullet plus\n"
+        "1. first ordered\n"
+        "2. second ordered"
+    )
+
+
+def test_to_messenger_plain_plain_vietnamese_unchanged():
+    """Plain Vietnamese prose without markdown is returned byte-identical."""
+    viet = "Xin chào! Dự án Camellia có giá từ 3 tỷ. Liên hệ ngay hôm nay để nhận ưu đãi."
+    assert to_messenger_plain(viet) == viet
+
+
+def test_delivery_sends_image_attachments_after_text(rig):
+    """Delivery sends the rendered text first, then each image, ids in order."""
+    cached = {
+        "reply_kind": "answer",
+        "text": "**Bold answer**",
+        "options": None,
+        "picker_keys": None,
+        "candidate_order": None,
+        "resolution_status": "resolved",
+        "project_key": None,
+        "images": [
+            "https://pub-90e3022fb09146c1a740a85f96ed5be7.r2.dev/img1.png",
+            "https://pub-90e3022fb09146c1a740a85f96ed5be7.r2.dev/img2.png",
+        ],
+    }
+    _reset_event(rig)
+    rig.store.events[1].assistant_outcome = cached
+    assert valid_messenger_cache(cached)
+    assert _run(rig) == "done"
+    assert rig.sender.calls == [
+        ("send_text", CHAT, "Bold answer"),
+        ("send_image", CHAT, "https://pub-90e3022fb09146c1a740a85f96ed5be7.r2.dev/img1.png"),
+        ("send_image", CHAT, "https://pub-90e3022fb09146c1a740a85f96ed5be7.r2.dev/img2.png"),
+    ]
+
+
+def test_delivery_swallows_image_send_error_and_completes(rig):
+    """A MessengerSendError on image send is swallowed; text delivery already succeeded."""
+    cached = {
+        "reply_kind": "answer",
+        "text": "Answer",
+        "options": None,
+        "picker_keys": None,
+        "candidate_order": None,
+        "resolution_status": "resolved",
+        "project_key": None,
+        "images": ["https://a.com/img.png"],
+    }
+    _reset_event(rig)
+    rig.store.events[1].assistant_outcome = cached
+
+    async def failing_send_image(psid, url):
+        raise MessengerSendError(code="INVALID_MEDIA", retryable=False)
+
+    rig.sender.send_image = failing_send_image
+    assert _run(rig) == "done"
+    assert rig.sender.calls == [("send_text", CHAT, "Answer")]
+    assert rig.store.events[1].status == "done"
+    assert rig.store.events[1].outbound_message_ids == ["mid.text.1"]
+
+
+def test_decode_messenger_cache_accepts_legacy_and_new_image_key():
+    """decode_messenger_cache accepts the legacy 7-key shape and the new 8-key shape."""
+    legacy = {
+        "reply_kind": "answer",
+        "text": "plain",
+        "options": None,
+        "picker_keys": None,
+        "candidate_order": None,
+        "resolution_status": "resolved",
+        "project_key": None,
+    }
+    new = dict(legacy, images=["https://a.com/1.png"])
+    assert decode_messenger_cache(legacy) is not None
+    assert "images" not in decode_messenger_cache(legacy)
+    decoded = decode_messenger_cache(new)
+    assert decoded["images"] == ["https://a.com/1.png"]
+
+    too_many = dict(legacy, images=["https://a.com/1.png"] * 4)
+    with pytest.raises(MessengerStorageError, match="INVALID_CACHE"):
+        decode_messenger_cache(too_many)
+
+    empty_url = dict(legacy, images=["", "https://b.com/2.png"])
+    with pytest.raises(MessengerStorageError, match="INVALID_CACHE"):
+        decode_messenger_cache(empty_url)
+
+    non_string = dict(legacy, images=[123])
+    with pytest.raises(MessengerStorageError, match="INVALID_CACHE"):
+        decode_messenger_cache(non_string)
+
+    too_long = dict(legacy, images=["x" * 2001])
+    with pytest.raises(MessengerStorageError, match="INVALID_CACHE"):
+        decode_messenger_cache(too_long)
+
+
+def test_delivery_falls_back_to_raw_text_when_plain_render_is_empty(rig, monkeypatch):
+    """If plain rendering yields empty, the raw text is sent instead of nothing."""
+    import api.application.services.messenger_bot_processor as processor_mod
+
+    cached = {
+        "reply_kind": "answer",
+        "text": "DROPPED",
+        "options": None,
+        "picker_keys": None,
+        "candidate_order": None,
+        "resolution_status": "resolved",
+        "project_key": None,
+        "images": [],
+    }
+    _reset_event(rig)
+    rig.store.events[1].assistant_outcome = cached
+
+    orig = processor_mod.to_messenger_plain
+    monkeypatch.setattr(processor_mod, "to_messenger_plain", lambda t: "" if t == "DROPPED" else orig(t))
+
+    assert _run(rig) == "done"
+    assert rig.sender.calls == [("send_text", CHAT, "DROPPED")]
+
+
+def _media_rig(rig, urls):
+    """Rebuild the processor with a media loader returning `urls` per project."""
+    loader = AsyncMock(return_value=urls)
+    rig.processor = MessengerBotProcessor(
+        store=rig.store, core=rig.core, sender=rig.sender,
+        identity_secret=SECRET, admit=rig.admission, settings=rig.settings,
+        catalogue_loader=rig.catalogue, media_loader=loader)
+    return loader
+
+
+def test_picker_greeting_has_no_images_and_no_send_image(rig):
+    """A new-conversation picker must not attach any project's media."""
+    loader = _media_rig(
+        rig, ["https://media.dev/floorplan.png", "https://media.dev/amenity.png"])
+    _reset_event(rig, kind="get_started", text="")
+    assert _run(rig) == "done"
+    assert "images" not in rig.store.events[1].assistant_outcome
+    assert loader.await_count == 0
+    assert all(c[0] != "send_image" for c in rig.sender.calls)
+
+
+def test_refreshed_picker_after_stale_selection_has_no_images(rig):
+    """A stale select_project key refreshes the picker without media attached."""
+    loader = _media_rig(rig, ["https://media.dev/floorplan.png"])
+    _reset_event(rig, kind="select_project", selected_project_key="ghost")
+    assert _run(rig) == "done"
+    outcome = rig.store.events[1].assistant_outcome
+    assert outcome["reply_kind"] == "quick_replies"
+    assert "images" not in outcome
+    assert loader.await_count == 0
+    assert all(c[0] != "send_image" for c in rig.sender.calls)
+
+
+def test_intro_resolved_project_sends_three_images(rig):
+    """An intro for a resolved project still attaches its three media urls."""
+    loader = _media_rig(rig, [
+        "https://media.dev/1.png", "https://media.dev/2.png",
+        "https://media.dev/3.png", "https://media.dev/4.png"])
+    _reset_event(rig, kind="select_project", selected_project_key="camellia")
+    assert _run(rig) == "done"
+    outcome = rig.store.events[1].assistant_outcome
+    assert outcome["project_key"] == "camellia"
+    assert outcome["images"] == [
+        "https://media.dev/1.png", "https://media.dev/2.png",
+        "https://media.dev/3.png"]
+    assert [c for c in rig.sender.calls if c[0] == "send_image"] == [
+        ("send_image", CHAT, "https://media.dev/1.png"),
+        ("send_image", CHAT, "https://media.dev/2.png"),
+        ("send_image", CHAT, "https://media.dev/3.png")]
+

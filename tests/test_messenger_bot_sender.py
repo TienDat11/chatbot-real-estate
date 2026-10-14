@@ -123,6 +123,9 @@ def test_invalid_quick_replies_never_reach_transport(options):
         (400, {"code": 2022, "fbtrace_id": "abc"}, "PROVIDER_REJECTED", False),
         (400, {"code": 10, "error_subcode": 2534022, "fbtrace_id": "abc"}, "PROVIDER_REJECTED", False),
         (400, {"code": 10, "error_subcode": 2018278, "fbtrace_id": "abc"}, "PROVIDER_REJECTED", False),
+        # Observed live: Meta's temporary send restriction. Retryable, so the
+        # outbox resends once the window lifts instead of dropping the message.
+        (400, {"code": 10, "error_subcode": 1893063, "fbtrace_id": "abc"}, "SEND_UNAVAILABLE", True),
         (400, {"code": 200, "fbtrace_id": "abc"}, "PROVIDER_REJECTED", False),
         (401, None, "PROVIDER_AUTH_REJECTED", False),
         (403, {"code": 10, "fbtrace_id": "abc"}, "PROVIDER_AUTH_REJECTED", False),

@@ -95,6 +95,27 @@ class HttpxMessengerBotSender:
             }
         )
 
+
+    async def send_image(self, psid: str, url: str) -> str:
+        """Return the confirmed message id, otherwise raise a credential-free error.
+
+        Provider acceptance followed by a crash before local id persistence
+        can duplicate delivery on retry. This adapter never retries.
+        """
+        self._check_recipient(psid)
+        self._check_url(url)
+        return await self._post(
+            {
+                "recipient": {"id": psid},
+                "messaging_type": "RESPONSE",
+                "message": {
+                    "attachment": {
+                        "type": "image",
+                        "payload": {"url": url, "is_reusable": True},
+                    }
+                },
+            }
+        )
     def _url(self) -> str:
         query = [("access_token", self._token)]
         if self._proof_enabled:
@@ -146,6 +167,17 @@ class HttpxMessengerBotSender:
             except UnicodeError:
                 raise MessengerSendError(code="INVALID_TEXT", retryable=False)
 
+
+    @staticmethod
+    def _check_url(url: str) -> None:
+        if not isinstance(url, str) or not url or not url.startswith(("http://", "https://")):
+            raise MessengerSendError(code="INVALID_MEDIA", retryable=False)
+        if len(url) > 2000:
+            raise MessengerSendError(code="INVALID_MEDIA", retryable=False)
+        try:
+            url.encode("utf-8")
+        except UnicodeError:
+            raise MessengerSendError(code="INVALID_MEDIA", retryable=False)
     async def _post(self, body: dict) -> str:
         # Transport failure leaves delivery unknown, so it stays retryable;
         # every mapped provider verdict below overrides this default.
@@ -209,6 +241,12 @@ class HttpxMessengerBotSender:
                 # Checked before the code sets because 100 alone is a generic
                 # invalid-parameter code that must stay PROVIDER_REJECTED.
                 code, retryable = "INVALID_RECIPIENT", False
+            elif error_code == 10 and error_subcode == 1893063:
+                # "Temporarily restricted from sending messages": a rate limit,
+                # not a permission verdict, so it lifts on its own. Checked
+                # before the code sets because 10 is otherwise permanent and
+                # marking this dead would drop a message the Page could resend.
+                code, retryable = "SEND_UNAVAILABLE", True
             elif isinstance(error_code, int) and error_code in _RETRYABLE_GRAPH_CODES:
                 code, retryable = "SEND_UNAVAILABLE", True
             elif error_code == 190:

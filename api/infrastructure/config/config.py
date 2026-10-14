@@ -708,6 +708,14 @@ class Settings(BaseSettings):
     messenger_page_id: str = ""
     messenger_graph_api_version: str = "v26.0"
     messenger_api_base_url: str = "https://graph.facebook.com"
+    # Sole recipient the permission probe may send a real message to. Empty
+    # disables message-sending probes entirely: the endpoint must never choose
+    # a recipient, because a POST to /{page}/messages delivers to a real person.
+    messenger_probe_psid: str = ""
+    # User token used only by the probes that read user-scoped edges. The Page
+    # token's /me resolves to the Page, so /me/accounts and /me/businesses
+    # answer (#100) nonexisting field without this. Never sent to a client.
+    messenger_probe_user_token: SkipValidation[str] = Field(default="", repr=False)
     # Hard cap (bytes) on an inbound webhook body declared via Content-Length
     # AND on the body actually read. Prevents unbounded request-body DoS.
     messenger_max_body_bytes: int = Field(default=65536, gt=0)

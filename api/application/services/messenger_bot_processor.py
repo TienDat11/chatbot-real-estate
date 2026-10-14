@@ -11,6 +11,7 @@ from api.application.ports.messenger_bot import MessengerAdmissionDecision, Mess
 from api.application.services.global_assistant_service import GlobalAssistantInput, GlobalAssistantService
 from api.application.services.messenger_bot_identity import global_session_id, opaque_identity
 from api.infrastructure.adapters.postgres_messenger_events import MessengerEvent, valid_messenger_cache
+from api.application.services.messenger_bot_rendering import to_messenger_plain
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,10 @@ class MessengerBotProcessor:
     def __init__(self, *, store: Any, core: GlobalAssistantService,
                  sender: MessengerBotSender, identity_secret: str, settings: Any,
                  admit: Any = None,
-                 catalogue_loader: Callable[[], Awaitable[list[tuple[str, str]]]]) -> None:
+                 catalogue_loader: Callable[[], Awaitable[list[tuple[str, str]]]],
+                 media_loader: Callable[[str], Awaitable[list[str]]] | None = None) -> None:
         self._store, self._core, self._sender = store, core, sender
+        self._media_loader = media_loader
         self._identity_secret, self._admit, self._settings = identity_secret, admit, settings
         self._catalogue_loader = catalogue_loader
         self._timeout = settings.messenger_core_timeout_seconds
@@ -203,11 +206,14 @@ class MessengerBotProcessor:
         entries = [(key, name) for key, name in full_catalogue if key in wanted] if wanted else list(full_catalogue)
         if not entries:
             entries = list(full_catalogue)
-        return {"reply_kind": "quick_replies", "text": _GREETING.format(n=len(full_catalogue)),
-                "options": [[name[:_TITLE_CAP], f"{_SELECT_PREFIX}{key}"] for key, name in entries],
-                "picker_keys": None,
-                "candidate_order": list(candidate_keys) if candidate_keys else None,
-                "resolution_status": "unresolved", "project_key": None}
+        reply: dict = {"reply_kind": "quick_replies", "text": _GREETING.format(n=len(full_catalogue)),
+                       "options": [[name[:_TITLE_CAP], f"{_SELECT_PREFIX}{key}"] for key, name in entries],
+                       "picker_keys": None,
+                       "candidate_order": list(candidate_keys) if candidate_keys else None,
+                       "resolution_status": "unresolved", "project_key": None}
+        # Media must not precede the customer's choice: the picker's project_key
+        # is None, so attaching one project's floor plans would advertise it.
+        return reply
 
     async def _run_intro(self, event: MessengerEvent, key: str) -> dict:
         """Scoped intro for a confirmed project; never resumes a pending intent."""
@@ -225,11 +231,19 @@ class MessengerBotProcessor:
         outcome = await self._execute(self._core.run, request)
         if outcome is None:
             raise _CoreUncertain
-        return {"reply_kind": "quick_replies", "text": outcome.answer,
-                "options": [[_CHANGE_PROJECT_TITLE, _MENU_PAYLOAD]],
-                "picker_keys": None, "candidate_order": None,
-                "resolution_status": outcome.resolution_status,
-                "project_key": outcome.project_key if outcome.project_key is not None else key}
+        reply: dict = {"reply_kind": "quick_replies", "text": outcome.answer,
+                       "options": [[_CHANGE_PROJECT_TITLE, _MENU_PAYLOAD]],
+                       "picker_keys": None, "candidate_order": None,
+                       "resolution_status": outcome.resolution_status,
+                       "project_key": outcome.project_key if outcome.project_key is not None else key}
+        if self._media_loader is not None and reply["project_key"]:
+            try:
+                urls = await self._media_loader(reply["project_key"])
+            except Exception:
+                urls = []
+            if urls:
+                reply["images"] = urls[:3]
+        return reply
 
     async def _resolve_selection(self, event: MessengerEvent, key: str | None) -> dict:
         """Intro for an active project, otherwise a refreshed picker without RAG."""
@@ -272,10 +286,19 @@ class MessengerBotProcessor:
         if outcome is None:
             raise _CoreUncertain
         if outcome.resolution_status in ("resolved", "replayed"):
-            return {"reply_kind": "quick_replies", "text": outcome.answer,
-                    "options": [[_CHANGE_PROJECT_TITLE, _MENU_PAYLOAD]],
-                    "picker_keys": None, "candidate_order": None,
-                    "resolution_status": outcome.resolution_status, "project_key": outcome.project_key}
+            reply: dict = {"reply_kind": "quick_replies", "text": outcome.answer,
+                           "options": [[_CHANGE_PROJECT_TITLE, _MENU_PAYLOAD]],
+                           "picker_keys": None, "candidate_order": None,
+                           "resolution_status": outcome.resolution_status,
+                           "project_key": outcome.project_key}
+            if self._media_loader is not None and reply["project_key"]:
+                try:
+                    urls = await self._media_loader(reply["project_key"])
+                except Exception:
+                    urls = []
+                if urls:
+                    reply["images"] = urls[:3]
+            return reply
         return await self._build_picker(
             catalogue, candidate_keys=list(outcome.candidates) if outcome.candidates else None)
 
@@ -293,20 +316,44 @@ class MessengerBotProcessor:
         return await self._dispatch_message(event)
 
     async def _deliver(self, event: MessengerEvent, cached: dict) -> list[str]:
-        """Send the cached envelope in order; overflow chunks follow the stored first chunk."""
+        """Send the cached envelope in order; render text to plain at delivery
+        time so the stored envelope stays raw, then attach best-effort images.
+        """
         kind = cached["reply_kind"]
+
+        def _render(text: str) -> str:
+            rendered = to_messenger_plain(text)
+            return rendered if rendered.strip() else text
+
         if kind in ("answer", "brake"):
-            return [await self._sender.send_text(event.psid, cached["text"])]
-        if kind == "quick_replies":
-            return [await self._sender.send_quick_replies(
-                event.psid, cached["text"], [(title, payload) for title, payload in cached["options"]])]
-        catalogue = await self._catalogue_loader()
-        names = {key: name for key, name in catalogue}
-        ordered = [(key, names.get(key, key)) for key in cached["picker_keys"] or []]
-        rest = self._numbered_chunks(ordered)[1:] if ordered else []
-        message_ids = [await self._sender.send_text(event.psid, cached["text"])]
-        for chunk in rest:
-            message_ids.append(await self._sender.send_text(event.psid, chunk))
+            message_ids = [await self._sender.send_text(event.psid, _render(cached["text"]))]
+        elif kind == "quick_replies":
+            message_ids = [await self._sender.send_quick_replies(
+                event.psid, _render(cached["text"]),
+                [(title, payload) for title, payload in cached["options"]])]
+        else:
+            catalogue = await self._catalogue_loader()
+            names = {key: name for key, name in catalogue}
+            ordered = [(key, names.get(key, key)) for key in cached["picker_keys"] or []]
+            rest = self._numbered_chunks(ordered)[1:] if ordered else []
+            message_ids = [await self._sender.send_text(event.psid, _render(cached["text"]))]
+            for chunk in rest:
+                message_ids.append(await self._sender.send_text(event.psid, _render(chunk)))
+
+        # Text went out already; a failing image send must not undo it, and
+        # raising here would resend the text on retry. Log instead, so a
+        # silently missing image (rate limit, dead URL) stays diagnosable.
+        images = cached.get("images")
+        if images:
+            for url in images:
+                try:
+                    message_ids.append(await self._sender.send_image(event.psid, url))
+                except MessengerSendError as exc:
+                    logger.warning(
+                        "messenger image send failed: code=%s retryable=%s",
+                        exc.code,
+                        exc.retryable,
+                    )
         return message_ids
 
     async def process(self, event_id: int) -> str:

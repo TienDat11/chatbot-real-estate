@@ -29,6 +29,7 @@ class MessengerSendError(RuntimeError):
         self.code = code if code in {
             "INVALID_TOKEN", "INVALID_RECIPIENT", "INVALID_TEXT",
             "PROVIDER_AUTH_REJECTED", "PROVIDER_REJECTED", "SEND_UNAVAILABLE",
+            "INVALID_MEDIA",
         } else "SEND_UNAVAILABLE"
         self.retryable = retryable if self.code == code else True
         super().__init__("Messenger Bot delivery failed")
@@ -41,4 +42,8 @@ class MessengerBotSender(Protocol):
 
     async def send_quick_replies(self, psid: str, text: str, options: list[tuple[str, str]]) -> str:
         """Send text with tappable quick replies; each option is (title, payload)."""
+        ...
+
+    async def send_image(self, psid: str, url: str) -> str:
+        """Send an image attachment and return its provider message id."""
         ...

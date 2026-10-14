@@ -17,6 +17,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger("api.messenger_bot_runtime")
 
 
+async def _messenger_media_loader(project_key: str) -> list[str]:
+    """Resolve up to 3 image URLs for a project: semantic search first, then recent gallery."""
+    from api.application.services.image_search import search_project_images
+    from api.application.services.media_config import fetch_recent_project_images
+
+    rows = await search_project_images(project_key=project_key)
+    if not rows:
+        rows = await fetch_recent_project_images(project_key=project_key, limit=3)
+    return [
+        url
+        for url in (row.get("url_cdn") for row in rows)
+        if isinstance(url, str) and url
+    ][:3]
+
+
+
 def build_messenger_processor(
     *, settings: Settings, store: PostgresMessengerEventStore | None = None
 ) -> MessengerBotProcessor:
@@ -52,6 +68,7 @@ def build_messenger_processor(
         admit=PostgresMessengerAdmission(settings=settings).admit,
         settings=settings,
         catalogue_loader=core._catalogue_loader,
+        media_loader=_messenger_media_loader,
     )
 
 

@@ -81,9 +81,10 @@ def decode_messenger_cache(value) -> dict:
     """Validate the shared cache/replay contract; reject anything off-contract."""
     try:
         value = json.loads(value) if isinstance(value, str) else value
+        _KEYS = {"reply_kind", "text", "options", "picker_keys",
+                 "candidate_order", "resolution_status", "project_key"}
         if (not isinstance(value, dict)
-                or set(value) != {"reply_kind", "text", "options", "picker_keys",
-                                  "candidate_order", "resolution_status", "project_key"}):
+                or set(value) not in (_KEYS, _KEYS | {"images"})):
             raise ValueError
         if value["reply_kind"] not in {"answer", "quick_replies", "numbered_picker", "brake"}:
             raise ValueError
@@ -91,6 +92,18 @@ def decode_messenger_cache(value) -> dict:
                 or len(value["text"]) > 2000):
             raise ValueError
         value["text"].encode("utf-8")
+        images = value.get("images")
+        if images is not None:
+            if (not isinstance(images, list) or len(images) > 3
+                    or any(not isinstance(u, str) or not u.strip() for u in images)):
+                raise ValueError
+            for u in images:
+                if len(u) > 2000:
+                    raise ValueError
+                try:
+                    u.encode("utf-8")
+                except UnicodeError:
+                    raise ValueError
         options = value["options"]
         if value["reply_kind"] == "quick_replies":
             if (not isinstance(options, list) or not options or len(options) > 13
