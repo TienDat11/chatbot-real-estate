@@ -46,12 +46,21 @@ $Secrets = @(
     'MESSENGER_IDENTITY_SECRET'
 ) | ForEach-Object { "$_=$_`:latest" }
 
+# Scaling/CPU flags are pinned on purpose. Cloud Run inherits any flag
+# omitted from `deploy` from the currently serving revision, so every
+# scaling flag must be stated explicitly here — an omitted flag silently
+# re-applies the old revision's value.
+# `--no-cpu-throttling` is required by the Messenger channel: the webhook
+# ACKs and replies from a background task, so request-scoped CPU would
+# freeze the in-flight reply.
+# `--min-instances=0` + `--max-instances=2` cap idle cost and blast radius.
 $DeployArgs = @(
     'run', 'deploy', $ServiceName,
     '--source', '.',
     '--region', $Region,
     '--allow-unauthenticated',
-    '--min-instances=1',
+    '--min-instances=0',
+    '--max-instances=2',
     '--cpu-boost',
     '--no-cpu-throttling',
     '--timeout=360',

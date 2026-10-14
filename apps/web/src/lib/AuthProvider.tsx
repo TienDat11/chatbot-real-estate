@@ -15,7 +15,7 @@ import {
   signUpWithEmail,
 } from "@/infrastructure/firebase/firebaseAuthenticationService";
 
-interface AuthContextValue {
+export interface AuthContextValue {
   user: AuthenticatedUser | null;
   loading: boolean;
   signUp: (email: string, password: string) => Promise<void>;
