@@ -623,20 +623,58 @@ def test_refreshed_picker_after_stale_selection_has_no_images(rig):
     assert all(c[0] != "send_image" for c in rig.sender.calls)
 
 
-def test_intro_resolved_project_sends_three_images(rig):
-    """An intro for a resolved project still attaches its three media urls."""
+def test_intro_resolved_project_caps_images_at_two(rig):
+    """Messenger caps an intro's media at two urls even when the loader returns more."""
     loader = _media_rig(rig, [
         "https://media.dev/1.png", "https://media.dev/2.png",
-        "https://media.dev/3.png", "https://media.dev/4.png"])
+        "https://media.dev/3.png", "https://media.dev/4.png", "https://media.dev/5.png"])
     _reset_event(rig, kind="select_project", selected_project_key="camellia")
     assert _run(rig) == "done"
     outcome = rig.store.events[1].assistant_outcome
     assert outcome["project_key"] == "camellia"
     assert outcome["images"] == [
-        "https://media.dev/1.png", "https://media.dev/2.png",
-        "https://media.dev/3.png"]
+        "https://media.dev/1.png", "https://media.dev/2.png"]
     assert [c for c in rig.sender.calls if c[0] == "send_image"] == [
         ("send_image", CHAT, "https://media.dev/1.png"),
-        ("send_image", CHAT, "https://media.dev/2.png"),
-        ("send_image", CHAT, "https://media.dev/3.png")]
+        ("send_image", CHAT, "https://media.dev/2.png")]
+
+
+def test_intro_single_image_is_sent_without_padding(rig):
+    """A single loader url yields exactly one image; the cap never pads the set."""
+    _media_rig(rig, ["https://media.dev/only.png"])
+    _reset_event(rig, kind="select_project", selected_project_key="camellia")
+    assert _run(rig) == "done"
+    assert rig.store.events[1].assistant_outcome["images"] == ["https://media.dev/only.png"]
+    assert [c for c in rig.sender.calls if c[0] == "send_image"] == [
+        ("send_image", CHAT, "https://media.dev/only.png")]
+
+
+def test_intro_without_images_sends_no_image(rig):
+    """An empty loader result leaves the reply without images and sends none."""
+    _media_rig(rig, [])
+    _reset_event(rig, kind="select_project", selected_project_key="camellia")
+    assert _run(rig) == "done"
+    assert "images" not in rig.store.events[1].assistant_outcome
+    assert all(c[0] != "send_image" for c in rig.sender.calls)
+
+
+def test_delivery_caps_images_at_two_for_legacy_cached_envelope(rig):
+    """A cached envelope holding three urls (pre-cap rows) still sends only two images."""
+    cached = {
+        "reply_kind": "answer",
+        "text": "Answer",
+        "options": None,
+        "picker_keys": None,
+        "candidate_order": None,
+        "resolution_status": "resolved",
+        "project_key": None,
+        "images": [
+            "https://media.dev/1.png", "https://media.dev/2.png", "https://media.dev/3.png"],
+    }
+    _reset_event(rig)
+    rig.store.events[1].assistant_outcome = cached
+    assert _run(rig) == "done"
+    assert [c for c in rig.sender.calls if c[0] == "send_image"] == [
+        ("send_image", CHAT, "https://media.dev/1.png"),
+        ("send_image", CHAT, "https://media.dev/2.png")]
 

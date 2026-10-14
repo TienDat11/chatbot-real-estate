@@ -18,18 +18,20 @@ logger = logging.getLogger("api.messenger_bot_runtime")
 
 
 async def _messenger_media_loader(project_key: str) -> list[str]:
-    """Resolve up to 3 image URLs for a project: semantic search first, then recent gallery."""
+    """Resolve up to MESSENGER_MAX_IMAGES URLs: semantic search first, then recent gallery."""
     from api.application.services.image_search import search_project_images
     from api.application.services.media_config import fetch_recent_project_images
+    from api.application.services.messenger_bot_processor import MESSENGER_MAX_IMAGES
 
     rows = await search_project_images(project_key=project_key)
     if not rows:
-        rows = await fetch_recent_project_images(project_key=project_key, limit=3)
+        rows = await fetch_recent_project_images(
+            project_key=project_key, limit=MESSENGER_MAX_IMAGES)
     return [
         url
         for url in (row.get("url_cdn") for row in rows)
         if isinstance(url, str) and url
-    ][:3]
+    ][:MESSENGER_MAX_IMAGES]
 
 
 

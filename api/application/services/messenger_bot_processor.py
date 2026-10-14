@@ -27,6 +27,10 @@ _TEXT_CAP = 2000
 _INTRO_QUERY = "Giới thiệu dự án này"
 _NUMBER_HINT = "Vui lòng trả lời bằng số thứ tự hoặc tên dự án."
 
+# Messenger rejects a reply that carries too many image attachments, so this
+# channel caps its image set; the web leg is not bound by this limit.
+MESSENGER_MAX_IMAGES = 2
+
 
 class _LeaseLost(Exception):
     pass
@@ -242,7 +246,7 @@ class MessengerBotProcessor:
             except Exception:
                 urls = []
             if urls:
-                reply["images"] = urls[:3]
+                reply["images"] = urls[:MESSENGER_MAX_IMAGES]
         return reply
 
     async def _resolve_selection(self, event: MessengerEvent, key: str | None) -> dict:
@@ -297,7 +301,7 @@ class MessengerBotProcessor:
                 except Exception:
                     urls = []
                 if urls:
-                    reply["images"] = urls[:3]
+                    reply["images"] = urls[:MESSENGER_MAX_IMAGES]
             return reply
         return await self._build_picker(
             catalogue, candidate_keys=list(outcome.candidates) if outcome.candidates else None)
@@ -345,7 +349,7 @@ class MessengerBotProcessor:
         # silently missing image (rate limit, dead URL) stays diagnosable.
         images = cached.get("images")
         if images:
-            for url in images:
+            for url in images[:MESSENGER_MAX_IMAGES]:
                 try:
                     message_ids.append(await self._sender.send_image(event.psid, url))
                 except MessengerSendError as exc:
