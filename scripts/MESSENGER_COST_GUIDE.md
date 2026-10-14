@@ -1,5 +1,22 @@
 # Hướng dẫn giảm chi phí Cloud Run — nhánh Messenger (`ragre-api`)
 
+> **CẬP NHẬT 2026-10-14 — ĐO LẠI, VÀ ĐÍNH CHÍNH LẦN ĐO ĐẦU TRONG NGÀY.** Các con số `00063-vux` ở dưới là LỊCH SỬ, không còn đúng.
+>
+> **ĐÍNH CHÍNH:** bản sửa đầu tiên của mục này (cùng ngày, 05:50Z) ghi `00079-hib` ≈ **$35/tháng** và suy ra "instance không scale về 0". **SAI.** Cửa sổ "1 giờ gần nhất" đó trùng đúng lúc phiên chẩn đoán đang bắn liên tục vào URL tag `messenger` (verify webhook + 6 câu hỏi giá/lãi suất). Với `cpu-throttling=false`, mỗi request làm instance nóng và CPU bị tính suốt thời gian instance tồn tại — nên số đo phản ánh tải của người chẩn đoán. Số đúng:
+>
+> - `container/instance_count` bucket 60s: `00079-hib` = **1 instance từ 05:28 đến 05:58Z, rồi 0 từ 05:59Z**; `cpu/allocation_time` lúc 06:06Z = **0 vCPU-s**. Revision **không có `minScale`** ⇒ **tự scale về 0 khi rảnh**. Không có vòng lặp nền nào giữ nó sống.
+> - Duty cycle 24h thật: `00079-hib` = **4,093 vCPU-s + 4,012 GiB-s trên 1.5h active** ⇒ ≈ **$2.94/tháng nếu chạy 24/7**, và **≈ $0.10/ngày** theo tải thật. Không phải $35.
+> - `00044-qbb` (min=1, throttled): 86,329 GiB-s/24h × $0.0000035 ⇒ **≈ $9.06/tháng** — khoản lớn nhất, **toàn bộ là memory min-instance** cho 20 request/ngày. CPU idle đo được = 2 vCPU-s/24h ≈ $0.
+> - `00066-jic` (tag `messenger-rc2`, throttled): 34 vCPU-s/24h ⇒ ≈ $0.04/tháng. Gỡ tag không tiết kiệm đáng kể.
+> - `00071`–`00078`: ≈ $8/24h **một lần** trong lúc deploy, hiện **0 instance**. Không lặp lại.
+> - **Steady state Cloud Run ≈ $12/tháng**, không phải $45. Tổng (Cloud Run + AR $8.2 + Secret $2.0 + Storage $0.05) ≈ **$22/tháng**.
+>
+> **Ràng buộc always-CPU vẫn đúng**: webhook Messenger trả 200 rồi xử lý nền, nên không đề xuất bật throttling cho `00079`. Nhưng nó **không** tốn $35/tháng — chỉ tốn khi có request.
+>
+> **Khoản tiết kiệm lớn nhất còn lại là `minScale=1` của `00044-qbb` (≈ $9/tháng).** Đổi sang `minScale=0` đánh đổi cold start 30–40s cho request đầu sau khi rảnh. **Cần duyệt**, và **không** chạy `gcloud run services update` thiếu `--no-traffic` (sẽ đẩy revision mới nhất lên 100% traffic).
+
+---
+
 > Đây là **chỉ dẫn**, chưa áp dụng vào bất kỳ đâu. Ngày kiểm: 2026-10-12. Project `sale-chat-ai`, region `asia-southeast1`.
 
 ## Nhãn nguồn dùng trong file
