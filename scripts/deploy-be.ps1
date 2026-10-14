@@ -15,6 +15,10 @@
 
 param(
     [switch]$DryRun,
+    # Selects --no-cpu-throttling: required by the Messenger channel, whose
+    # webhook ACKs and then replies from a background task. Costs idle CPU
+    # 24/7, so it is never the default.
+    [switch]$Messenger,
     [ValidateSet('staging', 'prod')]
     [string]$EnvName = 'prod',
     [string]$Region = 'asia-southeast1'
@@ -46,23 +50,30 @@ $Secrets = @(
     'MESSENGER_IDENTITY_SECRET'
 ) | ForEach-Object { "$_=$_`:latest" }
 
-# Scaling/CPU flags are pinned on purpose. Cloud Run inherits any flag
-# omitted from `deploy` from the currently serving revision, so every
-# scaling flag must be stated explicitly here — an omitted flag silently
-# re-applies the old revision's value.
-# `--no-cpu-throttling` is required by the Messenger channel: the webhook
-# ACKs and replies from a background task, so request-scoped CPU would
-# freeze the in-flight reply.
-# `--min-instances=0` + `--max-instances=2` cap idle cost and blast radius.
+# Scaling and CPU billing are pinned on purpose. Cloud Run inherits any flag
+# omitted from `deploy` from the currently serving revision, so a flag that
+# exists only in an old revision silently re-applies on every deploy.
+# `--cpu-throttling` bills CPU only while a request is in flight and is the
+# default for the web service. The Messenger channel needs the opposite: the
+# webhook ACKs and then replies from a background task, so request-scoped CPU
+# freezes the in-flight reply. Pass -Messenger to select it; that path bills
+# every idle instance, which is why it is opt-in per deploy and never the
+# default for the revision serving public web traffic.
+# `--max-instances=2` matches the live service template, so a spam burst cannot
+# scale to the previous ceiling of 20.
+# `--min-instances=0` scales to zero between requests, so an idle window costs
+# nothing. The trade: the first request after a scale-to-zero pays LightRAG's
+# ~30-40s cold init, and a Messenger webhook landing in that window may exceed
+# Meta's delivery timeout.
 $DeployArgs = @(
     'run', 'deploy', $ServiceName,
     '--source', '.',
     '--region', $Region,
     '--allow-unauthenticated',
+$(if ($Messenger) { '--no-cpu-throttling' } else { '--cpu-throttling' }),
     '--min-instances=0',
     '--max-instances=2',
     '--cpu-boost',
-    '--no-cpu-throttling',
     '--timeout=360',
     '--startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080',
     "--set-secrets=$($Secrets -join ',')",

@@ -213,17 +213,28 @@ jobs:
       # inherits env + secretKeyRefs from the currently serving one, which is
       # exactly the behaviour we want.
       #
-      # The flags below match the live ragre-api revision (verified 2026-09-14).
+      # Scaling and CPU billing are pinned explicitly. `gcloud run deploy`
+      # inherits any flag it is not given from the currently serving revision, so
+      # a setting that lives only in an old revision silently re-applies forever.
+      # Pinning --cpu-throttling bills CPU only while a request is in flight;
+      # --no-cpu-throttling billed every idle instance 24/7 and let 36
+      # always-CPU revisions accumulate (2026-10-12 audit).
+      # --max-instances=2 matches the live service template; 20 allowed a spam
+      # burst to multiply the instance count tenfold.
+      # --min-instances=0 scales to zero between requests, so an idle window
+      # costs nothing; the first request after that pays LightRAG's ~30-40s cold
+      # init. Background asyncio tasks (lead mirror reconciliation, chat history
+      # retention) only make progress while a request is in flight.
       - name: Deploy to Cloud Run
         run: >-
           gcloud run deploy ragre-api
           --source .
           --region asia-southeast1
           --quiet
-          --min-instances=1
-          --max-instances=20
+          --cpu-throttling
+          --min-instances=0
+          --max-instances=2
           --cpu-boost
-          --no-cpu-throttling
           --timeout=360
           --startup-probe=periodSeconds=10,timeoutSeconds=5,failureThreshold=8,httpGet.path=/ready,httpGet.port=8080
 
@@ -281,18 +292,26 @@ jobs:
           done
           exit "$missing"
 
-      # Substitutions use gcloud's alternate delimiter (^D1^ … D2 …): the
-      # media-origins value is JSON and contains commas, which the default
-      # comma parser would split into a bogus extra entry
-      # ("Bad syntax for dict arg"). Single quotes keep the braces/quotes in the
-      # JSON away from bash.
+      # Substitutions use gcloud's alternate delimiter (^@^ separators). The
+      # media-origins value is JSON, and plain JSON loses its double quotes on
+      # the way into Cloud Build substitutions — the alternate delimiter does
+      # keep the commas, but a quote-stripped array is unparseable all the same
+      # (build 6363ea95 recorded [{origin:https://...}] that way, so the
+      # deployed FE dropped every R2 image).
+      # It is passed base64-encoded instead: base64 has no quotes, commas,
+      # whitespace or '@', so no hop can mangle it. Single quotes keep the
+      # braces/quotes in the other values away from bash; the base64 value is
+      # spliced in with double quotes.
       - name: Build FE image via Cloud Build
+        env:
+          FE_MEDIA_ORIGINS_JSON: ${{ vars.FE_MEDIA_ORIGINS_JSON }}
         run: |
+          MEDIA_ORIGINS_B64="$(printf '%s' "$FE_MEDIA_ORIGINS_JSON" | base64 -w0)"
           gcloud builds submit \
             --config deploy/cloudbuild-web.yaml \
             --region asia-southeast1 \
             --quiet \
-            --substitutions '^@^_FE_API_KEY=${{ vars.FE_FIREBASE_API_KEY }}@_FE_AUTH_DOMAIN=${{ vars.FE_FIREBASE_AUTH_DOMAIN }}@_FE_PROJECT_ID=${{ vars.FE_FIREBASE_PROJECT_ID }}@_FE_STORAGE_BUCKET=${{ vars.FE_FIREBASE_STORAGE_BUCKET }}@_FE_SENDER_ID=${{ vars.FE_FIREBASE_MESSAGING_SENDER_ID }}@_FE_APP_ID=${{ vars.FE_FIREBASE_APP_ID }}@_FE_VAPID_KEY=${{ vars.FE_FIREBASE_VAPID_KEY }}@_FE_MEDIA_ORIGINS_JSON=${{ vars.FE_MEDIA_ORIGINS_JSON }}@_FE_PROXY_TARGET=${{ vars.FE_API_PROXY_TARGET }}' \
+            --substitutions '^@^_FE_API_KEY=${{ vars.FE_FIREBASE_API_KEY }}@_FE_AUTH_DOMAIN=${{ vars.FE_FIREBASE_AUTH_DOMAIN }}@_FE_PROJECT_ID=${{ vars.FE_FIREBASE_PROJECT_ID }}@_FE_STORAGE_BUCKET=${{ vars.FE_FIREBASE_STORAGE_BUCKET }}@_FE_SENDER_ID=${{ vars.FE_FIREBASE_MESSAGING_SENDER_ID }}@_FE_APP_ID=${{ vars.FE_FIREBASE_APP_ID }}@_FE_VAPID_KEY=${{ vars.FE_FIREBASE_VAPID_KEY }}@_FE_MEDIA_ORIGINS_JSON_B64='"${MEDIA_ORIGINS_B64}"'@_FE_PROXY_TARGET=${{ vars.FE_API_PROXY_TARGET }}' \
             .
 
       # No env flags on purpose: the new revision inherits the live ragre-web
