@@ -2053,8 +2053,12 @@ class RagQueryWorkflow(Workflow):
         # orphan list are what the publish gate reads, and a verdict taken on a
         # string that is then replaced would refuse a turn whose shipped answer
         # grounds clean. The verifier must judge the string that ships.
-        repaired = _drop_ungrounded_sentences(
-            answer, financial_rows, query_text, retrieval_project, merged.meta
+        repaired = (
+            _drop_ungrounded_sentences(
+                answer, financial_rows, query_text, retrieval_project, merged.meta
+            )
+            if not merged.meta.get("answer_complete")
+            else None
         )
         if repaired is not None:
             logger.warning(
@@ -2208,7 +2212,18 @@ class RagQueryWorkflow(Workflow):
         # after a successful lookup gets the generic limitation copy — never the
         # draft's off-topic prose.
         price_question_unanswered = price_question and not _financial_claims(answer)
-        publish_original = (
+        live_related_turn = (
+            bool(merged.meta.get("answer_complete"))
+            and not unresolved_scope
+            and not cross_project_evidence
+            and not (
+                bool(merged.meta.get("selected_chunk_ids") or merged.sources) and not rag_valid
+            )
+            and (current_selected_rag or current_selected_fact or has_rag_area_evidence)
+            and bool(answer and answer.strip())
+            and not (verification_failed and routed.high_stakes)
+        )
+        publish_original = live_related_turn or (
             usable_evidence
             and not grounding_failed
             and not price_question_unanswered

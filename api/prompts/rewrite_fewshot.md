@@ -123,15 +123,37 @@ Query: "tụi tui có 3 tỉ thôi mua được gì hông"
 }
 ```
 
-## Example 8 — Khẩu ngữ financing (KHÔNG high-stakes): "trả góp 0% là sao, có bị lừa hông"
+## Example 8 — Khẩu ngữ financing / cọc / kỳ hạn vay (KHÔNG high-stakes): "trả góp 0% là sao, có bị lừa hông"
 History: []
 Query: "trả góp 0% là sao, có bị lừa hông"
 ```json
 {
-  "rewritten_query": "Chính sách trả góp 0% của dự án là gì, có rủi ro gì không?",
-  "routing": {"needs_rag": true, "needs_sql": false, "structured_path": "none"},
-  "sql_spec": null,
-  "hl_keywords": ["HTLS", "0%"], "ll_keywords": ["trả góp 0%", "rủi ro"],
+  "rewritten_query": "Chính sách trả góp 0% của dự án là gì, điều kiện vay và lãi suất như thế nào?",
+  "routing": {"needs_rag": true, "needs_sql": true, "structured_path": "spec"},
+  "sql_spec": {
+    "subject_type": "unit", "source": "facts",
+    "filters": [],
+    "limit": 50
+  },
+  "hl_keywords": ["HTLS", "0%"], "ll_keywords": ["trả góp 0%", "lãi suất", "vốn tự có"],
+  "high_stakes": false, "as_of": null
+}
+```
+
+## Example 8b — Hỏi giá cụm nhà / phân khu / đặt cọc / thời hạn vay chung của dự án
+History: []
+Query: "giá cụm nhà nào của dự án, đặt cọc bao nhiêu và vay tối đa mấy năm?"
+```json
+{
+  "rewritten_query": "Bảng giá các loại căn hộ theo phương thức thanh toán, tỷ lệ đặt cọc vốn tự có và thời hạn hỗ trợ lãi suất của dự án",
+  "routing": {"needs_rag": true, "needs_sql": true, "structured_path": "spec"},
+  "sql_spec": {
+    "subject_type": "unit", "source": "facts",
+    "filters": [],
+    "limit": 50
+  },
+  "hl_keywords": ["bảng giá", "thanh toán", "đặt cọc", "HTLS"],
+  "ll_keywords": ["cụm nhà", "giá bán", "đặt cọc", "vốn tự có", "thời hạn vay"],
   "high_stakes": false, "as_of": null
 }
 ```

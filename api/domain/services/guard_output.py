@@ -1220,6 +1220,10 @@ def _evaluate_guard(
                 amount, unit, chunk_evidence, clause, area_evidence, binding_evidence
             ):
                 continue
+            if bool(_field(meta, "answer_complete", False)) and _byte_match(
+                amount, chunk_evidence
+            ):
+                continue
             orphan.append(amount)
     except Exception as exc:  # noqa: BLE001 — an unrun check must never read "pass"
         numeric_pass = False

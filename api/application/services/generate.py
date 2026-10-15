@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from api.domain.value_objects.constants import DEFAULT_MODEL_ANSWER, DEFAULT_MOD
 from api.infrastructure.config.config import settings
 from api.infrastructure.dependencies import llm
 
-from .merge import Merged
+from .merge import Merged, build_evidence_context, build_facts
 from .sales_kit import inject_sales_context, sales_kit_block
 
 # Story 4.6 (§7.2): pro tier fires when the turn is at a conversion stage or
@@ -31,6 +32,65 @@ from .sales_kit import inject_sales_context, sales_kit_block
 _TIER_TO_MODEL_KEY = {"pro": "llm_model_answer_pro", "flash": "llm_model_answer"}
 _ANSWER_MAX_TOKENS = {"pro": 6000, "flash": 4000}
 
+_PROJECT_FACTS_HINT_RE = re.compile(
+    r"giá(?! trị)|bảng\s*giá|cụm|phân\s*khu|tòa|block|\bkhu\b|căn\s*hộ|\bcăn\b"
+    r"|studio|\bpn\b|phòng\s*ngủ|thanh\s*toán|phương\s*thức|phương\s*án"
+    r"|chiết\s*khấu|ưu\s*đãi|đặt\s*cọc|\bcọc\b|vốn\s*tự\s*có|trả\s*trước"
+    r"|trả\s*góp|\bvay\b|lãi\s*suất|htls|ân\s*hạn|kỳ\s*hạn|thời\s*hạn|mấy\s*năm",
+    re.IGNORECASE,
+)
+
+
+async def _hydrate_project_facts_board(merged: Merged) -> bool:
+    """Ensure project facts (min->max across 4 payment methods + policy terms) are present."""
+    project_key = merged.meta.get("retrieval_project_key") or merged.meta.get("project_key")
+    query_text = str(merged.meta.get("query") or "").strip()
+    if not project_key or not query_text:
+        return False
+    hint_text = f"{query_text} {merged.meta.get('rewritten') or ''}"
+    if not _PROJECT_FACTS_HINT_RE.search(hint_text):
+        return False
+    existing_facts = merged.facts or []
+    price_row_count = sum(
+        1 for row in existing_facts if "price_vnd" in (row.get("fields") or {})
+    )
+    if price_row_count >= 4 and len(existing_facts) >= 12:
+        return False
+    from .sql_leg import run_sql_leg  # noqa: PLC0415
+
+    res = await run_sql_leg(
+        {"subject_type": "unit", "source": "facts", "filters": [], "limit": 200},
+        None,
+        query_text,
+        str(project_key),
+    )
+    if not res.rows:
+        return False
+    existing_evidence = list(merged.meta.get("_fact_evidence") or [])
+    seen_fact_ids = {
+        row.get("fact_id") for row in existing_evidence if row.get("fact_id") is not None
+    }
+    combined = list(existing_evidence)
+    for row in res.rows:
+        fid = row.get("fact_id")
+        if fid is not None and fid in seen_fact_ids:
+            continue
+        if fid is not None:
+            seen_fact_ids.add(fid)
+        combined.append(dict(row))
+    for idx, row in enumerate(combined, start=1):
+        row["fe_id"] = f"fe-{idx:03d}"
+    merged.evidence_blocks = build_evidence_context(combined)
+    merged.facts = build_facts(combined)
+    merged.meta["_fact_evidence"] = combined
+    merged.meta["selected_fact_ids"] = tuple(
+        row.get("fact_id") for row in combined if row.get("fact_id") is not None
+    )
+    merged.meta["selected_fe_ids"] = tuple(
+        row.get("fe_id") for row in combined if row.get("fe_id")
+    )
+    merged.meta["sql_row_count"] = len(combined)
+    return True
 logger = logging.getLogger("api.generate")
 
 _SYSTEM_PATH = (
@@ -193,9 +253,14 @@ async def stream_answer(
     merged: Merged, history: list[dict] | None, high_stakes: bool
 ) -> AsyncIterator[str]:
     """Stream answer tokens; records model + tier + prompt_hash in merged.meta."""
-    # Bug B safety net: an EMPTY FACT_EVIDENCE on a project that only publishes
-    # an indicative board must not produce a "chưa cập nhật bảng giá" answer —
-    # hydrate evidence from v_unit_estimates first (no-op when facts exist).
+    # Hydrate the full project facts board (min->max across all 4 payment
+    # methods + deposit/rate/term) whenever a price/cluster/unit/payment query
+    # reaches generation without the full board, then fall back to v_unit_estimates
+    # if the project has no facts rows.
+    try:
+        await _hydrate_project_facts_board(merged)
+    except Exception as exc:  # noqa: BLE001 — fallback never breaks generation
+        logger.warning("project facts board hydration failed (ignored): %s", exc)
     try:
         from .estimates_fallback import apply_estimates_fallback  # noqa: PLC0415
 
