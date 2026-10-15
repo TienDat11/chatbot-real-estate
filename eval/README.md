@@ -18,20 +18,57 @@ Verification thật cần ĐỦ 4 thứ sẵn sàng cùng lúc:
 Thiếu bất kỳ thành phần nào → KHÔNG có verification thật. `--dry` không phải bước
 thay thế (xem mục `--dry` ở cuối).
 
+## Project-scoped evaluation
+
+Every pipeline turn requires one validated `ProjectContext` in `normal` mode. Pass
+`--project-key` whenever selected rows do not declare their own scope:
+
+```bash
+python eval/run_eval.py --project-key camellia --only-category legal
+python eval/run_eval.py --project-key camellia --dry --subset 10
+python eval/run_eval.py --project-key soleil --inject
+python eval/run_eval.py --project-key camellia --persona
+python eval/run_eval.py --project-key camellia --only-category exhaustive_unit_types --json-out eval/results.json
+```
+Row `project_key` metadata selects project-specific identity, including mixed golden
+sets. `--project-key` supplies scope only for neutral rows and never overrides row
+metadata. Invalid, inactive, reserved, or missing scopes abort before pipeline/judge
+creation or scoring; errors identify the row. The persona dataset declares
+`camellia`, so a conflicting CLI key aborts. Injection prompts all use the explicit
+CLI key.
+
+Real runs fetch the active project catalogue once (read-only) and construct all
+selected contexts from that snapshot. `--dry` instead uses the checked-in
+seed-mirror catalogue, with no database, provider, or live pipeline access.
+
+Historical demo cases retain their Tower A/B identities as `tower-a`/`tower-b`.
+These hyphenated keys fail the current project-key validator; those rows are not
+runnable as a real scoped gate. They are never remapped to Camellia or Soleil,
+because doing so would invent project-specific facts. Filter to supported rows or
+use a rebaselined dataset with approved expected facts. The default full golden set
+therefore intentionally aborts at a Tower row.
+
+`update_price.sh` forwards its existing `--project` value as `--project-key` but
+its historical `--subset 20` golden data is not a valid regression gate for that
+project. `update_6mo.sh` requires `--project-key <key>` and runs the full-set
+regression command; retained Tower rows make that legacy gate intentionally abort
+before scoring.
+
 ## CLI
 
 ```bash
-python eval/run_eval.py                          # full golden set, backend thật
-python eval/run_eval.py --subset 10              # 10 câu đầu
-python eval/run_eval.py --only-category legal    # chỉ 1 category
-python eval/run_eval.py --dry                    # CHỈ tự test harness: MockPipeline + MockJudge — không gọi PG/LLM/embedding/rerank
-python eval/run_eval.py --inject                 # chạy eval/injection_test_vn.json qua guard
-python eval/run_eval.py --json-out eval/results.json
-python eval/run_eval.py --fail-fast              # exit 1 nếu có câu fail
+python eval/run_eval.py --project-key camellia --subset 10
+python eval/run_eval.py --project-key camellia --only-category legal
+python eval/run_eval.py --project-key camellia --dry --subset 10
+python eval/run_eval.py --project-key soleil --inject
+python eval/run_eval.py --project-key camellia --persona
+python eval/run_eval.py --project-key camellia --subset 10 --json-out eval/results.json
+python eval/run_eval.py --project-key camellia --subset 10 --fail-fast
 ```
 
-Flag: `--golden` (mặc định `eval/golden_set_v1.json`), `--subset N`, `--only-category`,
-`--dry`, `--inject`, `--json-out PATH`, `--fail-fast`. Env: `POSTGRES_*`, `LLM_BASE_URL`,
+Flags: `--golden` (default `eval/golden_set_v1.json`), `--subset N`,
+`--only-category`, `--project-key KEY`, `--dry`, `--inject`, `--persona`,
+`--json-out PATH`, and `--fail-fast`. Env: `POSTGRES_*`, `LLM_BASE_URL`,
 `LLM_API_KEY`, `EVAL_JUDGE_MODEL`, `EVAL_PIPELINE_TIMEOUT_S`.
 
 ## Exit gates (điều kiện exit code)

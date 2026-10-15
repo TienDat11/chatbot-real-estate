@@ -3,6 +3,12 @@ import asyncio
 import pytest
 
 
+def _camellia_context():
+    from api.application.services.project_context import ProjectContext
+
+    return ProjectContext("camellia", "normal", (("camellia", "Camellia"),))
+
+
 @pytest.mark.asyncio
 async def test_conv_handler_cancellation_is_awaited(monkeypatch):
     from api.application.pipelines.conv_workflow import RagRgreConvWorkflow
@@ -32,7 +38,7 @@ async def test_conv_handler_cancellation_is_awaited(monkeypatch):
     workflow._flush_stream_tail = lambda: asyncio.sleep(0)
     task = asyncio.create_task(workflow.run_inner(None, type("Ev", (), {
         "conv": {}, "query": "q", "session_id": None, "as_of": None,
-        "history": [], "project_key": None, "device_id": None,
+        "history": [], "project_context": _camellia_context(), "device_id": None,
     })()))
     await asyncio.sleep(0)
     task.cancel()
@@ -44,11 +50,16 @@ async def test_conv_handler_cancellation_is_awaited(monkeypatch):
 
 def test_project_workspace_routes_soleil_only():
     """Soleil reads its dedicated workspace (2026-08-28 scope-repair migration);
-    every other project keeps the historical default-workspace instance."""
+    every other validated project gets its own isolated project_<key> workspace;
+    a key that can never be a real project fails closed and mints nothing."""
     from api.application.services import rag_leg
+    from api.application.services.project_scope import ProjectScopeError
     from api.infrastructure.config.config import get_settings
 
     assert rag_leg._project_workspace("soleil") == get_settings().lightrag_workspace_soleil
     assert rag_leg._project_workspace("camellia") is None
     assert rag_leg._project_workspace(None) is None
-    assert rag_leg._project_workspace("unknown-project") is None
+    assert rag_leg._project_workspace("thevista") == "project_thevista"
+    # Fail-closed guard: an ill-shaped key must never mint a namespace.
+    with pytest.raises(ProjectScopeError):
+        rag_leg._project_workspace("unknown-project")

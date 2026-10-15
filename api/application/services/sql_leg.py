@@ -10,6 +10,7 @@ delegates to api.nl2sql_guard when structured_path == 'nl2sql'.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import unicodedata
 import urllib.parse
@@ -30,6 +31,8 @@ from api.domain.entities.price_calc import (
     analyze_affordability,
     offer_from_row,
 )
+from api.domain.services.unit_code import normalize_unit_code, unit_code_from_subject_suffix
+from ingest.subject_key import normalize_subject_key
 
 logger = logging.getLogger("api.sql_leg")
 
@@ -63,11 +66,44 @@ ALLOWED_FIELDS: dict[str, tuple[str, ...]] = {
         "quality",
         "policy_key",
         "campaign_key",
+        "attrs_type",
+        "attrs_bedrooms",
     ),
 }
 
 # Semantic fact_key fields on 'facts' — filtered by value_num/range.
 SEMANTIC_FACT_FIELDS = {"price_vnd", "area_m2", "deposit_pct", "term_months", "interest_rate_pct"}
+
+# P0-04 §2C — a row may take a price rank only when it IS a current sale price:
+# exact + confirmed + VND, on a same-project published source document, with an
+# active same-project campaign whose own source document is published too.
+# The interval checks use CURRENT_DATE, not the bound ``as_of``: asking for a
+# historical date must not resurrect an expired document/campaign as a current
+# sale. Evaluated in WHERE (see build_sql) so LIMIT can never be filled by a
+# rate, a term or an estimate that merely sorts below the price.
+ELIGIBLE_PRICE_PREDICATES = (
+    "f.fact_key = 'price_vnd'",
+    "f.unit = 'vnd'",
+    "f.quality = 'exact'",
+    "f.trust_level = 'confirmed'",
+    "f.value_num > 0",
+    "f.effective_from <= CURRENT_DATE",
+    "(f.effective_to IS NULL OR f.effective_to > CURRENT_DATE)",
+    "fd.project_key = fs.project_key",
+    "fd.status = 'published'",
+    "fd.effective_from <= CURRENT_DATE",
+    "(fd.effective_to IS NULL OR fd.effective_to > CURRENT_DATE)",
+    "c.campaign_key IS NOT NULL",
+    "c.project_key = fs.project_key",
+    "c.status = 'active'",
+    "c.effective_from <= CURRENT_DATE",
+    "(c.effective_to IS NULL OR c.effective_to > CURRENT_DATE)",
+    "cd.doc_id = c.source_doc_id",
+    "cd.project_key = fs.project_key",
+    "cd.status = 'published'",
+    "cd.effective_from <= CURRENT_DATE",
+    "(cd.effective_to IS NULL OR cd.effective_to > CURRENT_DATE)",
+)
 
 ALLOWED_OPS = ("=", "!=", "<", "<=", ">", ">=", "between", "in")
 ALLOWED_DIR = {"asc": "ASC", "desc": "DESC"}
@@ -215,8 +251,36 @@ def _coerce_limit(limit: Any) -> int:
     return limit
 
 
-def validate_spec(spec: dict | None) -> None:
-    """Validate the closed set before building SQL; raise SpecError on violations."""
+def _with_subject_type_filter(spec: dict, filters: list) -> dict:
+    """Fold a top-level facts ``subject_type`` into exactly one bound filter.
+
+    The few-shot teaches the model a top-level ``subject_type``, which the
+    closed builder never read — the scope silently vanished. Converting it here
+    keeps ONE parameter-bound ``fs.subject_type = $n`` predicate. A non-string
+    or blank value, or a same-field filter that already exists, is an ambiguity
+    this seam never resolves by precedence: it raises. The model's dict is
+    copied, never mutated.
+    """
+    if "subject_type" not in spec or spec.get("source") != "facts":
+        # v_unit_offers keeps its own top-level subject_type: the deterministic
+        # affordability spec and the offers view own that key, not a filter.
+        return dict(spec)
+    value = spec["subject_type"]
+    if not isinstance(value, str) or not value.strip():
+        raise SpecError(f"subject_type phải là string không rỗng, got {value!r}")
+    if any(isinstance(f, dict) and f.get("field") == "subject_type" for f in filters):
+        raise SpecError("subject_type lặp: top-level subject_type và filter cùng field")
+    normalized = dict(spec)
+    normalized.pop("subject_type")
+    normalized["filters"] = [
+        *filters,
+        {"field": "subject_type", "op": "=", "value": value.strip()},
+    ]
+    return normalized
+
+
+def validate_spec(spec: dict | None) -> dict:
+    """Validate the closed set and return the normalized spec to build with."""
     if not isinstance(spec, dict):
         raise SpecError("spec phải là object")
     source = spec.get("source")
@@ -254,6 +318,7 @@ def validate_spec(spec: dict | None) -> None:
             raise SpecError(f"order_by.dir '{order_by.get('dir')}' không hợp lệ")
 
     _coerce_limit(spec.get("limit", DEFAULT_LIMIT))
+    return _with_subject_type_filter(spec, list(filters))
 
 
 def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
@@ -264,6 +329,27 @@ def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
     def next_param(v: Any) -> str:
         params.append(v)
         return f"${len(params)}"
+
+    # facts: unit type and bedroom count are JSONB attributes on the subject
+    # (fs.attrs), not fact columns. Handled before every generic branch for two
+    # reasons: JSONB extraction is text even for a numeric key, so str(value)
+    # keeps '=' / 'in' text-to-text; and allocating the generic placeholder
+    # first would append a parameter that never appears in the SQL, which makes
+    # asyncpg fail with "could not determine data type of parameter $N".
+    #
+    # The comparison folds case on both sides: the stored vocabulary is
+    # free-form and inconsistent ("Studio" on camellia, "Stu"/"1BR"/"2BR" on
+    # soleil), so a user typing "studio" would otherwise match nothing and the
+    # turn would fall back to the canned message even though the subject exists.
+    if not is_vnd and field_name in ("attrs_type", "attrs_bedrooms"):
+        col = "fs.attrs->>'bedrooms'" if field_name == "attrs_bedrooms" else "fs.attrs->>'type'"
+        if op == "in":
+            return f"lower({col}) = ANY({next_param([str(v).casefold() for v in value])})"
+        if op in ("=", "!="):
+            return f"lower({col}) {op} {next_param(str(value).casefold())}"
+        raise SpecError(
+            f"attrs filter chỉ hỗ trợ op '=', '!=' hoặc 'in' (field={field_name}, op={op})"
+        )
 
     if op == "between":
         lo, hi = value
@@ -279,7 +365,9 @@ def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
             return f"{field_name} = ANY({next_param(list(value))})"
         # facts: categorical only — match_semantics drops non-matching numeric rows
         return f"f.value_text = ANY({next_param([str(v) for v in value])})"
-
+    if field_name == "subject_key" and isinstance(value, str):
+        # Storage/query representation is normalized; the spec keeps canonical form.
+        value = normalize_subject_key(value)
     p = next_param(value)
     if is_vnd:
         return f"{field_name} {op} {p}"
@@ -314,6 +402,31 @@ def _filter_sql(source: str, f: dict, params: list[Any]) -> str:
     raise SpecError(f"không build được filter field={field_name} op={op} trên {source}")
 
 
+def _require_canonical_unit_selector(spec: dict, project_key: str) -> None:
+    """The exact-unit path answers ONE canonical unit of THIS project.
+
+    A type band, another unit, a foreign project, or a non-canonical code (the
+    user types ``CH-3``) is never a confirmed price for the requested unit.
+    The spec keeps the canonical user-facing selector; ``build_sql`` binds the
+    persisted normalized form, so only storage/query representation changes.
+    """
+    values = [
+        f
+        for f in spec.get("filters") or []
+        if isinstance(f, dict) and f.get("field") == "subject_key" and f.get("op") == "="
+    ]
+    prefix = f"unit:{project_key}/"
+    if (
+        len(values) != 1
+        or not isinstance(values[0].get("value"), str)
+        or not values[0]["value"].startswith(prefix)
+    ):
+        raise SpecError(f"exact_unit_price cần đúng một subject_key = unit:{project_key}/<CH-XX>")
+    code = values[0]["value"][len(prefix) :]
+    if normalize_unit_code(code) != code:
+        raise SpecError(f"mã căn không canonical: {code!r} (cần CH-XX zero-padded)")
+
+
 def build_sql(
     spec: dict, as_of: date | None, project_key: str | None = None
 ) -> tuple[str, list[Any]]:
@@ -341,14 +454,32 @@ def build_sql(
         if where:
             sql += " WHERE " + " AND ".join(where)
     else:
+        # A top-level subject_type that reaches the builder unvalidated is folded
+        # into its bound filter here too — never silently ignored.
+        spec = _with_subject_type_filter(spec, list(spec.get("filters") or []))
         # facts: join fact_subjects; enforce interval validity at as_of and a published
-        # doc (defense-in-depth; RLS FORCE still guards if ever forgotten).
+        # doc (defense-in-depth; RLS FORCE still guards if ever forgotten). The three
+        # LEFT JOINs only surface lineage (source doc, campaign, campaign source doc)
+        # so the caller can bind a number to its own project; they never filter here —
+        # eligible-price predicates belong to the P0-04 SQL contract.
         sql = (
             "SELECT f.id AS fact_id, fs.subject_key, fs.subject_type, fs.display_name, "
+            "fs.attrs AS subject_attrs, "
             "f.fact_key, f.policy_key, f.campaign_key, f.value_num, f.value_text, f.unit, f.quality, "  # noqa: E501
             "f.range_min, f.range_max, f.effective_from, f.effective_to, "
-            "f.source_doc_id, f.source_chunk_id, f.trust_level "
-            "FROM facts f JOIN fact_subjects fs ON fs.id = f.subject_id"
+            "f.source_doc_id, f.source_chunk_id, f.trust_level, "
+            "fd.status AS source_doc_status, "
+            "fd.effective_from AS source_doc_effective_from, "
+            "fd.effective_to AS source_doc_effective_to, fd.project_key AS source_doc_project_key, "
+            "c.project_key AS campaign_project_key, c.status AS campaign_status, "
+            "c.effective_from AS campaign_effective_from, c.effective_to AS campaign_effective_to, "
+            "cd.doc_id AS campaign_source_doc_id, cd.status AS campaign_source_doc_status, "
+            "cd.effective_from AS campaign_source_doc_effective_from, "
+            "cd.effective_to AS campaign_source_doc_effective_to, cd.project_key AS campaign_source_doc_project_key "  # noqa: E501
+            "FROM facts f JOIN fact_subjects fs ON fs.id = f.subject_id "
+            "LEFT JOIN documents fd ON fd.doc_id = f.source_doc_id "
+            "LEFT JOIN campaigns c ON c.campaign_key = f.campaign_key "
+            "LEFT JOIN documents cd ON cd.doc_id = c.source_doc_id"
         )
         where = [
             f"f.effective_from <= ${_next(params, as_of)}",
@@ -361,6 +492,17 @@ def build_sql(
             # fact_subjects.project_key is the per-subject project tag; NULL-tagged
             # subjects are excluded so legacy data never leaks into a project answer.
             where.append(f"fs.project_key = ${_next(params, project_key)}")
+        order_field = (spec.get("order_by") or {}).get("field")
+        exact_path = spec.get("structured_path") == "exact_unit_price"
+        if order_field == "price_vnd" or exact_path:
+            # P0-04 §2C: a price RANK is only ever filled by an eligible price row.
+            # Post-filtering after LIMIT cannot recover a displaced price, so the
+            # whole predicate lands in WHERE, ahead of ORDER BY / LIMIT.
+            if not (isinstance(project_key, str) and project_key.strip()):
+                raise SpecError("giá cần project scope đã resolve")
+            if exact_path:
+                _require_canonical_unit_selector(spec, project_key)
+            where.append(" AND ".join(ELIGIBLE_PRICE_PREDICATES))
         for f in spec.get("filters") or []:
             where.append(_filter_sql(source, f, params))
         sql += " WHERE " + " AND ".join(where)
@@ -406,6 +548,21 @@ def _effective_limit(spec: dict, query: str) -> int:
 def _row_value(row: dict, field_name: str) -> Any:
     if field_name in row:
         return row[field_name]
+    # JSONB unit attributes: the predicate runs in SQL (fs.attrs->>'type'), and
+    # the Python post-filter must read the same value or it drops every matching
+    # row. Values arrive as text from the extraction, so compare as text.
+    if field_name in ("attrs_type", "attrs_bedrooms"):
+        attrs = row.get("subject_attrs")
+        if isinstance(attrs, str):
+            try:
+                attrs = json.loads(attrs)
+            except ValueError:
+                return None
+        if isinstance(attrs, dict):
+            key = "bedrooms" if field_name == "attrs_bedrooms" else "type"
+            raw = attrs.get(key)
+            return None if raw is None else str(raw)
+        return None
     if "value_num" in row and row.get("value_num") is not None:
         return row["value_num"]
     return row.get("value_text")
@@ -428,8 +585,38 @@ def _apply_cmp(v: Any, op: str, target: Any) -> bool:
 
 def match_semantics(row: dict, field_name: str, op: str, value: Any) -> bool:
     """Apply an operator to one row with range/approx semantics; `in` is categorical only."""
+    if field_name == "subject_key" and isinstance(value, str):
+        # Storage/query representation is normalized; compare the persisted form.
+        value = normalize_subject_key(value)
+
+    # JSONB unit attributes describe the SUBJECT, not the fact row's value, so
+    # they are resolved before the range/approx branch. Otherwise every
+    # price_vnd row (quality='range') would fail a `attrs_type =` filter and the
+    # post-filter would drop the whole subject even though the SQL matched it.
+    # Text is free-form ("Studio" vs "Stu") and the SQL side folds case with
+    # lower(); mirror that here.
+    if field_name in ("attrs_type", "attrs_bedrooms"):
+        v = _row_value(row, field_name)
+        if v is None:
+            return False
+        if isinstance(value, (list, tuple)):
+            if op == "in":
+                return str(v).casefold() in {str(x).casefold() for x in value}
+            return False
+        if op == "=":
+            return str(v).casefold() == str(value).casefold()
+        if op == "!=":
+            return str(v).casefold() != str(value).casefold()
+        return False
+
     quality = row.get("quality")
-    if quality in ("range", "approx"):
+    if quality in ("range", "approx") and field_name in SEMANTIC_FACT_FIELDS:
+        # Range semantics describe a row's own numeric VALUE, so this branch only
+        # applies to the semantic fact fields. Applying it to every field meant a
+        # subject-level filter (subject_type, subject_key) evaluated against a
+        # price row returned False, which silently dropped every price_vnd row
+        # from the answer — the reason a studio question could resolve the right
+        # subject and still publish no price.
         rmin, rmax = row.get("range_min"), row.get("range_max")
         if op == "in":
             return False
@@ -589,6 +776,7 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
                 "monthly_interest_estimate_vnd = ước tính dư nợ gốc ban đầu (không phải lịch trả nợ)"  # noqa: E501
             )
             entry = {
+                "_source": source,
                 "fe_id": f"fe-{i:03d}",
                 "subject": row.get("subject_key") or f"unit:{row.get('subject_id')}",
                 # Additive legend (D4): machine keys stay byte-identical for
@@ -625,7 +813,10 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
                     term_by_scope.get((row.get("subject_key"), row.get("policy_key"))),
                 ),
                 "quality": row.get("quality") or "exact",
-                "trust_level": row.get("trust_level") or "confirmed",
+                # No default: a row without trust_level stays None so the financial
+                # claim matcher fails closed instead of inheriting "confirmed".
+                "trust_level": row.get("trust_level"),
+                "unit": row.get("unit"),
                 "range": {
                     "min": _jsonable(row.get("range_min")),
                     "max": _jsonable(row.get("range_max")),
@@ -635,7 +826,24 @@ def build_fact_evidence(rows: list[dict], source: str, as_of: date | None) -> li
                 "effective_from": _jsonable(row.get("effective_from")),
                 "effective_to": _jsonable(row.get("effective_to")),
                 "source_doc_id": row.get("source_doc_id"),
+                "source_doc_status": row.get("source_doc_status"),
+                "source_doc_project_key": row.get("source_doc_project_key"),
+                "source_doc_effective_from": _jsonable(row.get("source_doc_effective_from")),
+                "source_doc_effective_to": _jsonable(row.get("source_doc_effective_to")),
                 "campaign_key": row.get("campaign_key"),
+                "campaign_project_key": row.get("campaign_project_key"),
+                "campaign_status": row.get("campaign_status"),
+                "campaign_effective_from": _jsonable(row.get("campaign_effective_from")),
+                "campaign_effective_to": _jsonable(row.get("campaign_effective_to")),
+                "campaign_source_doc_id": row.get("campaign_source_doc_id"),
+                "campaign_source_doc_status": row.get("campaign_source_doc_status"),
+                "campaign_source_doc_project_key": row.get("campaign_source_doc_project_key"),
+                "campaign_source_doc_effective_from": _jsonable(
+                    row.get("campaign_source_doc_effective_from")
+                ),
+                "campaign_source_doc_effective_to": _jsonable(
+                    row.get("campaign_source_doc_effective_to")
+                ),
                 "fact_id": row.get("fact_id"),
             }
         fe.append(entry)
@@ -768,6 +976,120 @@ async def run_affordability(
     return SqlLegResult(evidence, meta, degraded=False)
 
 
+@dataclass(frozen=True)
+class ConfirmedPriceProbe:
+    """Answer to "does this project (or unit) have a confirmed, current, published price?".
+
+    ``completed=False`` means the lookup FAILED, never "no price" — absence may only
+    be asserted when ``completed`` is True and the answer is empty.
+    """
+
+    completed: bool
+    error: str | None
+    confirmed_units: frozenset[str]
+    any_confirmed: bool
+
+
+# One bounded statement: EXISTS answers the generic project question; the
+# aggregate answers the per-unit one. Only confirmed exact VND price facts on a
+# same-project subject, published source doc, and active current campaign qualify.
+# P0-04 §2C parity: the window is CURRENT_DATE, never a caller-supplied
+# historical as_of -- a historical query must not resurrect an expired
+# document/campaign as a current sale.
+_PROBE_CONFIRMED_PRICE_SQL = """
+WITH eligible AS (
+  SELECT fs.subject_key
+  FROM facts f
+  JOIN fact_subjects fs ON fs.id = f.subject_id
+  LEFT JOIN documents fd ON fd.doc_id = f.source_doc_id
+  LEFT JOIN campaigns c ON c.campaign_key = f.campaign_key
+  LEFT JOIN documents cd ON cd.doc_id = c.source_doc_id
+  WHERE f.fact_key = 'price_vnd'
+    AND f.unit = 'vnd'
+    AND f.quality = 'exact'
+    AND f.trust_level = 'confirmed'
+    AND f.value_num > 0
+    AND f.effective_from <= CURRENT_DATE AND (f.effective_to IS NULL OR f.effective_to > CURRENT_DATE)
+    AND fs.project_key = $1
+    AND fd.project_key = fs.project_key AND fd.status = 'published'
+    AND fd.effective_from <= CURRENT_DATE AND (fd.effective_to IS NULL OR fd.effective_to > CURRENT_DATE)
+    AND c.project_key = fs.project_key AND c.status = 'active'
+    AND c.effective_from <= CURRENT_DATE AND (c.effective_to IS NULL OR c.effective_to > CURRENT_DATE)
+    AND cd.project_key = fs.project_key AND cd.status = 'published'
+    AND cd.effective_from <= CURRENT_DATE AND (cd.effective_to IS NULL OR cd.effective_to > CURRENT_DATE)
+)
+SELECT EXISTS (SELECT 1 FROM eligible) AS any_confirmed,
+       (SELECT array_agg(sk) FROM (
+          SELECT DISTINCT subject_key AS sk FROM eligible{unit_filter} LIMIT {unit_limit}
+        )) AS unit_keys
+"""
+
+
+def _unit_subject_keys(project_key: str, unit_codes: list[str]) -> list[str]:
+    """Fact-subject keys for the requested codes: a unit subject is 'unit:<project>/<code>'.
+
+    Keys are emitted in the persisted normalized form, so ``CH-03`` binds the
+    stored ``unit:<project>/ch03``. ``normalize_unit_code`` collapses the raw
+    forms the user types (CH-3, ch-3a) onto the canonical zero-padded code; a
+    code the normalizer rejects is passed through upper-cased so a foreign
+    numbering scheme still matches.
+    """
+    keys: list[str] = []
+    for raw in unit_codes:
+        if not isinstance(raw, str):
+            continue
+        for code in (normalize_unit_code(raw), raw.strip().upper()):
+            key = normalize_subject_key(f"unit:{project_key}/{code}") if code else ""
+            if key and key not in keys:
+                keys.append(key)
+    return keys
+
+
+async def probe_confirmed_price(
+    project_key: str,
+    unit_codes: list[str] | None = None,
+    *,
+    pool: asyncpg.Pool | None = None,
+    as_of: date | None = None,
+) -> ConfirmedPriceProbe:
+    """Read-only probe: which units (if any) have a confirmed, current, published price.
+
+    Never raises — a failed lookup reports ``completed=False`` so the caller answers
+    "cannot confirm" instead of asserting absence. Never called from build_sql or
+    run_sql_leg: the SQL leg contract stays unchanged by this lookup.
+
+    The window is CURRENT_DATE (P0-04 §2C parity): ``as_of`` is accepted for
+    backward compatibility and ignored, so a historical query never resurrects
+    an expired document/campaign as a current sale.
+
+    ``confirmed_units`` holds canonical unit codes only (subjects that are not
+    concrete units, e.g. a price band, are dropped). ``ponytail:`` the aggregate is
+    capped at MAX_LIMIT distinct subjects, which is above any exact per-unit price
+    set — raise it if a project ever exceeds that many confirmed unit prices.
+    """
+    _ = as_of
+    params: list[Any] = [project_key]
+    unit_filter = ""
+    if unit_codes:
+        unit_filter = f" WHERE subject_key = ANY(${_next(params, _unit_subject_keys(project_key, unit_codes))}::text[])"  # noqa: E501
+    sql = _PROBE_CONFIRMED_PRICE_SQL.format(unit_filter=unit_filter, unit_limit=MAX_LIMIT)
+    try:
+        async with with_rls_identity(pool=pool) as conn:
+            rec = await conn.fetchrow(sql, *params)
+        codes = (
+            unit_code_from_subject_suffix(str(key).rsplit("/", 1)[-1]) for key in (rec["unit_keys"] or [])
+        )
+        return ConfirmedPriceProbe(
+            completed=True,
+            error=None,
+            confirmed_units=frozenset(code for code in codes if code),
+            any_confirmed=bool(rec["any_confirmed"]),
+        )
+    except Exception as exc:  # noqa: BLE001 — a failed probe is "unknown", never "absent"
+        logger.warning("sql_leg: confirmed-price probe thất bại: %s", exc)
+        return ConfirmedPriceProbe(False, type(exc).__name__, frozenset(), False)
+
+
 # Runner.
 async def run_sql_leg(
     spec: dict | None, as_of: date | None, query: str, project_key: str | None = None
@@ -806,7 +1128,7 @@ async def run_sql_leg(
             return SqlLegResult([], {"mode": "affordability", "error": str(exc)}, degraded=True)
 
     try:
-        validate_spec(spec)
+        spec = validate_spec(spec)
     except SpecError as exc:
         return SqlLegResult(
             [],
@@ -815,7 +1137,18 @@ async def run_sql_leg(
         )
 
     try:
+        # The builder's own raises (unresolved price scope, non-canonical exact-unit
+        # selector) are spec defects too: same typed degrade, still before any pool
+        # acquisition — never an untyped "unexpected error" with a stack trace.
         sql, params = build_sql(spec, as_of, project_key)
+    except SpecError as exc:
+        return SqlLegResult(
+            [],
+            {"mode": "spec", "error": f"spec invalid: {exc}", "degraded_reason": "spec_invalid"},
+            degraded=True,
+        )
+
+    try:
         rows: list[dict] = []
         async with with_rls_identity(timeout_s=1.5) as conn:
             recs = await conn.fetch(sql, *params)

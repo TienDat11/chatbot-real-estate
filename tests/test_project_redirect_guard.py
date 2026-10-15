@@ -20,10 +20,13 @@ RagRgreConvWorkflow (the class actually wired behind POST /query):
 
 from __future__ import annotations
 
-from typing import Any
+import json
 
 import pytest
 from fastapi.testclient import TestClient
+
+from api.application.services.anon_identity import AnonymousIdentityService
+from api.infrastructure.config.config import get_settings
 
 from api.application.pipelines.conv_workflow import (
     SSE_EVENT_ROUTING,
@@ -90,38 +93,42 @@ def _routing_frames(events: list[tuple[str, dict]]) -> list[dict]:
 
 @pytest.fixture(autouse=True)
 def _hermetic_project_identity(monkeypatch):
-    """Serve registry identity from static dicts so tests never touch PG.
-
-    Same seams as tests/test_lead_cta_trigger_project.py: conv_directive
-    re-imports fetch_project_identity at call time and conv_workflow holds a
-    direct brand_token reference.
-    """
     identities = {
-        "camellia": {
-            "ten_thuong_mai": "The Camellia Son Tra - Da Nang",
-            "ten_phap_ly": "Trung tâm Thương mại, văn phòng cho thuê và nhà ở cao tầng",
-            "vi_tri": "Giao lộ Lê Văn Lương - Lê Đức Thọ, phường Sơn Trà, Đà Nẵng",
-            "hotline": "0345 747 138",
-        },
-        "soleil": {
-            "ten_thuong_mai": "The Soleil Đà Nẵng",
-            "ten_phap_ly": "Tổ hợp Ánh Dương - Soleil",
-            "vi_tri": "Đà Nẵng",
-            "hotline": "0905 000 000",
-        },
+        "camellia": {"ten_thuong_mai": "The Camellia Son Tra - Da Nang", "ten_phap_ly": None, "vi_tri": "Da Nang", "hotline": None},
+        "soleil": {"ten_thuong_mai": "The Soleil Đà Nẵng", "ten_phap_ly": None, "vi_tri": "Da Nang", "hotline": None},
     }
 
     def fake_identity(project_key=None):
         return dict(identities.get(project_key or "camellia", identities["camellia"]))
 
-    def fake_brand_token(project_key=None):
-        return (project_key or "camellia").lower()
+    monkeypatch.setattr("api.application.services.project_config.fetch_project_identity", fake_identity)
+    monkeypatch.setattr("api.application.pipelines.conv_workflow.brand_token", lambda key=None: (key or "camellia").lower())
+    from api.application.ports.project_registry import ProjectRegistryRecord
 
-    monkeypatch.setattr(
-        "api.application.services.project_config.fetch_project_identity", fake_identity
-    )
-    monkeypatch.setattr("api.application.pipelines.conv_workflow.brand_token", fake_brand_token)
+    async def fake_active_project_records():
+        return [
+            ProjectRegistryRecord(
+                project_key=key, ten_thuong_mai=name, ten_phap_ly=None,
+                vi_tri="Da Nang", hotline=None, location="Da Nang",
+                geo_center_lat=None, geo_center_lng=None, is_hot=False, status="active",
+            )
+            for key, name in KNOWN_PROJECTS
+        ]
 
+    async def fake_resolve_project_key(requested, *, active_projects=None):
+        return _resolved(requested, active_projects)
+
+    monkeypatch.setattr("api.application.services.project_scope.fetch_active_project_records", fake_active_project_records)
+    monkeypatch.setattr("api.application.services.project_scope.resolve_project_key", fake_resolve_project_key)
+
+
+def _active_projects():
+    from api.application.services.project_scope import ActiveProject
+    return [ActiveProject(key, name) for key, name in KNOWN_PROJECTS]
+
+
+def _resolved(requested, active_projects):
+    return requested or "camellia"
 
 # --- domain: normalization + detection ----------------------------------------
 
@@ -202,149 +209,303 @@ def test_redirect_message_names_full_label_then_short_name() -> None:
     assert "chuyển sang dự án The Soleil để em giải đáp" in message
 
 
-# --- conv workflow: guard before retrieval -------------------------------------
+# --- /query pinned-project redirect contract ---------------------------------
 
 
-@pytest.mark.asyncio
-async def test_soleil_question_in_camellia_redirects_without_retrieval():
-    events: list[tuple[str, dict]] = []
-    wf = RagRgreConvWorkflow(on_event=lambda e, d: events.append((e, d)))
-    inner = _RecordingInner(_clean_inner_result())
-    wf._inner = inner
-    result = await wf.run(
-        query="Bạn biết gì về soleil không?",
-        session_id="guard_soleil_in_camellia",
-        history=[],
-        project_key="camellia",
-        known_projects=KNOWN_PROJECTS,
+def test_foreign_project_redirects_before_quota_and_retrieval(monkeypatch):
+    import json
+    calls = []
+
+    class Gate:
+        async def prepare_turn(self, **kwargs):
+            calls.append("quota")
+            raise AssertionError("redirect must precede quota")
+
+    monkeypatch.setattr("api.application.services.query_quota_gate.build_query_quota_gate", Gate)
+    with TestClient(create_app()).stream(
+        "POST", "/query", json={"query": "Bạn biết gì về soleil không?", "project_key": "camellia"},
+        headers={"accept": "text/event-stream"},
+    ) as response:
+        raw = "".join(response.iter_text())
+    frames = [(block.split("\n", 1)[0][7:], json.loads(block.split("data: ", 1)[1]))
+              for block in raw.split("\n\n") if block.startswith("event: ") and "data: " in block]
+    routing = next(data for event, data in frames if event == "routing")
+    done = next(data for event, data in frames if event == "done")
+    redirect = {"project_key": "soleil", "display_name": "The Soleil Đà Nẵng", "short_name": "The Soleil"}
+    assert routing["project_redirect"] == done["project_redirect"] == redirect
+    assert done["sources"] == done["facts"] == []
+    assert "The Soleil Đà Nẵng" in done["answer"]
+    assert done["requires_review"] is False
+    assert calls == []
+
+
+@pytest.mark.parametrize("accept", [None, "text/event-stream"])
+def test_redirect_persists_with_verified_identity_for_json_and_sse(monkeypatch, request, accept):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("ANON_IDENTITY_SECRET", "redirect-persist-test-secret-0123456789")
+    get_settings.cache_clear()
+    request.addfinalizer(get_settings.cache_clear)
+    identity_service = AnonymousIdentityService(get_settings().anon_identity_secret)
+    token = identity_service.mint_token()
+    subject = identity_service.verify_token(token).subject
+    append_turn = AsyncMock(return_value=True)
+    repository = type("Repository", (), {"append_turn": append_turn})()
+    monkeypatch.setattr(
+        "api.infrastructure.adapters.postgres_chat_history.repository", repository
     )
-    routing = _routing_frames(events)
-    assert len(routing) == 1
-    assert routing[0]["project_redirect"] == {
+    async def reject_quota(**kwargs):
+        raise AssertionError("redirect must precede quota")
+    monkeypatch.setattr(
+        "api.application.services.query_quota_gate.build_query_quota_gate",
+        lambda: type("Gate", (), {"prepare_turn": reject_quota})(),
+    )
+    monkeypatch.setattr(
+        "api.application.pipelines.workflow.RagQueryWorkflow.run",
+        AsyncMock(side_effect=AssertionError("redirect must not retrieve")),
+    )
+    headers = {"accept": accept} if accept else {}
+    response = TestClient(create_app()).post(
+        "/query",
+        json={
+            "query": "Bạn biết gì về soleil không?",
+            "project_key": "camellia",
+            "session_id": "redirect-persist-session",
+            "device_id": "redirect-persist-device",
+            "anon_token": token,
+        },
+        headers=headers,
+    )
+    if accept:
+        frames = [
+            (block.split("\n", 1)[0][7:], json.loads(block.split("data: ", 1)[1]))
+            for block in response.text.split("\n\n")
+            if block.startswith("event: ") and "data: " in block
+        ]
+        payload = next(data for event, data in frames if event == "done")
+    else:
+        payload = response.json()
+
+    assert payload["history_persisted"] is True
+    append_turn.assert_awaited_once()
+    kwargs = append_turn.await_args.kwargs
+    assert kwargs["session_id"] == "redirect-persist-session"
+    assert kwargs["device_id"] == "redirect-persist-device"
+    assert kwargs["project_key"] == "camellia"
+    assert kwargs["identity_key"] == subject
+
+
+@pytest.mark.parametrize("accept", [None, "text/event-stream"])
+@pytest.mark.parametrize(
+    ("device_id", "anon_token"),
+    [(None, "valid-looking-token"), ("redirect-device", None), ("redirect-device", "invalid")],
+)
+def test_redirect_without_verified_device_identity_does_not_write(
+    monkeypatch, device_id, anon_token, accept
+):
+    from unittest.mock import AsyncMock
+
+    append_turn = AsyncMock(return_value=True)
+    repository = type("Repository", (), {"append_turn": append_turn})()
+    monkeypatch.setattr(
+        "api.infrastructure.adapters.postgres_chat_history.repository", repository
+    )
+    headers = {"accept": accept} if accept else {}
+    response = TestClient(create_app()).post(
+        "/query",
+        json={
+            "query": "Bạn biết gì về soleil không?",
+            "project_key": "camellia",
+            "session_id": "unowned-redirect-session",
+            "device_id": device_id,
+            "anon_token": anon_token,
+        },
+        headers=headers,
+    )
+    if accept:
+        frames = [
+            (block.split("\n", 1)[0][7:], json.loads(block.split("data: ", 1)[1]))
+            for block in response.text.split("\n\n")
+            if block.startswith("event: ") and "data: " in block
+        ]
+        payload = next(data for event, data in frames if event == "done")
+        assert response.headers["content-type"].startswith("text/event-stream")
+    else:
+        payload = response.json()
+    assert payload["history_persisted"] is False
+    append_turn.assert_not_awaited()
+
+
+def test_redirect_turn_preserves_cta_accounting(monkeypatch):
+    from api.application.services.conv_state import get_context
+    from api.application.services.query_quota_gate import UnmanagedTurnContext
+
+    class Gate:
+        async def prepare_turn(self, **kwargs):
+            return UnmanagedTurnContext()
+
+    monkeypatch.setattr("api.application.services.query_quota_gate.build_query_quota_gate", Gate)
+
+    from api.application.pipelines.workflow import RagQueryWorkflow
+
+    async def clean_inner_run(self, **kwargs):
+        return _clean_inner_result()
+
+    monkeypatch.setattr(RagQueryWorkflow, "run", clean_inner_run)
+    client = TestClient(create_app())
+
+    def routing_cta(query, session_id):
+        import json
+
+        with client.stream(
+            "POST", "/query",
+            json={"query": query, "project_key": "camellia", "session_id": session_id},
+            headers={"accept": "text/event-stream"},
+        ) as response:
+            raw = "".join(response.iter_text())
+        frames = [(block.split("\n", 1)[0][7:], json.loads(block.split("data: ", 1)[1]))
+                  for block in raw.split("\n\n") if block.startswith("event: ") and "data: " in block]
+        return next(data["lead_cta_hint"] for event, data in frames if event == "routing")
+
+    normal_session = "cta-parity-normal"
+    redirect_session = "cta-parity-redirect"
+    assert routing_cta("chính sách bán hàng như thế nào", normal_session) is None
+    assert routing_cta("chính sách bán hàng như thế nào", redirect_session) is None
+    normal_hint = routing_cta("chính sách bán hàng như thế nào", normal_session)
+    redirect_hint = routing_cta("bạn biết gì về soleil không", redirect_session)
+    assert normal_hint is not None
+    assert redirect_hint == normal_hint
+    assert get_context(normal_session).useful_turns >= 1
+    assert get_context(redirect_session).useful_turns >= 1
+
+
+def test_comparison_redirects_at_route(monkeypatch):
+    class Gate:
+        async def prepare_turn(self, **kwargs):
+            raise AssertionError("redirect must precede quota")
+
+    monkeypatch.setattr("api.application.services.query_quota_gate.build_query_quota_gate", Gate)
+    body = TestClient(create_app()).post(
+        "/query", json={"query": "so sánh camellia với soleil", "project_key": "camellia"}
+    ).json()
+    assert body["project_redirect"]["project_key"] == "soleil"
+
+
+def test_normal_flow_unknown_and_current_project(monkeypatch):
+    from api.application.services.query_quota_gate import UnmanagedTurnContext
+    calls = []
+
+    class Gate:
+        async def prepare_turn(self, **kwargs):
+            calls.append(kwargs["project_key"])
+            return UnmanagedTurnContext()
+
+    class Pipeline:
+        async def run(self, *args, **kwargs):
+            calls.append(kwargs["project_context"])
+            return {"answer": "normal", "sources": [], "facts": [], "images": [], "videos": [], "places": [], "confidence": "HIGH", "requires_review": False, "routing": {"intent": "rag"}, "trace_id": "t", "latency_ms": 1}
+
+    monkeypatch.setattr("api.application.services.query_quota_gate.build_query_quota_gate", Gate)
+    monkeypatch.setattr("api.application.pipelines.conv_workflow.RagQueryPipelineConv", Pipeline)
+    client = TestClient(create_app())
+    for query in ("vinhomes có tốt không", "giá Camellia thế nào"):
+        response = client.post("/query", json={"query": query, "project_key": "camellia"})
+        assert response.status_code == 200
+        assert response.json().get("project_redirect") is None
+    assert calls[0] == "camellia" and calls[2] == "camellia"
+
+
+def test_session_project_is_used_for_route_detection(monkeypatch):
+    from api.application.services.conv_state import get_context
+    session_id = "route-session-project"
+    get_context(session_id).project_key = "camellia"
+    class Gate:
+        async def prepare_turn(self, **kwargs):
+            raise AssertionError("session-bound foreign mention redirects before quota")
+
+    monkeypatch.setattr("api.application.services.query_quota_gate.build_query_quota_gate", Gate)
+    body = TestClient(create_app()).post(
+        "/query", json={"query": "còn soleil thì sao", "session_id": session_id}
+    ).json()
+    assert body["project_redirect"]["project_key"] == "soleil"
+
+def test_redirect_then_fresh_soleil_turn_scopes_to_soleil(monkeypatch):
+    """A redirect turn must not contaminate the very next turn.
+
+    Turn 1 (camellia pinned, question names soleil) short-circuits before
+    quota and never runs retrieval. Turn 2 replays a Soleil question on the
+    SAME client with project_key=soleil: the route must resolve Soleil, skip
+    the redirect branch, and hand the retrieval pipeline a Soleil-only
+    ProjectContext — exactly one pipeline run, no inherited camellia scope.
+    """
+    from api.application.services.conv_state import get_context
+    from api.application.services.query_quota_gate import UnmanagedTurnContext
+
+    session_id = "redirect-then-soleil-session"
+    quota_calls: list[str] = []
+    runs: list[object] = []
+
+    class Gate:
+        async def prepare_turn(self, **kwargs):
+            quota_calls.append(kwargs["project_key"])
+            return UnmanagedTurnContext()
+
+    class Pipeline:
+        async def run(self, *args, **kwargs):
+            runs.append(kwargs["project_context"])
+            return {
+                "answer": "soleil", "sources": [], "facts": [],
+                "images": [], "videos": [], "places": [],
+                "confidence": "HIGH", "requires_review": False,
+                "routing": {"intent": "rag"}, "trace_id": "t", "latency_ms": 1,
+            }
+
+    monkeypatch.setattr(
+        "api.application.services.query_quota_gate.build_query_quota_gate", Gate
+    )
+    monkeypatch.setattr(
+        "api.application.pipelines.conv_workflow.RagQueryPipelineConv", Pipeline
+    )
+    client = TestClient(create_app())
+
+    with client.stream(
+        "POST", "/query",
+        json={"query": "Bạn biết gì về soleil không?", "project_key": "camellia",
+              "session_id": session_id},
+        headers={"accept": "text/event-stream"},
+    ) as response:
+        raw = "".join(response.iter_text())
+    frames = [(block.split("\n", 1)[0][7:], json.loads(block.split("data: ", 1)[1]))
+              for block in raw.split("\n\n") if block.startswith("event: ") and "data: " in block]
+    redirect = {
         "project_key": "soleil",
         "display_name": "The Soleil Đà Nẵng",
         "short_name": "The Soleil",
     }
-    # Retrieval never ran: no inner invocation, no citations by construction.
-    assert inner.calls == []
-    assert result["sources"] == []
-    assert result["facts"] == []
-    assert "The Soleil Đà Nẵng" in result["answer"]
-    # Switch instruction uses the compact short name.
-    assert "chuyển sang dự án The Soleil" in result["answer"]
-    assert result["requires_review"] is False
-    assert result["project_redirect"]["project_key"] == "soleil"
+    routing = next(data for event, data in frames if event == "routing")
+    done = next(data for event, data in frames if event == "done")
+    assert routing["project_redirect"] == done["project_redirect"] == redirect
+    assert done["sources"] == done["facts"] == []
+    assert "The Soleil Đà Nẵng" in done["answer"]
+    # Turn 1 stopped before quota reservation and before retrieval.
+    assert quota_calls == []
+    assert runs == []
+    # The redirect turn DID write conversation state — bound to the pinned
+    # camellia — so turn 2's soleil scope is a real rebind, not a no-op.
+    assert get_context(session_id).project_key == "camellia"
 
-
-@pytest.mark.asyncio
-async def test_guard_turn_feeds_cta_accounting_like_a_clean_answer():
-    """Redirect turn counts as useful, so turn 2 keeps asking for the phone."""
-    events: list[tuple[str, dict]] = []
-    wf = RagRgreConvWorkflow(on_event=lambda e, d: events.append((e, d)))
-    inner = _RecordingInner(_clean_inner_result())
-    wf._inner = inner
-    session_id = "guard_cta_parity"
-    await wf.run(
-        query="bạn biết gì về soleil không",
-        session_id=session_id,
-        history=[],
-        project_key="camellia",
-        known_projects=KNOWN_PROJECTS,
+    response = client.post(
+        "/query", json={"query": "tiện ích soleil", "project_key": "soleil",
+                        "session_id": session_id}
     )
-    assert get_context(session_id).useful_turns == 1
-    await wf.run(
-        query="chính sách bán hàng như thế nào",
-        session_id=session_id,
-        history=[{"role": "user", "content": "bạn biết gì về soleil không"}],
-        project_key="camellia",
-        known_projects=KNOWN_PROJECTS,
-    )
-    routing = _routing_frames(events)
-    assert len(routing) == 2
-    assert "project_redirect" not in routing[1]
-    assert routing[1]["lead_cta_hint"] in CTA_VARIANTS
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "query",
-    [
-        "bảng giá The Camellia bao nhiêu",  # current project mentioned
-        "chuẩn bàn giao thế nào ạ",  # no project mentioned
-        "vinhomes có tốt không vậy",  # unknown third-party name
-    ],
-)
-async def test_normal_flow_untouched_when_guard_does_not_fire(query: str):
-    events: list[tuple[str, dict]] = []
-    wf = RagRgreConvWorkflow(on_event=lambda e, d: events.append((e, d)))
-    inner = _RecordingInner(_clean_inner_result())
-    wf._inner = inner
-    result = await wf.run(
-        query=query,
-        session_id=f"guard_normal_{abs(hash(query))}",
-        history=[],
-        project_key="camellia",
-        known_projects=KNOWN_PROJECTS,
-    )
-    assert len(inner.calls) == 1  # the inner workflow ran normally
-    assert all("project_redirect" not in frame for frame in _routing_frames(events))
-    assert result["answer"] == _clean_inner_result()["answer"]
-    assert "project_redirect" not in result
-
-
-@pytest.mark.asyncio
-async def test_comparison_question_redirects_inside_workflow():
-    events: list[tuple[str, dict]] = []
-    wf = RagRgreConvWorkflow(on_event=lambda e, d: events.append((e, d)))
-    inner = _RecordingInner(_clean_inner_result())
-    wf._inner = inner
-    result = await wf.run(
-        query="so sánh camellia với soleil được không",
-        session_id="guard_comparison",
-        history=[],
-        project_key="camellia",
-        known_projects=KNOWN_PROJECTS,
-    )
-    assert inner.calls == []
-    assert result["project_redirect"]["project_key"] == "soleil"
-
-
-@pytest.mark.asyncio
-async def test_session_bound_project_gates_detection_when_arg_missing():
-    """A follow-up without project_key still uses the session-bound project."""
-    session_id = "guard_session_bound"
-    get_context(session_id).project_key = "camellia"
-    events: list[tuple[str, dict]] = []
-    wf = RagRgreConvWorkflow(on_event=lambda e, d: events.append((e, d)))
-    inner = _RecordingInner(_clean_inner_result())
-    wf._inner = inner
-    result = await wf.run(
-        query="còn soleil thì sao",
-        session_id=session_id,
-        history=[],
-        project_key=None,  # FE omitted it; the session remembers camellia
-        known_projects=KNOWN_PROJECTS,
-    )
-    assert inner.calls == []
-    assert result["project_redirect"]["project_key"] == "soleil"
-
-
-@pytest.mark.asyncio
-async def test_direct_caller_without_known_projects_degrades_to_seed_mirror():
-    """No known_projects kwarg -> static seed mirror keeps the guard alive."""
-    events: list[tuple[str, dict]] = []
-    wf = RagRgreConvWorkflow(on_event=lambda e, d: events.append((e, d)))
-    inner = _RecordingInner(_clean_inner_result())
-    wf._inner = inner
-    result = await wf.run(
-        query="bạn biết gì về the soleil không",
-        session_id="guard_seed_mirror",
-        history=[],
-        project_key="camellia",
-    )
-    assert inner.calls == []
-    assert result["project_redirect"]["project_key"] == "soleil"
-
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("project_redirect") is None
+    # Turn 2 is a normal Soleil turn: quota reserved for soleil only, and
+    # retrieval ran exactly once with a Soleil-scoped ProjectContext.
+    assert quota_calls == ["soleil"]
+    assert len(runs) == 1
+    assert runs[0].project_key == "soleil"
 
 # --- GET /api/projects contract -------------------------------------------------
 

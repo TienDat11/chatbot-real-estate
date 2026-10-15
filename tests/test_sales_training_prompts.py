@@ -14,22 +14,19 @@ All offline: LLM/DB seams are recording fakes, no credentials anywhere.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from api.application.ports.project_registry import ProjectRegistryRecord
 from api.application.services.generate import (
     _SYSTEM_PROMPT,
     _TRAINING_PROMPT,
     build_messages,
 )
 from api.application.services.merge import Merged
-from api.application.services.project_scope import (
-    TRAINING_PROJECT_KEY,
-    is_training_scope,
-)
+from api.application.services.project_context import ProjectContext
 from api.interfaces.api.main import QueryRequest, create_app
 from tests._auth_seams import sales_bearer_headers
 from tests._training_seams import install_training_seams
@@ -125,7 +122,8 @@ def _merged(project_key: str, **extra_meta) -> Merged:
 
 def test_training_build_messages_keep_profile_isolation_after_v2_expansion() -> None:
     merged = _merged(
-        TRAINING_PROJECT_KEY,
+        "camellia",
+        answer_mode="training",
         conversation_directive="Recap + mời nhận cuộc gọi.",
         lead_cta_hint="customer CTA",
     )
@@ -172,7 +170,7 @@ class _RecordingGate:
 
 class _AttributedTurnContext:
     identity_key = "dev:device-prompt-anchor-test"
-    project_key = TRAINING_PROJECT_KEY
+    project_key = "camellia"
 
     def quota_payload(self) -> dict:
         return {"used_turns": None}
@@ -227,8 +225,27 @@ def test_sse_routing_frame_strips_lead_cta_in_training(
     # Offline registry/chat seams — the training preflight reads PG lazily.
     install_training_seams(monkeypatch)
 
-    async def ok_run(self, query, session_id, as_of, history, on_event=None, **kwargs):
-        assert is_training_scope(kwargs["project_key"])
+    # ProjectContext snapshots the active catalogue, and that read also
+    # resolves lazily at call time — pin it so the context this turn asserts
+    # on is deterministic and the test never touches the registry DB.
+    async def _fetch_active_records():
+        return [
+            ProjectRegistryRecord(
+                project_key="camellia", ten_thuong_mai="Camellia", ten_phap_ly=None,
+                vi_tri=None, hotline=None, location=None, geo_center_lat=None,
+                geo_center_lng=None, is_hot=False, status="active",
+            )
+        ]
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _fetch_active_records,
+    )
+
+    async def ok_run(self, query, session_id, as_of, history, on_event=None, *, project_context, **kwargs):
+        assert project_context == ProjectContext(
+            "camellia", "training", (("camellia", "Camellia"),)
+        )
         if on_event is not None:
             await on_event("routing", {"intent": "rag", "lead_cta_hint": "customer CTA"})
         return {**_PAYLOAD, "lead_cta_hint": "customer CTA"}
@@ -259,21 +276,3 @@ def test_sse_routing_frame_strips_lead_cta_in_training(
     assert "event: done" in raw
 
 
-# --- 6. source pin: customer redirect guard skips the training scope ------------
-
-
-def test_conv_redirect_guard_ordered_before_training_branch() -> None:
-    """FR-25: cross-project redirect detection is disabled for _training BEFORE
-    any redirect template could short-circuit the inner retrieval workflow."""
-    src = (
-        Path(__file__).resolve().parents[1]
-        / "api"
-        / "application"
-        / "pipelines"
-        / "conv_workflow.py"
-    ).read_text(encoding="utf-8")
-    guard_at = src.find("if is_training_scope(project_key)")
-    detect_at = src.find("detect_foreign_project(query")
-    assert guard_at != -1, "training-scope guard vanished from start_conv"
-    assert detect_at != -1
-    assert guard_at < detect_at  # guard decides before the customer detector runs

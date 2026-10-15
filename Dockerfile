@@ -1,8 +1,9 @@
 # rag-real-estate BE — Cloud Run (asia-southeast1) container image.
-# Multi-stage: builder installs requirements.txt into an isolated venv; the
-# runtime stage ships ONLY that venv plus the runtime code (api/, ingest/).
-# Dependency manifest is requirements.txt (pinned; root pyproject.toml is
-# tooling-only). No secrets are baked in — Cloud Run injects env vars at deploy.
+# Multi-stage: builder installs requirements-runtime.txt into an isolated venv;
+# the runtime stage ships ONLY that venv plus the runtime code (api/, ingest/).
+# Dependency manifest is requirements-runtime.txt (runtime subset of
+# requirements.txt without offline docling/ragas/pytest/ruff bloat). No secrets
+# are baked in — Cloud Run injects env vars at deploy.
 
 FROM python:3.11-slim AS builder
 
@@ -10,9 +11,9 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /build
-COPY requirements.txt .
+COPY requirements-runtime.txt .
 RUN python -m venv /opt/venv \
- && /opt/venv/bin/pip install -r requirements.txt
+ && /opt/venv/bin/pip install -r requirements-runtime.txt
 
 
 FROM python:3.11-slim AS runtime

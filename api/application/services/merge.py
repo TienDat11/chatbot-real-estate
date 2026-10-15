@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ingest.placeholder import FACT_TOKEN_START, extract_placeholders, resolve_placeholders
+from ingest.subject_key import normalize_subject_key
 
 from .fact_display import enrich_evidence_entry
 from .sql_leg import get_ro_pool
@@ -21,6 +24,36 @@ from .sql_leg import get_ro_pool
 logger = logging.getLogger("api.merge")
 
 DELIMITER = "=" * 60
+
+_RAG_AREA_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<label>nha_tre|shcd_tang2|shcd_tang3|be_boi|gym|yoga)"
+    r"(?![A-Za-z0-9_])\s*(?:[:=]\s*)?(?:diện\s+tích\s*)?(?P<area>\d+(?:[.,]\d+)?)\s*m(?:2|²)(?!\w)",
+    
+    re.IGNORECASE,
+)
+
+
+def _rag_area_evidence(chunk: dict, record: dict, project_key: str | None, as_of: date | None) -> list[tuple[Decimal, str, str, str, str, str]]:
+    """Return registry-backed amenity areas only for an exact selected chunk match."""
+    registry_content = record.get("registry_content")
+    if not _eligible_chunk(chunk, record, project_key, as_of):
+        return []
+    try:
+        if record.get("section", "").strip().casefold() != "tiện ích":
+            return []
+    except (AttributeError, TypeError):
+        return []
+    evidence = []
+    for match in _RAG_AREA_PATTERN.finditer(registry_content):
+        try:
+            area = Decimal(match.group("area").replace(",", "."))
+        except InvalidOperation:
+            continue
+        if area > 0:
+            evidence.append(
+                (area, match.group("label").lower(), record["doc_id"], record["title"], chunk["id"], project_key)
+            )
+    return evidence
 
 
 @dataclass
@@ -41,11 +74,6 @@ def _iso(v: Any) -> str | None:
 def _strip_internal(chunk: dict) -> dict:
     """Drop internal keys (leading '_') before JSON-encoding to the LLM/UI."""
     return {k: v for k, v in chunk.items() if not k.startswith("_")}
-
-
-def _normalize_subject_key(key: str) -> str:
-    """Match ingest normalization (dots/dashes stripped, lowercase) for token lookup."""
-    return key.strip().lower().replace(".", "").replace("-", "")
 
 
 def _format_fact_value(row: dict) -> str | None:
@@ -94,7 +122,7 @@ async def _resolve_fact_value(
         ORDER BY f.effective_from DESC
         LIMIT 1
         """,
-        _normalize_subject_key(subject_key),
+        normalize_subject_key(subject_key),
         fact_key,
         policy_key,
         project_key,
@@ -123,49 +151,76 @@ async def _resolve_chunk_placeholders(
             c["content"] = resolve_placeholders(content, lambda fk, sk, pk: cache.get((fk, sk, pk)))
 
 
+def _eligible_chunk(chunk: dict, record: dict, project_key: str | None, as_of: date | None) -> bool:
+    content, registry_content = chunk.get("content"), record.get("registry_content")
+    start, end = record.get("effective_from"), record.get("effective_to")
+    try:
+        effective_on = as_of or date.today()
+        if isinstance(start, str):
+            start = date.fromisoformat(start)
+        if isinstance(end, str):
+            end = date.fromisoformat(end)
+        if isinstance(start, datetime):
+            start = start.date()
+        if isinstance(end, datetime):
+            end = end.date()
+        return bool(
+            isinstance(chunk.get("id"), str) and chunk["id"].strip()
+            and isinstance(content, str) and content.strip()
+            and isinstance(registry_content, str) and registry_content.strip()
+            and content == registry_content
+            and isinstance(project_key, str) and project_key.strip()
+            and record.get("project_key") == project_key
+            and record.get("status") == "published"
+            and isinstance(start, date) and start <= effective_on
+            and (end is None or (isinstance(end, date) and end > effective_on))
+            and isinstance(record.get("doc_id"), str) and record["doc_id"].strip()
+            and isinstance(record.get("title"), str) and record["title"].strip()
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 async def hydrate_chunks(
     chunks: list[dict], as_of: date | None = None, project_key: str | None = None
 ) -> list[dict]:
-    """Attach doc metadata (title, section, kind, effective dates) from the registry.
-
-    FACT placeholder tokens in chunk content hydrate to the fact value in effect at
-    as_of; failed resolves leave tokens intact (never crash).
-    """
+    """Return only exact-content chunks authorized by the document registry."""
     if not chunks:
         return []
     ids = [c.get("id") for c in chunks if c.get("id")]
     if not ids:
-        return [{**c} for c in chunks]
-    pool = await get_ro_pool()
-    sql = """SELECT c.chunk_id, c.section, d.doc_id, d.title, d.kind, d.effective_from, d.effective_to
-             FROM document_chunks c JOIN documents d ON d.doc_id = c.doc_id
-             WHERE c.chunk_id = ANY($1)"""  # noqa: E501
+        return []
     try:
+        pool = await get_ro_pool()
+        sql = """SELECT c.chunk_id, c.content AS registry_content, c.section,
+                        d.doc_id, d.title, d.kind, d.project_key, d.status,
+                        d.effective_from, d.effective_to
+                 FROM document_chunks c JOIN documents d ON d.doc_id = c.doc_id
+                 WHERE c.chunk_id = ANY($1)"""
         async with pool.acquire() as conn:
             recs = await conn.fetch(sql, ids)
             lookup = {r["chunk_id"]: r for r in recs}
-            out: list[dict] = []
-            for c in chunks:
-                r = lookup.get(c.get("id")) or {}
-                out.append(
-                    {
-                        **_strip_internal(c),
-                        "doc_id": r.get("doc_id"),
-                        "title": r.get("title"),
-                        "section": r.get("section"),
-                        "kind": r.get("kind"),
-                        "effective_from": _iso(r.get("effective_from")),
-                        "effective_to": _iso(r.get("effective_to")),
-                    }
-                )
-            try:
-                await _resolve_chunk_placeholders(out, conn, as_of, project_key)
-            except Exception as exc:  # noqa: BLE001 — tokens stay unresolved, never crash
-                logger.warning("merge: placeholder resolve failed: %s", exc)
+            eligible = [c for c in chunks if _eligible_chunk(c, lookup.get(c.get("id"), {}), project_key, as_of)]
+            out = [
+                {
+                    **_strip_internal(c),
+                    "doc_id": lookup[c["id"]].get("doc_id"),
+                    "title": lookup[c["id"]].get("title"),
+                    "section": lookup[c["id"]].get("section"),
+                    "project_key": lookup[c["id"]].get("project_key"),
+                    "status": lookup[c["id"]].get("status"),
+                    "effective_from": _iso(lookup[c["id"]].get("effective_from")),
+                    "effective_to": _iso(lookup[c["id"]].get("effective_to")),
+                    "_rag_area_evidence": _rag_area_evidence(c, lookup[c["id"]], project_key, as_of),
+                }
+                for c in eligible
+            ]
+            await _resolve_chunk_placeholders(out, conn, as_of, project_key)
+            out = [chunk for chunk in out if isinstance(chunk.get("content"), str) and chunk["content"].strip()]
         return out
-    except Exception as exc:  # noqa: BLE001 — hydration failure keeps raw chunks (never crash)
+    except Exception as exc:  # noqa: BLE001 — registry failure fails closed
         logger.warning("merge.hydrate fail: %s", exc)
-        return [{**c} for c in chunks]
+        return []
 
 
 def build_rag_context(chunks: list[dict]) -> str:
@@ -178,6 +233,8 @@ def build_rag_context(chunks: list[dict]) -> str:
             "doc_id": c.get("doc_id"),
             "title": c.get("title"),
             "section": c.get("section"),
+            "project_key": c.get("project_key"),
+            "status": c.get("status"),
             "effective_from": c.get("effective_from"),
             "effective_to": c.get("effective_to"),
         }
@@ -187,8 +244,9 @@ def build_rag_context(chunks: list[dict]) -> str:
 
 
 def build_evidence_context(evidence: list[dict]) -> str:
-    """FACT_EVIDENCE block — JSON-encode the fe blocks (the sole numeric source).
+    """FACT_EVIDENCE block — the sole source for business/financial numbers.
 
+    Amenity-area claims have a separate, narrow RAG registry-evidence exception.
     Entries gain additive ``subject_display`` / ``policy_display`` legends (D4) so
     the model names units and payment methods in prose instead of echoing machine
     keys. Backfilling here covers every producer (SQL leg, affordability, NL2SQL);
@@ -196,7 +254,7 @@ def build_evidence_context(evidence: list[dict]) -> str:
     ``fields`` and citations on ``fe_id``.
     """
     enriched = [enrich_evidence_entry(e) for e in evidence or []]
-    return f"{DELIMITER}\nFACT_EVIDENCE (số liệu từ hệ thống dữ liệu — nguồn số DUY NHẤT, LLM không tự tính; khi gọi tên căn hay phương án thanh toán CHỈ dùng subject_display/policy_display, KHÔNG viết subject/policy_key nội bộ):\n{json.dumps(enriched, ensure_ascii=False)}\n{DELIMITER}"  # noqa: E501
+    return f"{DELIMITER}\nFACT_EVIDENCE (số liệu từ hệ thống dữ liệu — nguồn duy nhất cho số liệu kinh doanh/tài chính, LLM không tự tính; khi gọi tên căn hay phương án thanh toán CHỈ dùng subject_display/policy_display, KHÔNG viết subject/policy_key nội bộ):\n{json.dumps(enriched, ensure_ascii=False)}\n{DELIMITER}"  # noqa: E501
 
 
 def build_sources(chunks: list[dict]) -> list[dict]:
@@ -246,14 +304,28 @@ async def merge_context(
     ``project_key`` (story 10.4): scopes the FACT-placeholder hydration so a
     chunk can never pull a fact value from another project's subject.
     """
-    hydrated = await hydrate_chunks(rag_chunks, as_of, project_key) if rag_chunks else []
+    hydrated = await hydrate_chunks(rag_chunks, as_of, project_key) if rag_chunks and project_key else []
     rag_blocks = build_rag_context(hydrated)
     evidence_blocks = build_evidence_context(evidence or [])
-    sources = build_sources(hydrated)
+    rag_rows = json.loads(rag_blocks.split("\n", 3)[2])
+    fact_rows = json.loads(evidence_blocks.split("\n", 3)[2])
+    sources = build_sources(hydrated) if rag_rows else []
     facts = build_facts(evidence or [])
+    selected_chunk_ids = tuple(row["id"] for row in rag_rows if isinstance(row.get("id"), str) and row["id"].strip() and isinstance(row.get("content"), str) and row["content"].strip())
+    selected_project_keys = tuple(dict.fromkeys(row["project_key"] for row in rag_rows if row.get("id") in selected_chunk_ids and isinstance(row.get("project_key"), str) and row["project_key"].strip()))
+    selected_fact_ids = tuple(row["fact_id"] for row in fact_rows if row.get("fact_id") is not None and row.get("fact_id") != "")
+    selected_fe_ids = tuple(row["fe_id"] for row in fact_rows if isinstance(row.get("fe_id"), str) and row["fe_id"].strip())
+    rag_area_evidence = [item for chunk in hydrated for item in chunk.get("_rag_area_evidence", [])]
     return Merged(
         rag_blocks=rag_blocks,
         evidence_blocks=evidence_blocks,
         sources=sources,
         facts=facts,
+        meta={
+            "_rag_area_evidence": rag_area_evidence,
+            "selected_chunk_ids": selected_chunk_ids,
+            "selected_project_keys": selected_project_keys,
+            "selected_fact_ids": selected_fact_ids,
+            "selected_fe_ids": selected_fe_ids,
+        },
     )

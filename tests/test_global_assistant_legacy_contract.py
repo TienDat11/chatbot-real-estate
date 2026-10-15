@@ -49,7 +49,7 @@ class _FakePipeline:
     calls: list[dict[str, Any]] = []
 
     async def run(self, query, session_id, as_of, history, on_event=None, **kwargs):
-        pk = kwargs.get("project_key")
+        pk = kwargs["project_context"].project_key
         _FakePipeline.last_project_key = pk
         _FakePipeline.calls.append({"query": query, "project_key": pk})
         return dict(_PAYLOAD)
@@ -63,6 +63,27 @@ class _OfflineQuotaGate:
         return None
 
 
+class _RecordingQuotaGate(_OfflineQuotaGate):
+    """Records that the quota gate was (or was not) consulted.
+
+    D4's BLOCK-no-scope control is the real ``/query`` boundary, so the proof
+    must be that a refused turn reserved nothing: a quota spy is the only way
+    to observe the absence of work, the pipeline spy cannot see it either.
+    """
+
+    prepared: list[dict[str, Any]] = []
+    refunded: list[Any] = []
+
+    async def prepare_turn(self, **kwargs):
+        _RecordingQuotaGate.prepared.append(kwargs)
+        return UnmanagedTurnContext()
+
+    async def refund_turn(self, context):
+        _RecordingQuotaGate.refunded.append(context)
+        return None
+
+
+
 async def _fake_resolve(project_key, *, active_projects=None):
     """Explicit-key passthrough only — no implicit default. Production raises
     ProjectScopeError when no key is given and >1 active project exists; that
@@ -74,15 +95,48 @@ async def _fake_resolve(project_key, *, active_projects=None):
     return project_key
 
 
-def _install_offline_seams(monkeypatch):
+def _registry_records():
+    """Two active registry records — the DB snapshot /query resolves against."""
+    from api.application.ports.project_registry import ProjectRegistryRecord
+
+    return [
+        ProjectRegistryRecord(
+            project_key=row["project_key"],
+            ten_thuong_mai=row["display_name"],
+            ten_phap_ly=None,
+            vi_tri=None,
+            hotline=None,
+            location=None,
+            geo_center_lat=None,
+            geo_center_lng=None,
+            is_hot=row["is_hot"],
+            status="active",
+        )
+        for row in _CATALOGUE_2_ACTIVE
+    ]
+
+
+def _install_offline_seams(monkeypatch, *, quota_gate: Any = None):
     _FakePipeline.last_project_key = None
     _FakePipeline.calls = []
+    _RecordingQuotaGate.prepared = []
+    _RecordingQuotaGate.refunded = []
     monkeypatch.setattr(
         "api.application.services.query_quota_gate.build_query_quota_gate",
-        lambda: _OfflineQuotaGate(),
+        lambda: (quota_gate or _OfflineQuotaGate)(),
     )
     monkeypatch.setattr(
         "api.application.services.project_scope.resolve_project_key", _fake_resolve
+    )
+    # /query reads the registry snapshot before scope resolution and refuses an
+    # empty catalogue (ProjectContext raises). Without this stub the suite only
+    # passes where a live project registry is reachable.
+    async def _fetch_records():
+        return _registry_records()
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _fetch_records,
     )
     monkeypatch.setattr(
         "api.application.pipelines.conv_workflow.RagQueryPipelineConv", _FakePipeline
@@ -95,28 +149,80 @@ def client(monkeypatch) -> TestClient:
     return TestClient(create_app())
 
 
-def _client_with_multiple_active(monkeypatch) -> TestClient:
-    """App where omitting project_key yields 422 PROJECT_SCOPE (>1 active)."""
+def _client_with_multiple_active(
+    monkeypatch, *, honour_explicit_key: bool = False, quota_gate: Any = None
+) -> TestClient:
+    """App where omitting project_key yields 422 PROJECT_SCOPE (>1 active).
+
+    ``honour_explicit_key`` is the opposite control: the resolver still refuses
+    an OMITTED key under the same two-project catalogue, but passes an explicit
+    one through, proving the 422 is scope AMBIGUITY and not a blanket refusal.
+    """
     from api.application.services.project_scope import (
         PROJECT_CHOICE_REQUIRED,
         ProjectScopeError,
     )
 
-    async def _resolve_choice(requested, *, active_projects=None):
+    from api.application.ports.project_registry import ProjectRegistryRecord
+
+    async def fetch_active_projects():
+        return [
+            ProjectRegistryRecord(
+                project_key=key, ten_thuong_mai=name, ten_phap_ly=None, vi_tri=None,
+                hotline=None, location=None, geo_center_lat=None, geo_center_lng=None,
+                is_hot=key == "camellia", status="active",
+            )
+            for key, name in (("camellia", "The Camellia Son Tra - Da Nang"), ("soleil", "The Soleil Đà Nẵng"))
+        ]
+
+    async def resolve_choice(requested, *, active_projects=None):
+        if honour_explicit_key and requested:
+            return requested
         raise ProjectScopeError(PROJECT_CHOICE_REQUIRED)
 
-    _install_offline_seams(monkeypatch)
-    monkeypatch.setattr(
-        "api.application.services.project_scope.resolve_project_key", _resolve_choice
-    )
-    monkeypatch.setattr(
-        "api.application.services.project_config.load_project_catalogue", _async_catalogue
-    )
+    _install_offline_seams(monkeypatch, quota_gate=quota_gate)
+    monkeypatch.setattr("api.application.services.project_scope.fetch_active_projects", fetch_active_projects)
+    monkeypatch.setattr("api.application.services.project_scope.resolve_project_key", resolve_choice)
     return TestClient(create_app())
 
 
-async def _async_catalogue():
-    return _CATALOGUE_2_ACTIVE
+def test_project_scope_error_formats_picker_from_single_active_snapshot(monkeypatch) -> None:
+    from api.application.ports.project_registry import ProjectRegistryRecord
+    from api.application.services.project_scope import ProjectScopeError
+
+    records = [
+        ProjectRegistryRecord(
+            project_key="camellia", ten_thuong_mai="The Camellia Son Tra - Da Nang",
+            ten_phap_ly=None, vi_tri=None, hotline=None, location="Da Nang",
+            geo_center_lat=16.1, geo_center_lng=108.2, is_hot=True, status="active",
+        ),
+        ProjectRegistryRecord(
+            project_key="soleil", ten_thuong_mai="The Soleil Đà Nẵng",
+            ten_phap_ly=None, vi_tri=None, hotline=None, location="Da Nang",
+            geo_center_lat=16.2, geo_center_lng=108.3, is_hot=False, status="active",
+        ),
+    ]
+    reads = []
+
+    _install_offline_seams(monkeypatch)
+
+    async def reject(requested, *, active_projects=None):
+        raise ProjectScopeError("bad project")
+
+    async def fetch_records():
+        reads.append(None)
+        return records if len(reads) == 1 else []
+    monkeypatch.setattr("api.application.services.project_scope.fetch_active_project_records", fetch_records)
+    monkeypatch.setattr("api.application.services.project_scope.resolve_project_key", reject)
+    response = TestClient(create_app()).post("/query", json={"query": "hello", "project_key": "missing"})
+
+    assert response.status_code == 422
+    assert len(reads) == 1
+    projects = response.json()["projects"]
+    assert [item["project_key"] for item in projects] == ["camellia", "soleil"]
+    assert set(projects[0]) == {"project_key", "name", "display_name", "short_name", "location", "lat", "lng", "is_hot"}
+    assert projects[0]["lat"] == 16.1 and projects[0]["is_hot"] is True
+
 
 
 # --- 1. POST /query accepts the current request contract (explicit key). ---
@@ -143,7 +249,7 @@ def test_legacy_query_without_project_with_multiple_active_projects_keeps_projec
 ) -> None:
     """Two active projects + no project_key → 422 PROJECT_SCOPE with the exact
     legacy Vietnamese choice message and an ordered catalogue for the FE picker."""
-    client = _client_with_multiple_active(monkeypatch)
+    client = _client_with_multiple_active(monkeypatch, quota_gate=_RecordingQuotaGate)
     resp = client.post("/query", json={"query": "Căn nào đẹp không?"})
     assert resp.status_code == 422, resp.text
     body = resp.json()
@@ -158,6 +264,34 @@ def test_legacy_query_without_project_with_multiple_active_projects_keeps_projec
         assert isinstance(row["display_name"], str) and row["display_name"]
         assert isinstance(row["short_name"], str)
         assert isinstance(row["is_hot"], bool)
+
+    # D4: the refused turn must cost nothing. The scope gate runs BEFORE the
+    # quota reservation, so no quota was prepared...
+    assert _RecordingQuotaGate.prepared == []
+    assert _RecordingQuotaGate.refunded == []
+    # ...and no pipeline leg was ever constructed or run.
+    assert _FakePipeline.calls == []
+    assert _FakePipeline.last_project_key is None
+
+
+def test_ambiguous_scope_refusal_is_not_a_blanket_refusal(monkeypatch) -> None:
+    """Same two-project catalogue, explicit key → the turn proceeds.
+
+    Without this the 422 above could pass for a blanket refusal of a
+    multi-project deployment rather than a request for the user to choose.
+    """
+    client = _client_with_multiple_active(
+        monkeypatch, honour_explicit_key=True, quota_gate=_RecordingQuotaGate
+    )
+    resp = client.post(
+        "/query", json={"query": "Căn nào đẹp không?", "project_key": "camellia"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "completed"
+    assert _FakePipeline.last_project_key == "camellia"
+    assert len(_FakePipeline.calls) == 1
+    # The positive half: the gate is passed THROUGH, not skipped — quota ran.
+    assert len(_RecordingQuotaGate.prepared) == 1
 
 
 # --- 3. Session read remains project-scoped: wrong project → 404 (no leak). ---

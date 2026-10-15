@@ -1,5 +1,99 @@
 # Báo cáo audit chi phí GCP — sale-chat-ai
 
+> **CẬP NHẬT 2026-10-14 — SỐ ĐO MỚI THAY THẾ SỐ 2026-10-12.** Phần dưới giữ nguyên làm lịch sử; mục này là số đúng hiện tại.
+
+**Nguồn đo** [ĐO]: Cloud Monitoring API, `run.googleapis.com/container/{cpu/allocation_time, memory/allocation_time, request_count, instance_count}`, cửa sổ 24h và 1h gần nhất, kết thúc `2026-10-14T05:50Z`. Đơn giá [SKU] như mục 1 (chưa đối chiếu hoá đơn).
+
+**Traffic hiện tại** [GCP, 2026-10-14; tag re-read 2026-10-14 sau `gcloud run services describe`]:
+- `ragre-api`: 100% → `00044-qbb` (`cpu-throttling=true`, minScale=1). Tag `messenger` → **`00080-mub`** (`cpu-throttling=false`, không có minScale; đổi từ `00079-hib` sau lần deploy kế tiếp cùng ngày). Tag `messenger-rc2` → `00066-jic` (`cpu-throttling=true`, không có minScale).
+- `ragre-web`: 100% → `00013-gxv` (không phải `00014-vub` như bản cũ ghi). Tag `candidate-web` → `00009-pos`, `liberty-check` → `00014-vub`, `fixcheck` → `00013-gxv`.
+
+**Bảng theo revision** [ĐO 24h + SKU]. Mode: `instance-based` = throttling tắt; `request-based` = throttling bật (memory khi có min-instance tính theo đơn giá min-instance $0.0000035/GiB-s).
+
+| Revision | Traffic | Tag | minScale | maxScale | cpu-throttling | vCPU-s/24h | GiB-s/24h | req/24h | Mode | $/tháng |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `ragre-api-00044-qbb` | 100% | — | 1 | 2 | true | 2.4 | 86,389 | 20 | request-based + min-instance | ≈ $9.1 (memory: 86,389 × 30 × 0.0000035) |
+| `ragre-api-00079-hib` | 0% | `messenger` | — (0) | 2 | **false** | 3,373 (chỉ ~2h, tạo 03:57Z) | 3,291 | 24 | instance-based | ≈ $35 theo giờ gần nhất (2,058 vCPU-s + 1,957 GiB-s × 720) |
+| `ragre-api-00077-puq` | 0% | — | — | 2 | false | 5,572 | 5,371 | 16 | instance-based | ≈ $4.0 (24h × 30) — đã dừng, xem dưới |
+| `ragre-api-00076-qeq` | 0% | — | — | 2 | false | 1,513 | 1,477 | 5 | instance-based | ≈ $1.1 — đã dừng |
+| `ragre-api-00075-xot` | 0% | — | — | 2 | false | 1,577 | 1,509 | 12 | instance-based | ≈ $1.1 — đã dừng |
+| `ragre-api-00078-gax` | 0% | — | — | 2 | false | 1,276 | 1,235 | 12 | instance-based | ≈ $0.9 — đã dừng |
+| `ragre-api-00071-kuv` | 0% | — | — | 2 | false | 1,020 | 1,021 | 3 | instance-based | ≈ $0.7 — đã dừng |
+| `ragre-api-00066-jic` | 0% | `messenger-rc2` | — (0) | 2 | true | 34 | 13 | 1 | request-based | ≈ $0.04 |
+| `ragre-api-00063-vux` | 0% | — | 1 (spec) | 2 | false | **0** (24h); 28,295 trong cửa sổ 48h | 0 | 0 | — | **$0** — không còn tiêu thụ |
+| `ragre-web-00013-gxv` | 100% | — | — | 2 | true | 47 | 9 | 14 | request-based | ≈ $0.05 |
+| `ragre-web-00014-vub` | 0% | `liberty-check` | — | 2 | true | 0 | 0 | 0 | — | $0 |
+
+**Run-rate Cloud Run** [ĐO + SKU]. **Sửa lại 2026-10-14 06:10Z — con số "$45/tháng" ở bản trước là SAI, xem mục "ĐÍNH CHÍNH" ngay dưới.**
+
+**ĐÍNH CHÍNH — cửa sổ 1h bị nhiễu bởi chính phiên chẩn đoán.** Bản trước lấy "giờ gần nhất × 720" và ra `00079-hib` ≈ $35/tháng. Cửa sổ đó trùng đúng lúc phiên này đang bắn liên tục vào URL tag `messenger` (verify webhook + 6 câu hỏi giá/lãi suất) để chẩn đoán. Với `cpu-throttling=false`, mỗi request làm instance "nóng" và CPU bị tính liên tục suốt thời gian instance còn sống, nên số 1h phản ánh **tải do người chẩn đoán tạo ra**, không phải tải thật.
+
+Số đúng lấy từ `container/instance_count` bucket 60s (đo 05:28→06:05Z):
+
+```
+ragre-api-00079-hib  05:28..05:58  = 1 instance   (31 phút, do phiên chẩn đoán)
+ragre-api-00079-hib  05:59..06:05  = 0 instance   ← ĐÃ SCALE VỀ 0
+cpu/allocation_time  06:06Z        = 0 vCPU-s
+```
+
+`00079-hib` **không có `minScale`** (annotation rỗng = 0), nên nó **scale về 0 khi rảnh**. Cái làm nó sống 31 phút là request, không phải một vòng lặp nền. Kết luận: `--no-cpu-throttling` trên revision Messenger **không** đốt $35/tháng; nó chỉ tính CPU theo thời gian instance thật sự tồn tại.
+
+**Duty cycle 24h thật** (`cpu/allocation_time`, bucket 600s, 24h kết thúc 06:05Z):
+
+| Revision | vCPU-s/24h | Bucket 10' active | Giờ active | GiB-s/24h | req/24h | $/tháng nếu chạy 24/7 | $/24h thực tế |
+|---|---|---|---|---|---|---|---|
+| `00079-hib` (tag `messenger`) | 4,093 | 9 | 1.5h | 4,012 | 24 | ≈ $2.94 | **$0.10** |
+| `00077-puq` | 5,572 | 15 | 2.5h | 5,371 | 16 | ≈ $4.00 | $0.13 — **đã dừng** |
+| `00075-xot` | 1,577 | 4 | 0.7h | 1,509 | 12 | ≈ $1.13 | $0.04 — đã dừng |
+| `00076-qeq` | 1,513 | 4 | 0.7h | 1,477 | 5 | ≈ $1.09 | $0.04 — đã dừng |
+| `00078-gax` | 1,276 | 3 | 0.5h | 1,235 | 12 | ≈ $0.92 | $0.03 — đã dừng |
+| `00071-kuv` | 1,020 | 2 | 0.3h | 1,021 | 3 | ≈ $0.74 | $0.02 — đã dừng |
+| `00066-jic` (tag `messenger-rc2`) | 34 | 2 | 0.3h | 13 | 1 | ≈ $0.04 | $0.00 |
+| `00044-qbb` (100% traffic) | 2 | 5 | 0.8h | **86,329** | 20 | ≈ $9.06 | **$0.30** |
+
+**Steady state thật ≈ $12/tháng Cloud Run**, không phải $45:
+- `00044-qbb` ≈ **$9.06** — đây là khoản lớn nhất, và **toàn bộ là memory của min-instance** (86,329 GiB-s/24h × $0.0000035). CPU idle đo được = 2 vCPU-s/24h, tức gần đúng $0. `minScale=1` giữ 1 GiB sống 24/7 cho **20 request/ngày**.
+- `00079-hib` ≈ **$2.94** nếu chạy 24/7, nhưng thực tế **$0 khi rảnh** (đã đo scale-to-zero). Muốn con số này thành $0 vĩnh viễn thì không cần làm gì — nó tự làm.
+- `00071`–`00078` ≈ $7.9/24h nhưng **đã ở 0 instance**; đó là chi phí của các lần deploy trong ngày, không lặp lại.
+- `ragre-web` ≈ $0.05.
+
+**Hệ quả cho việc giảm chi phí:** khoản tiết kiệm lớn nhất còn lại là `minScale=1` của `00044-qbb` (**≈ $9/tháng**, 75% hoá đơn Cloud Run). Đổi sang `minScale=0` đánh đổi cold start 30–40s cho request đầu tiên sau khi rảnh. **Cần Justin duyệt** — và **tuyệt đối không** chạy `gcloud run services update` không kèm `--no-traffic`, vì thao tác đó sẽ đẩy revision mới nhất lên 100% traffic và bỏ pin `00044-qbb`.
+- Request-based fee: không đáng kể (107 request/24h).
+- So với bản cũ ($51/tháng Cloud Run do `00063-vux`): khoản đó **đã biến mất**; `00063-vux` không tiêu thụ gì trong 24h.
+
+**Artifact Registry** [ĐO describe + SKU tham chiếu $0.10/GiB-tháng]:
+- `cloud-run-source-deploy`: 174,504.9 → **74,789.0 MiB**; digest 51 → **22**.
+- `ragre`: 11,733.5 → **9,367.5 MiB**; digest 24 → **10**.
+- Tổng: 181.9 GiB → **82.2 GiB** (giảm ≈ 99.7 GiB). Cleanup policy **đang xoá thật** (`cleanupPolicyDryRun=false`, đã đọc lại). Storage ≈ (82.2 − 0.5) × $0.10 ≈ **$8.2/tháng** (trước ≈ $18).
+- Kiểm tra an toàn sau sweep: hai digest đang chạy nhưng untagged đã được gắn tag bảo vệ ngày 10-14 — `8a5555c2` (`ragre-api-00066-jic`, `00063-vux`) với tag `keep-messenger-rc2-8a5555c2`; `20b92abb` (`ragre-web-00013-gxv`) với tag `keep-web-00013-20b92abb`. Lệnh `tags add` thành công trên digest đã tồn tại, nên cả hai vẫn còn.
+
+**Secret Manager** [ĐO]: **33 version ENABLED** (không phải 18 hay 28 như hai bản trước). ≈ $2.0/tháng (33 × $0.06). Các secret có 3 version ENABLED: `EMBEDDING_API_KEY`, `FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY`, `LLM_API_KEY`, `R2_SECRET_ACCESS_KEY`, `RERANK_API_KEY`, `ZALO_BOT_IDENTITY_SECRET`. Vô hiệu hoá hoặc xoá version cũ cần duyệt; tiết kiệm ≈ $0.6/tháng.
+
+**Cloud Storage** [ĐO]: `run-sources-sale-chat-ai-asia-southeast1` 2,113,981,117 B; `sale-chat-ai_cloudbuild` 18,368,524 B. ≈ $0.05/tháng.
+
+**API đang bật** [ĐO `services list --enabled`]: `bigquery`, `firestore`, `sql-component`, `generativelanguage`, `cloudbuild` và các API khác đang BẬT. Bản cũ ghi BigQuery/Cloud SQL "chưa bật" — chỉ đúng với một phần. **Chưa đo usage** các API này: mục "$0" cho chúng là **CHƯA XÁC MINH**.
+
+**Tổng run-rate cập nhật** = Cloud Run + AR + Secret + Storage: ≈ **$12 + $8.2 + $2.0 + $0.05 ≈ $22/tháng**. Bản 2026-10-12 ghi $68; bản "$45/tháng" ghi ở lần sửa đầu ngày 2026-10-14 cũng SAI (cửa sổ 1h bị nhiễu bởi phiên chẩn đoán — xem ĐÍNH CHÍNH ở trên).
+
+**Đính chính bản cũ (2026-10-12)**:
+- `messenger` và `messenger-rc2` **không** cùng trỏ vào always-CPU. Chỉ `messenger` → `00079-hib` là always-CPU; `messenger-rc2` → `00066-jic` là throttled, ≈ $0.04/tháng.
+- `ragre-web` 100% là `00013-gxv`, không phải `00014-vub`.
+- `ragre-api-00044-qbb` min=1 ≈ $9.1/tháng, không phải $5.4 (86,367 × 30 × 0.0000035 = $9.07).
+- `00059`–`00062` (min=1, always-CPU, 0% traffic): **0 allocation** trong 24h → không tốn tiền.
+- `00063-vux` $46/tháng: đã dừng. Không còn tiêu thụ.
+
+**Hành động đã áp dụng 2026-10-14** [ĐÃ LÀM, hoàn tác được]:
+- `artifacts docker tags add` cho `cloud-run-source-deploy/ragre-api@sha256:8a5555c2…` → tag `keep-messenger-rc2-8a5555c2`.
+- `artifacts docker tags add` cho `ragre/ragre-web@sha256:20b92abb…` → tag `keep-web-00013-20b92abb`.
+- Hoàn tác: `artifacts docker tags delete <repo>:<tag>` (không xoá digest).
+
+**Hành động CHỜ DUYỆT** (không thực hiện):
+- Xoá revision `00071`–`00078`: không tốn tiền khi đã dừng, không cần làm cho chi phí. Revision không thể sửa; xoá không hoàn tác.
+- Vô hiệu hoá các version ENABLED cũ của secret: ≈ $0.6/tháng, cần kiểm tra version nào đang được pin.
+- Chuyển tag `messenger` sang `00066-jic` (throttled) để bỏ ≈ $35/tháng: **KHÔNG đề xuất**. Messenger yêu cầu CPU always-allocated vì webhook trả 200 rồi xử lý nền. Chỉ cân nhắc khi background work đã được tách khỏi request (phương án A trong mục 3).
+
+---
+
 Phạm vi: project `sale-chat-ai`, region `asia-southeast1`, service Cloud Run `ragre-api` và `ragre-web`, Artifact Registry, Secret Manager, Cloud Storage, Logging.
 Cửa sổ đo: 30 ngày, 2026-09-12 → 2026-10-12. Số liệu usage lấy từ Cloud Monitoring và `gcloud` (chỉ đọc). Cột $ là **usage × đơn giá SKU**, KHÔNG đối chiếu được hoá đơn (Billing Reports API trả 403 với tài khoản hiện tại).
 

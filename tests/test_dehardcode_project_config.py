@@ -40,6 +40,20 @@ def _merged(query: str, project_key: str | None) -> Merged:
         meta={"query": query, "rewritten": query, "project_key": project_key},
     )
 
+def test_numeric_guard_allows_qualitative_answer_and_rejects_unsupported_number():
+    import asyncio
+
+    from api.domain.services.guard_output import guard_output
+    qualitative = "The Soleil nằm trên trục Phạm Văn Đồng, có tầm nhìn biển và hồ bơi."
+    result = asyncio.run(guard_output(qualitative, [], [], {}, {"strong_chunks": 2}))
+    assert result.verdicts["numeric_grounding"] == "pass"
+    assert result.confidence != "LOW"
+
+    unsupported_number = "The Soleil có 48,2% căn hộ nhìn ra biển."
+    failed = asyncio.run(guard_output(unsupported_number, [], [], {}, {"strong_chunks": 2}))
+    assert failed.verdicts["numeric_grounding"] == "fail"
+    assert failed.confidence == "LOW"
+
 
 # --- registry render helper --------------------------------------------------
 

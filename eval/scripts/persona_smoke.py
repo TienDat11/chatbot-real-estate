@@ -17,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from api.application.pipelines.conv_workflow import RagQueryPipelineConv  # noqa: E402
+from api.application.services.project_context import ProjectContext  # noqa: E402
+from api.application.services.project_scope import fetch_active_projects  # noqa: E402
 
 # 5 hội thoại 3-turn (mỗi hàng = [query, history_user, history_assistant] trước lượt hiện tại)
 SCENARIOS = [
@@ -108,10 +110,15 @@ SCENARIOS = [
 ]
 
 
-async def run_scenario(pipeline, scenario) -> list[dict]:
+async def run_scenario(pipeline, scenario, project_context: ProjectContext) -> list[dict]:
     turns_out = []
     for t in scenario["turns"]:
-        res = await pipeline.run(query=t["query"], session_id=scenario["id"], history=t["history"])
+        res = await pipeline.run(
+            query=t["query"],
+            session_id=scenario["id"],
+            history=t["history"],
+            project_context=project_context,
+        )
         turns_out.append({
             "query": t["query"],
             "conv_state": res.get("conv_state"),
@@ -121,12 +128,19 @@ async def run_scenario(pipeline, scenario) -> list[dict]:
 
 
 async def main() -> None:
+    projects = await fetch_active_projects()
+    catalogue = tuple((project.project_key, project.ten_thuong_mai) for project in projects)
+    project_context = ProjectContext(
+        project_key="camellia",
+        answer_mode="normal",
+        active_catalogue=catalogue,
+    )
     pipeline = RagQueryPipelineConv()
     report_lines = [f"# Persona smoke {date.today().isoformat()}", ""]
     report_lines.append("> Live LLM — chấm 1-5 sao cho từng hội thoại (persona, chính xác, tự nhiên).")
     for s in SCENARIOS:
         print(f"--- {s['id']} {s['name']} ---")
-        turns = await run_scenario(pipeline, s)
+        turns = await run_scenario(pipeline, s, project_context)
         report_lines.append(f"## {s['id']} — {s['name']}")
         for i, t in enumerate(turns, 1):
             print(f"  [turn{i}] {t['conv_state']}: {t['query']}")

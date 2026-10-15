@@ -10,11 +10,12 @@ import json
 import logging
 import os
 import secrets
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import AfterValidator, Field, field_validator, model_validator
+from pydantic import AfterValidator, Field, SecretStr, SkipValidation, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("api.config")
@@ -55,6 +56,7 @@ class Settings(BaseSettings):
         env_file=(str(_REPO_ROOT / ".env"), str(_REPO_ROOT / f".env.{_APP_ENV}")),
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # Known development-only value; production startup fails fast when it survives.
@@ -77,6 +79,122 @@ class Settings(BaseSettings):
     _KNOWN_WEAK_LEAD_MIRROR_SECRETS = _KNOWN_WEAK_ANON_SECRETS + (
         "rag-real-estate-lead-mirror-default-secret",
     )
+
+    def validate_zalo_runtime(self) -> None:
+        """Reject unsafe Zalo settings at installation, without taking web offline.
+
+        Disabled Zalo never validates credentials or initializes infrastructure.
+        Environment integers are decimal strings; bool/float coercion is forbidden.
+        """
+        if not self.zalo_bot_enabled:
+            return
+        bounds = {
+            "zalo_bot_max_body_bytes": (1, None),
+            "zalo_bot_burst_window_seconds": (1, 300),
+            "zalo_bot_burst_max_events": (1, 10000),
+            "zalo_bot_poll_seconds": (1, None),
+            "zalo_bot_batch_size": (1, 100),
+            "zalo_bot_max_attempts": (1, 100),
+            "zalo_bot_lease_seconds": (30, None),
+            "zalo_bot_core_timeout_seconds": (1, None),
+            "zalo_bot_lease_margin_seconds": (6, None),
+            "zalo_bot_retry_max_age_hours": (1, None),
+            "zalo_bot_terminal_retention_days": (1, None),
+        }
+        parsed = {}
+        for name, (minimum, maximum) in bounds.items():
+            value = getattr(self, name)
+            if isinstance(value, str) and value.isascii() and value.isdecimal():
+                try:
+                    value = int(value)
+                except ValueError:
+                    raise ValueError("ZALO_CONFIG_INVALID") from None
+            if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
+                raise ValueError("ZALO_CONFIG_INVALID")
+            parsed[name] = value
+        if parsed["zalo_bot_lease_seconds"] <= (
+            parsed["zalo_bot_core_timeout_seconds"] + parsed["zalo_bot_lease_margin_seconds"]
+        ):
+            raise ValueError("ZALO_CONFIG_INVALID")
+        identity = self.zalo_bot_identity_secret.get_secret_value()
+        webhook = self.zalo_bot_webhook_secret.get_secret_value()
+        token = self.zalo_bot_token
+        if (
+            not isinstance(identity, str) or not 32 <= len(identity) <= 256
+            or not isinstance(webhook, str) or not 8 <= len(webhook) <= 256
+            or not isinstance(token, str) or not token.strip()
+            or identity in (webhook, token)
+        ):
+            raise ValueError("ZALO_CONFIG_INVALID")
+        try:
+            identity.encode("utf-8")
+            webhook.encode("utf-8")
+            token.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("ZALO_CONFIG_INVALID") from None
+        for name, value in parsed.items():
+            setattr(self, name, value)
+
+    def validate_messenger_runtime(self) -> None:
+        """Reject unsafe Messenger settings at installation, without taking web offline.
+
+        Disabled Messenger never validates credentials or initializes infrastructure.
+        Environment integers are decimal strings; bool/float coercion is forbidden.
+        """
+        if not self.messenger_bot_enabled:
+            return
+        bounds = {
+            "messenger_max_body_bytes": (1, None),
+            "messenger_burst_window_seconds": (1, 300),
+            "messenger_burst_max_events": (1, 10000),
+            "messenger_poll_seconds": (1, None),
+            "messenger_batch_size": (1, 100),
+            "messenger_max_attempts": (1, 100),
+            "messenger_lease_seconds": (30, None),
+            "messenger_core_timeout_seconds": (1, None),
+            "messenger_lease_margin_seconds": (6, None),
+            "messenger_retry_max_age_hours": (1, None),
+            "messenger_terminal_retention_days": (1, None),
+        }
+        parsed = {}
+        for name, (minimum, maximum) in bounds.items():
+            value = getattr(self, name)
+            if isinstance(value, str) and value.isascii() and value.isdecimal():
+                try:
+                    value = int(value)
+                except ValueError:
+                    raise ValueError("MESSENGER_CONFIG_INVALID") from None
+            if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
+                raise ValueError("MESSENGER_CONFIG_INVALID")
+            parsed[name] = value
+        if parsed["messenger_lease_seconds"] <= (
+            parsed["messenger_core_timeout_seconds"] + parsed["messenger_lease_margin_seconds"]
+        ):
+            raise ValueError("MESSENGER_CONFIG_INVALID")
+        identity = self.messenger_identity_secret.get_secret_value()
+        app_secret = self.messenger_app_secret.get_secret_value()
+        page_token = self.messenger_page_access_token
+        verify_token = self.messenger_verify_token.get_secret_value()
+        page_id = self.messenger_page_id
+        if (
+            not isinstance(identity, str) or not 32 <= len(identity) <= 256
+            or not isinstance(app_secret, str) or not 32 <= len(app_secret) <= 256
+            or identity == app_secret
+            or not isinstance(page_token, str) or not page_token.strip()
+            or not isinstance(verify_token, str) or not verify_token.strip()
+            or not isinstance(page_id, str) or not page_id.strip() or not page_id.isascii() or not page_id.isdigit()
+        ):
+            raise ValueError("MESSENGER_CONFIG_INVALID")
+        try:
+            identity.encode("utf-8")
+            app_secret.encode("utf-8")
+            page_token.encode("utf-8")
+            verify_token.encode("utf-8")
+            page_id.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("MESSENGER_CONFIG_INVALID") from None
+        for name, value in parsed.items():
+            setattr(self, name, value)
 
     @model_validator(mode="after")
     def _enforce_approved_llm_provider(self) -> Settings:
@@ -183,6 +301,34 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="wrap")
+    @classmethod
+    def _protect_zalo_webhook_secret(cls, values, handler):
+        # Wrap all validators so model-level errors retain the redacted copy.
+        # Any Mapping (UserDict, MappingProxyType, custom) is materialized into
+        # a plain dict FIRST — a mapping reaching handler(raw) makes pydantic
+        # echo raw input into ValidationError.json()/errors() surfaces.
+        if isinstance(values, Mapping):
+            values = dict(values)
+            for field in ("zalo_bot_webhook_secret", "zalo_bot_identity_secret"):
+                if field in values and not isinstance(values[field], SecretStr):
+                    values[field] = SecretStr(values[field])
+        try:
+            return handler(values)
+        except ValidationError as exc:
+            # Token remains str for existing callers. Redact error inputs too:
+            # a rejected token/identity collision otherwise echoes the key.
+            errors = exc.errors()
+            for error in errors:
+                error_input = error.get("input")
+                if isinstance(error_input, Mapping) and "zalo_bot_token" in error_input:
+                    error["input"] = {
+                        **error_input, "zalo_bot_token": SecretStr(error_input["zalo_bot_token"])
+                    }
+            raise ValidationError.from_exception_data(
+                cls.__name__, errors, hide_input=True
+            ) from None
+
     # App
     app_env: str = "dev"
     # None (unset) -> dev/test resolve to the safe localhost default; production
@@ -276,6 +422,18 @@ class Settings(BaseSettings):
     # Revision-3 rerank: voyageai/rerank-2.5 via the OpenRouter /api/v1/rerank route.
     rerank_openrouter_model: str = "voyageai/rerank-2.5"
     enable_rerank: bool = True
+    # A retrieved chunk counts as "strong" evidence at or above this rerank score.
+    # It is configuration rather than a literal in the pipeline because the bar is
+    # a property of the ACTIVE rerank model: the score scale moves whenever the
+    # binding changes (qwen3-rerank -> voyageai/rerank-2.5 -> Jina), and a bar
+    # frozen in code silently reclassifies every chunk as weak after a swap --
+    # which downstream reads as a provenance failure, never as a stale constant.
+    # 0.5 is measured, not guessed: over n=11324 live scores (min -0.226, p50
+    # 0.186, p75 0.493, p90 0.623, max 0.947) it is the reranker's own sigmoid
+    # midpoint and the corpus p75. The previous in-code bar of 0.8 sat at the
+    # 98.2nd percentile, so strong_chunks was 0 on 85.4% of chunk-bearing turns
+    # and the provenance tier was unreachable by construction.
+    rerank_strong_threshold: float = 0.5
 
     # Geo (nearby places). The Camellia lat/lng here are the LEGACY fallback used
     # when no project is bound or the project_config registry read fails
@@ -483,6 +641,101 @@ class Settings(BaseSettings):
     trusted_proxy_ips: list[str] = Field(default_factory=list)
     chat_history_retention_days: int = 30
     lead_cta_after_turns: int = 3
+
+    # Disable customer chat-session expiration cleanup for a demo revision.
+    # Default on preserves the existing retention behavior.
+    chat_history_retention_enabled: bool = True
+
+    # --- Zalo Bot webhook ingress (ZB-01) ---
+    # zalo_bot_enabled gates the ingress: when False an authenticated, valid
+    # webhook still returns 2xx but performs zero side effects (no DB write,
+    # no RAG, no provider outbound). Disabled must never break app startup.
+    zalo_bot_enabled: bool = False
+    # Demo-only pause for terminal-event maintenance; fresh inbox processing remains enabled.
+    # Default on preserves existing exhausted-event and terminal-row cleanup behavior.
+    zalo_bot_maintenance_enabled: bool = True
+
+    # Shared secret checked via hmac.compare_digest against the
+    # X-Bot-Api-Secret-Token header. An empty value fails closed (403) at
+    # every webhook. Never log the header or this secret.
+    zalo_bot_webhook_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Stable correlation key, never derived from transport credentials.
+    # Required only at enabled runtime installation; disabled startup stays inert.
+    zalo_bot_identity_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Hard cap (bytes) on an inbound webhook body declared via Content-Length
+    # AND on the body actually read. Prevents unbounded request-body DoS.
+    zalo_bot_max_body_bytes: int = Field(default=65536, gt=0)
+    # Provider token is checked locally at runtime installation, never probed.
+    zalo_bot_token: SkipValidation[str] = Field(default="", repr=False)
+    zalo_bot_api_base_url: str = "https://bot-api.zaloplatforms.com"
+    # Recommended configurable values, NOT approved production settings.
+    # Preserve raw env input until enabled installation can reject it Zalo-only.
+    zalo_bot_burst_window_seconds: SkipValidation[int] = 60
+    zalo_bot_burst_max_events: SkipValidation[int] = 60
+    zalo_bot_poll_seconds: SkipValidation[int] = 5
+    zalo_bot_batch_size: SkipValidation[int] = 20
+    zalo_bot_max_attempts: SkipValidation[int] = 8
+    zalo_bot_lease_seconds: SkipValidation[int] = 120
+    zalo_bot_core_timeout_seconds: SkipValidation[int] = 90
+    zalo_bot_lease_margin_seconds: SkipValidation[int] = 15
+    zalo_bot_retry_max_age_hours: SkipValidation[int] = 24
+    zalo_bot_terminal_retention_days: SkipValidation[int] = 7
+    # Open-demo bypass: when True, every chat is admitted without a sales
+    # binding (postgres zalo_bot_bindings.authorize is never consulted).
+    # Defaults to False; enable only for an explicitly authorized demo window and disable afterward.
+    zalo_bot_open_demo_access: bool = Field(default=False, repr=False)
+
+    # --- Messenger bot webhook ingress ---
+    # messenger_bot_enabled gates the ingress: when False an authenticated, valid
+    # webhook still returns 2xx but performs zero side effects (no DB write,
+    # no RAG, no provider outbound). Disabled must never break app startup.
+    messenger_bot_enabled: bool = False
+    # Demo-only pause for terminal-event maintenance; fresh inbox processing remains enabled.
+    # Default on preserves existing exhausted-event and terminal-row cleanup behavior.
+    messenger_maintenance_enabled: bool = True
+    # Webhook verification string echoed back during Meta hub.challenge handshake.
+    # Compared with == only after non-empty check; never logged.
+    messenger_verify_token: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Meta App Secret used to verify X-Hub-Signature-256 on every webhook.
+    # An empty value fails closed at every webhook. Never log this secret.
+    messenger_app_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Page token used for Send API replies; checked locally, never probed at install.
+    messenger_page_access_token: SkipValidation[str] = Field(default="", repr=False)
+    # Stable correlation key, never derived from transport credentials.
+    # Required only at enabled runtime installation; disabled startup stays inert.
+    messenger_identity_secret: SecretStr = Field(default=SecretStr(""), repr=False)
+    # Meta Page ID owning the webhook subscription; ASCII digits only.
+    messenger_page_id: str = ""
+    messenger_graph_api_version: str = "v26.0"
+    messenger_api_base_url: str = "https://graph.facebook.com"
+    # Sole recipient the permission probe may send a real message to. Empty
+    # disables message-sending probes entirely: the endpoint must never choose
+    # a recipient, because a POST to /{page}/messages delivers to a real person.
+    messenger_probe_psid: str = ""
+    # User token used only by the probes that read user-scoped edges. The Page
+    # token's /me resolves to the Page, so /me/accounts and /me/businesses
+    # answer (#100) nonexisting field without this. Never sent to a client.
+    messenger_probe_user_token: SkipValidation[str] = Field(default="", repr=False)
+    # Hard cap (bytes) on an inbound webhook body declared via Content-Length
+    # AND on the body actually read. Prevents unbounded request-body DoS.
+    messenger_max_body_bytes: int = Field(default=65536, gt=0)
+    # Attach appsecret_proof to Send API calls; off by default, enable with stored secret.
+    messenger_appsecret_proof_enabled: bool = Field(default=False, repr=False)
+    # Open-demo bypass: when True, every chat is admitted without a sales binding.
+    # Defaults to False; enable only for an explicitly authorized demo window and disable afterward.
+    messenger_open_demo_access: bool = Field(default=False, repr=False)
+    # Recommended configurable values, NOT approved production settings.
+    # Preserve raw env input until enabled installation can reject it Messenger-only.
+    messenger_burst_window_seconds: SkipValidation[int] = 60
+    messenger_burst_max_events: SkipValidation[int] = 60
+    messenger_poll_seconds: SkipValidation[int] = 5
+    messenger_batch_size: SkipValidation[int] = 20
+    messenger_max_attempts: SkipValidation[int] = 8
+    messenger_lease_seconds: SkipValidation[int] = 120
+    messenger_core_timeout_seconds: SkipValidation[int] = 90
+    messenger_lease_margin_seconds: SkipValidation[int] = 15
+    messenger_retry_max_age_hours: SkipValidation[int] = 24
+    messenger_terminal_retention_days: SkipValidation[int] = 7
 
     @field_validator("trusted_proxy_ips", mode="before")
     @classmethod

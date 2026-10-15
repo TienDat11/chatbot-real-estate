@@ -12,10 +12,20 @@ normalized answer once verification passes.
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import date, timedelta
 
 from api import workflow as workflow_module
 from api.domain.services.guard_output import normalize_answer_display
 from api.workflow import RagQueryWorkflow
+from api.application.services import merge as merge_module
+from api.application.services.project_context import ProjectContext
+from api.application.services.rag_leg import RagLegResult
+
+
+_PROJECT_CONTEXT = ProjectContext("camellia", "normal", (("camellia", "Camellia"),))
+_AS_OF = date(2026, 9, 29)
+_EVIDENCE_CONTENT = "Camellia diện tích 68 m2"
 
 
 # --- prompt policy -------------------------------------------------------------
@@ -82,7 +92,7 @@ def _make_routed(rewritten: str):
     return RoutedResult(
         rewritten=rewritten,
         routing={
-            "needs_rag": False,
+            "needs_rag": True,
             "needs_sql": False,
             "structured_path": "none",
             "needs_geo": False,
@@ -91,13 +101,19 @@ def _make_routed(rewritten: str):
         hl_keywords=[],
         ll_keywords=[],
         high_stakes=False,
-        as_of=None,
+        as_of=_AS_OF,
     )
 
 
-def _run_workflow(monkeypatch, tokens: list[str]) -> tuple[dict, list]:
+def _run_workflow(
+    monkeypatch, tokens: list[str], *, rewritten: str = "diện tích 68 m2"
+) -> tuple[dict, list]:
     """Harness mirrors tests/test_workflow_images.py: real workflow, every
-    external call patched; ``fake_stream`` yields the given raw tokens."""
+    external call patched; ``fake_stream`` yields the given raw tokens.
+
+    One scoped, published, in-date Camellia chunk backs the prompt so the
+    output guard can verify the answer and the LGN-P0-002 delivery contract is
+    exercised on a turn that would otherwise fail closed for lack of evidence."""
     events: list[tuple[str, dict]] = []
 
     async def fake_guard(raw):
@@ -109,6 +125,11 @@ def _run_workflow(monkeypatch, tokens: list[str]) -> tuple[dict, list]:
         return _make_routed(rewritten)
 
     async def fake_stream(merged, history, high_stakes):
+        marker = "RAG_CONTEXT (chunks từ LightRAG, đã lọc hiệu lực + rerank):\n"
+        merged.meta["_prompt_rag_rows"] = json.loads(
+            merged.rag_blocks.split(marker, 1)[1].split("\n", 1)[0]
+        )
+        merged.meta["_prompt_fact_rows"] = json.loads(merged.evidence_blocks.split("\n", 3)[2])
         for t in tokens:
             yield t
 
@@ -120,16 +141,54 @@ def _run_workflow(monkeypatch, tokens: list[str]) -> tuple[dict, list]:
     async def fake_audit(entry):
         return None
 
+    async def fake_rag(*args):
+        return RagLegResult(
+            chunks=[{"id": "camellia-area", "content": _EVIDENCE_CONTENT, "score": 0.9}]
+        )
+
+    async def fake_sql(*args):
+        return workflow_module.SqlLegResult([], {"mode": "none"}, degraded=False)
+
+    class Connection:
+        async def fetch(self, sql_text, ids):
+            return [{
+                "chunk_id": "camellia-area", "registry_content": _EVIDENCE_CONTENT,
+                "doc_id": "camellia-doc", "title": "Hồ sơ tiện ích Camellia",
+                "section": "Tiện ích", "kind": "project", "project_key": "camellia",
+                "status": "published", "effective_from": _AS_OF - timedelta(days=1),
+                "effective_to": None,
+            }]
+
+    class Acquire:
+        async def __aenter__(self): return Connection()
+        async def __aexit__(self, *exc): return None
+
+    class Pool:
+        def acquire(self): return Acquire()
+
+    async def fake_pool(): return Pool()
+
     monkeypatch.setattr(workflow_module, "guard_input", fake_guard)
     monkeypatch.setattr(workflow_module, "rewrite_query", fake_rewrite)
     monkeypatch.setattr(workflow_module, "get_reranker", lambda: _FakeReranker())
     monkeypatch.setattr(workflow_module, "stream_answer", fake_stream)
     monkeypatch.setattr(workflow_module, "guard_output", fake_output_guard)
     monkeypatch.setattr(workflow_module, "write_audit", fake_audit)
+    monkeypatch.setattr(workflow_module, "run_rag_leg", fake_rag)
+    monkeypatch.setattr(workflow_module, "run_sql_leg", fake_sql)
+    monkeypatch.setattr(
+        workflow_module, "search_images", lambda *a, **k: asyncio.sleep(0, result=[])
+    )
+    monkeypatch.setattr(merge_module, "get_ro_pool", fake_pool)
 
     async def go():
         wf = RagQueryWorkflow(on_event=lambda e, d: events.append((e, d)))
-        return await wf.run(query="q", session_id=None, history=[])
+        return await wf.run(
+            query="q",
+            session_id=None,
+            history=[],
+            project_context=_PROJECT_CONTEXT,
+        )
 
     return asyncio.run(go()), events
 

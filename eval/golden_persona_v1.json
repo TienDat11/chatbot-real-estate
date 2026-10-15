@@ -1,5 +1,6 @@
 {
   "version": "persona_v1",
+  "project_key": "camellia",
   "created": "2026-08-18",
   "gate": "persona 15/15 PASS (hoac 14/15 + waiver) la dieu kien done cua 5.4 FE integration",
   "note": "Story 4.7 §8.1. Chay voi run_eval.py --persona (regex/structure, KHONG can LLM-judge de dry PASS). 1/3 case co history 2 turn. History [[user, assistant]] la 1 cap luot truoc.",

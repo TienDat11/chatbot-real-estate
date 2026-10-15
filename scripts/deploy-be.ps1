@@ -15,6 +15,10 @@
 
 param(
     [switch]$DryRun,
+    # Selects --no-cpu-throttling: required by the Messenger channel, whose
+    # webhook ACKs and then replies from a background task. Costs idle CPU
+    # 24/7, so it is never the default.
+    [switch]$Messenger,
     [ValidateSet('staging', 'prod')]
     [string]$EnvName = 'prod',
     [string]$Region = 'asia-southeast1'
@@ -39,14 +43,22 @@ $Secrets = @(
     'RERANK_API_KEY',
     'FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY',
     'R2_SECRET_ACCESS_KEY',
-    'R2_ACCESS_KEY_ID'
+    'R2_ACCESS_KEY_ID',
+    'MESSENGER_VERIFY_TOKEN',
+    'MESSENGER_APP_SECRET',
+    'MESSENGER_PAGE_ACCESS_TOKEN',
+    'MESSENGER_IDENTITY_SECRET'
 ) | ForEach-Object { "$_=$_`:latest" }
 
 # Scaling and CPU billing are pinned on purpose. Cloud Run inherits any flag
 # omitted from `deploy` from the currently serving revision, so a flag that
 # exists only in an old revision silently re-applies on every deploy.
-# `--cpu-throttling` bills CPU only while a request is in flight;
-# `--no-cpu-throttling` billed every idle instance 24/7.
+# `--cpu-throttling` bills CPU only while a request is in flight and is the
+# default for the web service. The Messenger channel needs the opposite: the
+# webhook ACKs and then replies from a background task, so request-scoped CPU
+# freezes the in-flight reply. Pass -Messenger to select it; that path bills
+# every idle instance, which is why it is opt-in per deploy and never the
+# default for the revision serving public web traffic.
 # `--max-instances=2` matches the live service template, so a spam burst cannot
 # scale to the previous ceiling of 20.
 # `--min-instances=0` scales to zero between requests, so an idle window costs
@@ -58,7 +70,7 @@ $DeployArgs = @(
     '--source', '.',
     '--region', $Region,
     '--allow-unauthenticated',
-    '--cpu-throttling',
+$(if ($Messenger) { '--no-cpu-throttling' } else { '--cpu-throttling' }),
     '--min-instances=0',
     '--max-instances=2',
     '--cpu-boost',

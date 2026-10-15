@@ -23,8 +23,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from typing import Literal
-
+from typing import Any, Literal
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -32,6 +31,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from api import get_cfg
 from api.application.services.token_coalescer import TokenCoalescer
+from api.application.services.project_context import ProjectContext
+
 from api.domain.value_objects.constants import (
     MAX_QUERY_LENGTH,
     SSE_EVENT_TOKEN,
@@ -330,29 +331,25 @@ async def _validate_training_request(
     return context_key
 
 
-def _pipe_run_accepts_training_context(pipe) -> bool:
-    """True when pipe.run's signature accepts `training_context_project_key`.
 
-    Decided purely by signature inspection, never by catching a call-time
-    TypeError: a TypeError raised inside a custom pipeline body is a pipeline
-    bug and must surface as such, not be mistaken for a signature mismatch.
-    Legacy/custom pipelines without the keyword (or unknown signatures) simply
-    omit it.
+
+
+
+def _visible_limit_kwargs(visible_limit: int | None) -> dict[str, Any]:
+    """Transport-only propagation of the visible answer budget (P0-05).
+
+    Legacy ``/query`` stays UNBOUNDED: an unbounded turn forwards nothing, so
+    the call contract every existing pipeline double implements is unchanged.
+    A supplied budget is passed straight through to the facade, which applies
+    it before the answer is tokenized, hashed and audited — never here.
     """
-    try:
-        params = inspect.signature(pipe.run).parameters
-    except (TypeError, ValueError):  # exotic callable: omit rather than break
-        return False
-    if "training_context_project_key" in params:
-        return True
-    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
-
+    return {} if visible_limit is None else {"visible_limit": visible_limit}
 
 async def _sse_stream(
     pipe,
     req: QueryRequest,
     as_of: str | None,
-    project_key: str,
+    project_context: ProjectContext,
     device_id: str | None,
     quota_gate,
     turn_context,
@@ -360,7 +357,7 @@ async def _sse_stream(
     request: Request | None = None,
     total_timeout_s: float | None = None,
     training_owner_uid: str | None = None,
-    training_context_key: str | None = None,
+    visible_limit: int | None = None,
 ) -> AsyncIterator[str]:
     """Run the pipeline emitting SSE; always emits `done` (even after errors).
 
@@ -420,33 +417,25 @@ async def _sse_stream(
     async def run_pipe() -> None:
         nonlocal turn_released
         try:
-            # Modern pipelines get the optional training context layer;
-            # legacy/custom run() signatures keep working without it.
-            run_kwargs: dict[str, object] = {
-                "project_key": project_key,
-                "device_id": device_id,
-                "on_event": on_event,
-            }
-            if _pipe_run_accepts_training_context(pipe):
-                run_kwargs["training_context_project_key"] = training_context_key
             payload = await pipe.run(
                 req.query,
                 req.session_id,
                 as_of,
                 history,
-                **run_kwargs,
+                project_context=project_context,
+                device_id=device_id,
+                on_event=on_event,
+                **_visible_limit_kwargs(visible_limit),
             )
-            if req.answer_mode == "training":
-                # Training answers are isolated from customer conversion state.
+            if project_context.answer_mode == "training":
                 payload = {
                     key: value for key, value in payload.items()
                     if key not in {"lead_cta_hint", "project_redirect"}
                 }
                 payload["lead_cta_hint"] = None
                 payload["project_redirect"] = None
-                # G3-r6 §10.2: terminal payload mirrors the ack binding.
                 payload["training_session_id"] = req.session_id
-                payload["context"] = {"project_key": training_context_key}
+                payload["context"] = {"project_key": project_context.project_key}
             # Keep the terminal payload authoritative for every successful
             # transport. SSE done and JSON must expose the same semantic data.
             payload["status"] = "completed"
@@ -477,7 +466,7 @@ async def _sse_stream(
                         await ChatHistoryService(chat_history_repository).persist_training_turn(
                             session_id=req.session_id,
                             owner_firebase_uid=training_owner_uid or "",
-                            context_project_key=training_context_key or "",
+                            context_project_key=project_context.project_key,
                             user_content=req.query,
                             assistant_content=str(payload.get("answer") or ""),
                             assistant_meta={
@@ -490,23 +479,23 @@ async def _sse_stream(
                 else:
                     payload["history_persisted"] = bool(
                         await ChatHistoryService(chat_history_repository).persist_turn(
-                        session_id=req.session_id,
-                        device_id=device_id,
-                        project_key=project_key,
-                        identity_key=getattr(turn_context, "identity_key", None),
-                        user_content=req.query,
-                        assistant_content=str(payload.get("answer") or ""),
-                        assistant_meta={
-                            key: payload.get(key)
-                            for key in (
-                                "sources",
-                                "facts",
-                                "images",
-                                "project_redirect",
-                                "lead_cta_hint",
-                            )
-                            if payload.get(key) is not None
-                        },
+                            session_id=req.session_id,
+                            device_id=device_id,
+                            project_key=project_context.project_key,
+                            identity_key=getattr(turn_context, "identity_key", None),
+                            user_content=req.query,
+                            assistant_content=str(payload.get("answer") or ""),
+                            assistant_meta={
+                                key: payload.get(key)
+                                for key in (
+                                    "sources",
+                                    "facts",
+                                    "images",
+                                    "project_redirect",
+                                    "lead_cta_hint",
+                                )
+                                if payload.get(key) is not None
+                            },
                         )
                     )
             except Exception:  # noqa: BLE001 — history is a non-critical side effect
@@ -519,13 +508,13 @@ async def _sse_stream(
                 if req.answer_mode == "training"
                 else await _durable_lead_cta_hint(
                     req.session_id,
-                device_id=device_id,
-                project_key=project_key,
-                identity_key=getattr(turn_context, "identity_key", None),
-                authenticated=bool(
-                    bearer_id_token
-                    and getattr(turn_context, "quota_payload", lambda: {})().get("is_authenticated")
-                ),
+                    device_id=device_id,
+                    project_key=project_context.project_key,
+                    identity_key=getattr(turn_context, "identity_key", None),
+                    authenticated=bool(
+                        bearer_id_token
+                        and getattr(turn_context, "quota_payload", lambda: {})().get("is_authenticated")
+                    ),
                 )
             )
             finalize = getattr(quota_gate, "finalize_turn", None)
@@ -567,10 +556,10 @@ async def _sse_stream(
         # G3-r6 §10.2: the ack echoes the private session binding so the
         # training FE can attach follow-up turns to the same durable session.
         ack_data["training_session_id"] = req.session_id
-        ack_data["context"] = {"project_key": training_context_key}
+        ack_data["context"] = {"project_key": project_context.project_key}
     logger.info(
         "sse first-answer ack project=%s training=%s",
-        project_key,
+        project_context.project_key,
         req.answer_mode == "training",
     )
     yield _frame("ack", ack_data)
@@ -588,7 +577,7 @@ async def _sse_stream(
             if request is not None and await request.is_disconnected():
                 logger.info(
                     "sse disconnected project=%s elapsed_ms=%d",
-                    project_key,
+                    project_context.project_key,
                     int((asyncio.get_event_loop().time() - started_at) * 1000),
                 )
                 task.cancel()
@@ -602,7 +591,7 @@ async def _sse_stream(
             if remaining <= 0:
                 logger.warning(
                     "sse total deadline exceeded project=%s elapsed_ms=%d",
-                    project_key,
+                    project_context.project_key,
                     int((now - started_at) * 1000),
                 )
                 task.cancel()
@@ -634,7 +623,7 @@ async def _sse_stream(
                     # a mid-stream network cut).
                     logger.info(
                         "sse timeout frame project=%s elapsed_ms=%d",
-                        project_key,
+                        project_context.project_key,
                         int((now - started_at) * 1000),
                     )
                     yield _frame(
@@ -658,19 +647,19 @@ async def _sse_stream(
                 first_event_at = asyncio.get_event_loop().time()
                 logger.info(
                     "sse first-event project=%s elapsed_ms=%d",
-                    project_key,
+                    project_context.project_key,
                     int((first_event_at - started_at) * 1000),
                 )
             if event == "images":
                 logger.info(
                     "sse media project=%s count=%d",
-                    project_key,
+                    project_context.project_key,
                     len(data.get("images", [])),
                 )
             if event == "__done__":
                 logger.info(
                     "sse done project=%s elapsed_ms=%d truncated=%s",
-                    project_key,
+                    project_context.project_key,
                     int((asyncio.get_event_loop().time() - started_at) * 1000),
                     bool(data.get("answer_truncated")),
                 )
@@ -934,32 +923,72 @@ async def _close_persistence_pools() -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup: await the Postgres rate-limit wiring first (pools are awaited
-    inside the wiring task; startup is non-fatal if it errors), then
-    conditionally launch the RAG prewarm and the lead-mirror reconciliation
-    sweep (both background tasks).
+    """Preserve web startup; install Zalo and Messenger independently, stop both before pools."""
+    from api.application.services.messenger_bot_dispatch import reset_scheduler as reset_messenger_scheduler
+    from api.application.services.zalo_bot_dispatch import reset_scheduler as reset_zalo_scheduler
+    from api.infrastructure.adapters.messenger_bot_runtime import (
+        start_messenger_runtime,
+        stop_messenger_runtime,
+    )
+    from api.infrastructure.adapters.zalo_bot_runtime import start_zalo_runtime, stop_zalo_runtime
+    from api.infrastructure.config.config import get_settings
 
-    Shutdown: cancel both tasks (the prewarm only ever awaits the idempotent
-    LightRAG init; the sweep only sleeps between batches, so cancel is safe
-    for both) and close every persistence pool.
-    """
+    reset_zalo_scheduler()
+    reset_messenger_scheduler()
     await _wire_postgres_rate_limit_port()
-    prewarm_task = _maybe_start_rag_prewarm()
-    reconciliation_task = _maybe_start_lead_mirror_reconciliation()
-    retention_task = asyncio.create_task(_chat_history_retention_loop())
-    yield
-    if prewarm_task is not None:
-        prewarm_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await prewarm_task
-    retention_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await retention_task
-    if reconciliation_task is not None:
-        reconciliation_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await reconciliation_task
-    await _close_persistence_pools()
+    prewarm_task = None
+    reconciliation_task = None
+    retention_task = None
+    zalo_runtime = None
+    messenger_runtime = None
+    try:
+        try:
+            zalo_runtime = await start_zalo_runtime(get_settings())
+        except Exception:
+            # Zalo-only installation failures must not take the web API offline.
+            reset_zalo_scheduler()
+            logger.warning("ZALO_RUNTIME_UNAVAILABLE")
+        app.state.zalo_runtime = zalo_runtime
+        try:
+            messenger_runtime = await start_messenger_runtime(get_settings())
+        except Exception:
+            # Messenger-only installation failures must not take the web API offline.
+            reset_messenger_scheduler()
+            logger.warning("MESSENGER_RUNTIME_UNAVAILABLE")
+        app.state.messenger_runtime = messenger_runtime
+        # Background warmers start only after the Zalo cutover gate has run:
+        # they share this event loop and the lead pool, and a concurrent cold
+        # RAG init starves the loop long enough to blow the bounded (5s)
+        # startup transaction. Sequential start costs one boot window.
+        prewarm_task = _maybe_start_rag_prewarm()
+        reconciliation_task = _maybe_start_lead_mirror_reconciliation()
+        if bool(get_cfg("chat_history_retention_enabled", True)):
+            retention_task = asyncio.create_task(_chat_history_retention_loop())
+        yield
+    finally:
+        reset_zalo_scheduler()
+        reset_messenger_scheduler()
+        try:
+            await stop_zalo_runtime(zalo_runtime)
+        finally:
+            app.state.zalo_runtime = None
+            try:
+                await stop_messenger_runtime(messenger_runtime)
+            finally:
+                app.state.messenger_runtime = None
+            if prewarm_task is not None:
+                prewarm_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await prewarm_task
+            if retention_task is not None:
+                retention_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await retention_task
+            if reconciliation_task is not None:
+                reconciliation_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reconciliation_task
+            await _close_persistence_pools()
 
 
 def create_app() -> FastAPI:
@@ -993,15 +1022,19 @@ def create_app() -> FastAPI:
         sales_session_router,
     )
     from api.interfaces.api.anon_routes import router as anon_router  # noqa: PLC0415
+    from api.interfaces.api.assistant_routes import router as assistant_router  # noqa: PLC0415
     from api.interfaces.api.auth_routes import router as auth_router  # noqa: PLC0415
     from api.interfaces.api.crm_routes import router as crm_router  # noqa: PLC0415
     from api.interfaces.api.deps import require_training_sales  # noqa: PLC0415
     from api.interfaces.api.hello import router as hello_router  # noqa: PLC0415
     from api.interfaces.api.lead import router as lead_router  # noqa: PLC0415
+    from api.interfaces.api.messenger_bot_routes import router as messenger_bot_router  # noqa: PLC0415
+    from api.interfaces.api.messenger_permission_probe_routes import router as messenger_permission_probe_router  # noqa: PLC0415
     from api.interfaces.api.notifications import router as notifications_router  # noqa: PLC0415
     from api.interfaces.api.projects import router as projects_router  # noqa: PLC0415
     from api.interfaces.api.sales import router as sales_router  # noqa: PLC0415
     from api.interfaces.api.sessions import router as sessions_router  # noqa: PLC0415
+    from api.interfaces.api.zalo_bot_routes import router as zalo_bot_router  # noqa: PLC0415
 
     app.include_router(lead_router)
     app.include_router(sales_router)
@@ -1014,6 +1047,10 @@ def create_app() -> FastAPI:
     app.include_router(anon_router)
     app.include_router(auth_router)
     app.include_router(notifications_router)
+    app.include_router(assistant_router)
+    app.include_router(zalo_bot_router)
+    app.include_router(messenger_bot_router)
+    app.include_router(messenger_permission_probe_router)
 
     @app.get("/health")
     async def health() -> dict:
@@ -1088,55 +1125,146 @@ def create_app() -> FastAPI:
         from api.application.pipelines.workflow import QueryRejected  # noqa: PLC0415
         from api.application.services.project_scope import (  # noqa: PLC0415
             ProjectScopeError,
+            fetch_active_project_records,
             resolve_project_key,
+            ActiveProject,
         )
+        from api.application.services.project_context import ProjectContext  # noqa: PLC0415
+        from api.application.services.project_config import project_catalogue_from_records  # noqa: PLC0415
         from api.interfaces.api.anon_routes import get_client_ip_address  # noqa: PLC0415
-
-        # G3-r6 §10.2: the training preflight (context shape, active project,
-        # owner-bound durable session) runs before quota and before any leg,
-        # so an invalid training turn costs nothing. Normal mode is untouched.
+        # Resolve against one registry snapshot. Training retains its owner,
+        # active-project and durable-session preflight before quota/retrieval.
         training_context_key: str | None = None
         if req.answer_mode == "training":
             try:
                 training_context_key = await _validate_training_request(req, _training_auth)
             except TrainingPreflightConflictError as exc:
-                # Stable machine-readable code in the same envelope /query
-                # already uses for PROJECT_SCOPE/REJECTED, so the FE can tell a
-                # self-healable session conflict from a non-retryable inactive
-                # project without string-matching the message.
                 return JSONResponse(
                     status_code=exc.status_code,
                     content={"ok": False, "error": {"code": exc.code, "message": exc.detail}},
                 )
 
-        # Story 10.1 [RV-22/08]: resolve the active project BEFORE any leg runs —
-        # >1 active project with no explicit choice is a 422 that prompts the
-        # ProjectPicker; exactly one active project is the safe default.
+        active_records = await fetch_active_project_records()
+        active_projects = [
+            ActiveProject(record.project_key, record.ten_thuong_mai or "")
+            for record in active_records
+        ]
+        active_catalogue = tuple(
+            (project.project_key, project.ten_thuong_mai) for project in active_projects
+        )
         try:
             project_key = (
-                # Mode marker only: the pipeline routes retrieval to the real
-                # context project (shared corpus); '_training' never scopes data.
-                "_training" if req.answer_mode == "training"
-                else await resolve_project_key(req.project_key)
+                training_context_key
+                if req.answer_mode == "training"
+                else await resolve_project_key(req.project_key, active_projects=active_projects)
             )
         except ProjectScopeError as exc:
-            # Story 10.3: carry the pickable project list in the 422 body so the
-            # FE popup renders immediately without a second round-trip to
-            # GET /api/projects. The catalogue read is offloaded off the event
-            # loop (M12): best-effort like the endpoint — a dead DB yields
-            # projects: [] and the FE falls back to its static catalogue.
-            from api.application.services.project_config import (
-                load_project_catalogue,  # noqa: PLC0415
-            )
-
             return JSONResponse(
                 status_code=422,
                 content={
                     "ok": False,
                     "error": {"code": "PROJECT_SCOPE", "message": str(exc)},
-                    "projects": await load_project_catalogue(),
+                    "projects": project_catalogue_from_records(active_records),
                 },
             )
+
+        # The Web API is explicitly project-pinned. A foreign known-project
+        # mention redirects before quota reservation; GA resolves such names.
+        project_context = ProjectContext(
+            project_key=project_key,
+            answer_mode=req.answer_mode or "normal",
+            active_catalogue=active_catalogue,
+        )
+        project_redirect = None
+        if project_context.answer_mode == "normal":
+            from api.domain.services.project_redirect import (  # noqa: PLC0415
+                build_redirect,
+                detect_foreign_project,
+            )
+
+            display_names = dict(active_catalogue)
+            current_project = project_key
+            foreign = detect_foreign_project(req.query, current_project, active_catalogue)
+            if foreign is not None:
+                project_redirect = build_redirect(
+                    foreign["project_key"], display_names[foreign["project_key"]]
+                )
+
+        if project_redirect is not None:
+            from api.application.pipelines.conv_workflow import (  # noqa: PLC0415
+                build_project_redirect_payload,
+            )
+
+            payload, routing = await build_project_redirect_payload(
+                req.query,
+                req.session_id,
+                _normalize_history(req.history),
+                project_context=project_context,
+                device_id=req.device_id,
+                project_redirect=project_redirect,
+            )
+            payload["history_persisted"] = False
+            if req.device_id is not None and req.session_id is not None and req.anon_token:
+                from api.application.services.anon_identity import (  # noqa: PLC0415
+                    AnonymousIdentityService,
+                )
+                from api.application.services.chat_history_service import (  # noqa: PLC0415
+                    ChatHistoryService,
+                )
+                from api.infrastructure.adapters.postgres_chat_history import (  # noqa: PLC0415
+                    repository as chat_history_repository,
+                )
+                from api.infrastructure.config.config import get_settings  # noqa: PLC0415
+
+                try:
+                    identity = AnonymousIdentityService(
+                        get_settings().anon_identity_secret
+                    ).verify_token(req.anon_token)
+                except Exception:  # noqa: BLE001 — invalid configuration cannot authorize a write
+                    logger.warning(
+                        "anonymous identity verification failed for project redirect",
+                        exc_info=True,
+                    )
+                    identity = None
+                if identity is not None:
+                    try:
+                        payload["history_persisted"] = bool(
+                            await ChatHistoryService(chat_history_repository).persist_turn(
+                                session_id=req.session_id,
+                                device_id=req.device_id,
+                                project_key=project_context.project_key,
+                                identity_key=identity.subject,
+                                user_content=req.query,
+                                assistant_content=str(payload.get("answer") or ""),
+                                assistant_meta={
+                                    key: payload.get(key)
+                                    for key in (
+                                        "sources",
+                                        "facts",
+                                        "images",
+                                        "project_redirect",
+                                        "lead_cta_hint",
+                                    )
+                                    if payload.get(key) is not None
+                                },
+                            )
+                        )
+                    except Exception:  # noqa: BLE001 — history is non-critical
+                        logger.warning(
+                            "chat history persistence failed after project redirect",
+                            exc_info=True,
+                        )
+            if "text/event-stream" in (request.headers.get("accept") or ""):
+                async def redirect_stream():
+                    yield _frame("routing", routing)
+                    yield _frame("done", payload)
+
+                return StreamingResponse(
+                    redirect_stream(),
+                    media_type="text/event-stream",
+                    headers=_SSE_RESPONSE_HEADERS,
+                )
+            return payload
 
         # Secure wave Issue 2: server-enforced quota gate (spec §4/§5). Runs
         # AFTER project scope (422 contract above stays byte-unchanged) and
@@ -1183,7 +1311,7 @@ def create_app() -> FastAPI:
                     pipe,
                     req,
                     req.as_of,
-                    project_key,
+                    project_context,
                     req.device_id,
                     quota_gate,
                     turn_context,
@@ -1192,7 +1320,6 @@ def create_app() -> FastAPI:
                     training_owner_uid=(
                         _training_auth.firebase_uid if _training_auth is not None else None
                     ),
-                    training_context_key=training_context_key,
                 ),
                 media_type="text/event-stream",
                 headers=_SSE_RESPONSE_HEADERS,
@@ -1205,9 +1332,8 @@ def create_app() -> FastAPI:
                 req.session_id,
                 req.as_of,
                 _normalize_history(req.history),
-                project_key=project_key,
+                project_context=project_context,
                 device_id=req.device_id,
-                training_context_project_key=training_context_key,
             )
             if req.answer_mode == "training":
                 payload = {
@@ -1218,7 +1344,7 @@ def create_app() -> FastAPI:
                 payload["project_redirect"] = None
                 # G3-r6 §10.2: JSON transport mirrors the SSE ack binding.
                 payload["training_session_id"] = req.session_id
-                payload["context"] = {"project_key": training_context_key}
+                payload["context"] = {"project_key": project_context.project_key}
             # Keep the terminal payload authoritative for every successful
             # transport. SSE done and JSON must expose the same semantic data.
             payload["status"] = "completed"
@@ -1249,7 +1375,7 @@ def create_app() -> FastAPI:
                             owner_firebase_uid=(
                                 _training_auth.firebase_uid if _training_auth is not None else ""
                             ),
-                            context_project_key=training_context_key or "",
+                            context_project_key=project_context.project_key,
                             user_content=req.query,
                             assistant_content=str(payload.get("answer") or ""),
                             assistant_meta={
@@ -1264,7 +1390,7 @@ def create_app() -> FastAPI:
                         await ChatHistoryService(chat_history_repository).persist_turn(
                         session_id=req.session_id,
                         device_id=req.device_id,
-                        project_key=project_key,
+                        project_key=project_context.project_key,
                         identity_key=getattr(turn_context, "identity_key", None),
                         user_content=req.query,
                         assistant_content=str(payload.get("answer") or ""),
@@ -1292,7 +1418,7 @@ def create_app() -> FastAPI:
                 else await _durable_lead_cta_hint(
                     req.session_id,
                     device_id=req.device_id,
-                    project_key=project_key,
+                    project_key=project_context.project_key,
                     identity_key=getattr(turn_context, "identity_key", None),
                     authenticated=bool(
                         bearer_id_token

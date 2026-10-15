@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from api.application.services.project_context import ProjectContext
 from api.interfaces.api.main import QueryRequest, _sse_stream
 
 
@@ -44,7 +45,9 @@ class _StalledPipe:
 async def test_sse_emits_parser_safe_heartbeat_before_completion():
     frames = []
     async for frame in _sse_stream(
-        _Pipe(), QueryRequest(query="hello"), None, "camellia", None, _Gate(), _Context()
+        _Pipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, _Gate(), _Context()
     ):
         frames.append(frame)
         if frame.startswith("event: done"):
@@ -64,8 +67,9 @@ async def test_sse_stalled_pipeline_terminates_by_total_deadline():
     started = asyncio.get_event_loop().time()
     frames = []
     async for frame in _sse_stream(
-        _StalledPipe(), QueryRequest(query="hello"), None, "camellia", None,
-        _Gate(), _Context(), total_timeout_s=0.5,
+        _StalledPipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, _Gate(), _Context(), total_timeout_s=0.5,
     ):
         frames.append(frame)
     elapsed = asyncio.get_event_loop().time() - started
@@ -91,8 +95,9 @@ async def test_sse_heartbeats_do_not_reset_total_deadline():
     """
     frames = []
     async for frame in _sse_stream(
-        _StalledPipe(), QueryRequest(query="hello"), None, "camellia", None,
-        _Gate(), _Context(), total_timeout_s=0.25,
+        _StalledPipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, _Gate(), _Context(), total_timeout_s=0.25,
     ):
         frames.append(frame)
     assert not any(frame == ": heartbeat\n\n" for frame in frames)
@@ -147,9 +152,9 @@ class _QuickPipe:
 
 
 class _LegacyPipe:
-    """Pre-training custom pipeline: it has no training-context keyword."""
+    """Custom pipeline double using the ProjectContext call contract."""
 
-    async def run(self, query, session_id, as_of, history, *, project_key, device_id, on_event):
+    async def run(self, query, session_id, as_of, history, *, project_context, device_id, on_event):
         return {
             "answer": "legacy answer", "sources": [], "facts": [], "images": [], "videos": [],
             "places": [], "confidence": "HIGH", "requires_review": False,
@@ -158,16 +163,15 @@ class _LegacyPipe:
 
 
 class _ModernTrainingPipe:
-    """Training-aware pipeline double that records the optional context field."""
+    """Pipeline double that records the explicit project context."""
 
     def __init__(self) -> None:
-        self.training_context_project_key = None
+        self.project_context = None
 
     async def run(
-        self, query, session_id, as_of, history, *, project_key, device_id, on_event,
-        training_context_project_key=None,
+        self, query, session_id, as_of, history, *, project_context, device_id, on_event,
     ):
-        self.training_context_project_key = training_context_project_key
+        self.project_context = project_context
         return {
             "answer": "training answer", "sources": [], "facts": [], "images": [], "videos": [],
             "places": [], "confidence": "HIGH", "requires_review": False,
@@ -202,8 +206,9 @@ async def test_sse_client_disconnect_refunds_reserved_turn_once():
     gate = _RecordingGate()
     frames = []
     async for frame in _sse_stream(
-        _StalledPipe(), QueryRequest(query="hello"), None, "camellia", None,
-        gate, _ReservedContext(), request=_FakeRequest(disconnected=True),
+        _StalledPipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, gate, _ReservedContext(), request=_FakeRequest(disconnected=True),
     ):
         frames.append(frame)
     assert frames[0].startswith("event: ack")
@@ -218,8 +223,9 @@ async def test_sse_deadline_cut_refunds_reserved_turn_once():
     gate = _RecordingGate()
     frames = []
     async for frame in _sse_stream(
-        _StalledPipe(), QueryRequest(query="hello"), None, "camellia", None,
-        gate, _ReservedContext(), total_timeout_s=0.5,
+        _StalledPipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, gate, _ReservedContext(), total_timeout_s=0.5,
     ):
         frames.append(frame)
     assert any("STREAM_TIMEOUT" in frame for frame in frames)
@@ -235,8 +241,9 @@ async def test_sse_crash_refunds_exactly_once_even_with_teardown_disconnect():
     gate = _RecordingGate()
     frames = []
     async for frame in _sse_stream(
-        _CrashingPipe(), QueryRequest(query="hello"), None, "camellia", None,
-        gate, _ReservedContext(), request=_FakeRequest(disconnect_after=1),
+        _CrashingPipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, gate, _ReservedContext(), request=_FakeRequest(disconnect_after=1),
     ):
         frames.append(frame)
     assert frames[0].startswith("event: ack")
@@ -253,8 +260,9 @@ async def test_sse_success_finalizes_without_refund():
     gate = _RecordingGate()
     frames = []
     async for frame in _sse_stream(
-        _QuickPipe(), QueryRequest(query="hello"), None, "camellia", None,
-        gate, _ReservedContext(), request=_FakeRequest(disconnect_after=1),
+        _QuickPipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, gate, _ReservedContext(), request=_FakeRequest(disconnect_after=1),
     ):
         frames.append(frame)
         if frame.startswith("event: done"):
@@ -273,8 +281,9 @@ async def test_sse_staff_timeout_refund_and_finalize_noop():
     gate = _RecordingGate()
     frames = []
     async for frame in _sse_stream(
-        _StalledPipe(), QueryRequest(query="hello"), None, "camellia", None,
-        gate, AuthenticatedTurnContext(role_claim="sales"), total_timeout_s=0.5,
+        _StalledPipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, gate, AuthenticatedTurnContext(role_claim="sales"), total_timeout_s=0.5,
     ):
         frames.append(frame)
     assert any("STREAM_TIMEOUT" in frame for frame in frames)
@@ -284,12 +293,13 @@ async def test_sse_staff_timeout_refund_and_finalize_noop():
 
 
 @pytest.mark.asyncio
-async def test_sse_legacy_pipeline_without_training_context_streams_done_answer():
-    """Optional training metadata must not break existing custom pipelines."""
+async def test_sse_custom_pipeline_with_project_context_streams_done_answer():
+    """A custom pipeline using ProjectContext completes without error."""
     frames = []
     async for frame in _sse_stream(
-        _LegacyPipe(), QueryRequest(query="hello"), None, "camellia", None,
-        _Gate(), _Context(),
+        _LegacyPipe(), QueryRequest(query="hello"), None,
+        ProjectContext("camellia", "normal", (("camellia", "Camellia"),)),
+        None, _Gate(), _Context(),
     ):
         frames.append(frame)
     assert frames[-1].startswith("event: done")
@@ -307,11 +317,18 @@ async def test_sse_training_pipeline_receives_context_project_key():
     )
     frames = []
     async for frame in _sse_stream(
-        pipe, request, None, "_training", None, _Gate(), _Context(),
-        training_context_key="camellia",
+        pipe,
+        request,
+        None,
+        ProjectContext("camellia", "training", (("camellia", "Camellia"),)),
+        None,
+        _Gate(),
+        _Context(),
     ):
         frames.append(frame)
-    assert pipe.training_context_project_key == "camellia"
+    assert pipe.project_context == ProjectContext(
+        "camellia", "training", (("camellia", "Camellia"),)
+    )
     assert frames[-1].startswith("event: done")
     done = json.loads(frames[-1].split("data: ", 1)[1])
     assert done["answer"] == "training answer"

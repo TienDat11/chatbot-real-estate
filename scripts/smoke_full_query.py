@@ -23,10 +23,12 @@ QUESTIONS = {
     "camellia": "Các loại căn hộ tại Camellia có những loại nào, mỗi loại diện tích bao nhiêu?",
     "soleil": "Các loại căn hộ tại Soleil có những loại nào, mỗi loại diện tích bao nhiêu?",
 }
+ACTIVE_CATALOGUE = (("camellia", "Camellia"), ("soleil", "Soleil"))
 
 
 async def run_one(project_key: str, query: str) -> None:
     from api.application.pipelines.conv_workflow import RagQueryPipelineConv
+    from api.application.services.project_context import ProjectContext
 
     pipe = RagQueryPipelineConv()
     payload = await pipe.run(
@@ -34,7 +36,11 @@ async def run_one(project_key: str, query: str) -> None:
         f"smoke-{project_key}-{date.today().isoformat()}",
         date.today().isoformat(),
         [],
-        project_key=project_key,
+        project_context=ProjectContext(
+            project_key=project_key,
+            answer_mode="normal",
+            active_catalogue=ACTIVE_CATALOGUE,
+        ),
         device_id="smoke-device",
     )
     answer = str(payload.get("answer") or "")

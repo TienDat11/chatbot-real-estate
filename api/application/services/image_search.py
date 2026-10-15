@@ -21,22 +21,19 @@ import re
 import unicodedata
 from typing import Any
 
+from api.domain.services.unit_code import extract_unit_codes, normalize_unit_code, unit_code_from_subject_suffix
 from api.application.services.media_config import valid_media_url
 from api.application.services.sql_leg import with_rls_identity
 from api.infrastructure.config.config import settings
 
 logger = logging.getLogger("api.image_search")
 
-# A concrete unit code looks like CH-03, CH-03A or CH-9. Capturing this lets the
-# re-ranker pivot from fuzzy caption similarity to an exact floor-plan match,
-# which is the only ordering a user who names a specific unit actually expects.
-_UNIT_CODE_RE = re.compile(r"\bCH-\d{1,2}[A-Z]?\b", re.IGNORECASE)
 
 # Only non-legal/non-QA kinds illustrate answers; policy images are shown, not
 # generated here, so phaply/qna are excluded to avoid surfacing legal artifacts.
 IMAGE_QUERY = """
 SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
-       i.width, i.height, i.linked_subject_key, i.metadata,
+       i.width, i.height, i.linked_subject_key, i.project_key, i.metadata,
        1 - (e.embedding <=> $1::vector) AS score
 FROM image_embeddings e
 JOIN images i ON i.image_id = e.image_id
@@ -53,7 +50,7 @@ LIMIT $2
 # wrong-corpus imagery above the relevance floor.
 IMAGE_QUERY_PROJECT_SCOPED = """
 SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
-       i.width, i.height, i.linked_subject_key, i.metadata,
+       i.width, i.height, i.linked_subject_key, i.project_key, i.metadata,
        1 - (e.embedding <=> $1::vector) AS score
 FROM image_embeddings e
 JOIN images i ON i.image_id = e.image_id
@@ -69,7 +66,7 @@ LIMIT $2
 # assigned a ceiling constant (exact intent) by the caller.
 QUERY_BY_UNIT = """
 SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
-       i.width, i.height, i.linked_subject_key, i.metadata
+       i.width, i.height, i.linked_subject_key, i.project_key, i.metadata
 FROM images i
 WHERE i.status = 'published'
   AND i.kind NOT IN ('phaply', 'qna')
@@ -81,7 +78,7 @@ LIMIT 1
 # exact-match rescue must also honor the project predicate.
 QUERY_BY_UNIT_PROJECT_SCOPED = """
 SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
-       i.width, i.height, i.linked_subject_key, i.metadata
+       i.width, i.height, i.linked_subject_key, i.project_key, i.metadata
 FROM images i
 WHERE i.status = 'published'
   AND i.kind NOT IN ('phaply', 'qna')
@@ -95,7 +92,7 @@ LIMIT 1
 # welcome always leads with the most visual asset (cover/render before amenity).
 PROJECT_IMAGES_QUERY = """
 SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
-       i.width, i.height, i.linked_subject_key, i.metadata,
+       i.width, i.height, i.linked_subject_key, i.project_key, i.metadata,
        i.metadata->>'type' AS display_type
 FROM images i
 WHERE i.status = 'published'
@@ -110,7 +107,7 @@ LIMIT $3
 # greeting gallery never fetches rows a post-filter would throw away.
 PROJECT_IMAGES_QUERY_PROJECT_SCOPED = """
 SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
-       i.width, i.height, i.linked_subject_key, i.metadata,
+       i.width, i.height, i.linked_subject_key, i.project_key, i.metadata,
        i.metadata->>'type' AS display_type
 FROM images i
 WHERE i.status = 'published'
@@ -134,7 +131,7 @@ LIMIT $3
 # unbounded result); 32 pages is far above any board.
 PRICE_BOARD_BY_PROJECT_QUERY = r"""
 SELECT i.image_id, i.kind, i.title, i.caption, i.alt_text, i.url_cdn,
-       i.width, i.height, i.linked_subject_key, i.metadata
+       i.width, i.height, i.linked_subject_key, i.project_key, i.metadata
 FROM images i
 WHERE i.status = 'published'
   AND i.kind = 'banggia'
@@ -221,31 +218,6 @@ def _embedding_identity() -> tuple[str, int]:
     return settings.embedding_model, settings.embedding_dim
 
 
-def _normalize_unit_code(code: str) -> str | None:
-    """Return the canonical zero-padded uppercase unit (CH-3 -> CH-03, CH-3A -> CH-03A).
-
-    The DB stores unit keys zero-padded (unit:CH-03) while users type short forms
-    (CH-3). Collapsing both onto one canonical form is what lets an exact match
-    succeed, so every comparison must go through this function.
-    """
-    m = re.fullmatch(r"CH-(\d{1,2})([A-Z]?)", code.strip().upper())
-    if not m:
-        return None
-    num, suffix = m.groups()
-    return f"CH-{int(num):02d}{suffix}"
-
-
-def _extract_unit_codes(query_text: str) -> list[str]:
-    """Return every unit code in the query (e.g. CH-03, CH-03A) in canonical form.
-
-    Empty when the query names no concrete unit, in which case the caller must
-    fall back to plain semantic ranking because there is no exact target to honor.
-    """
-    return [
-        normalized
-        for m in _UNIT_CODE_RE.findall(query_text)
-        if (normalized := _normalize_unit_code(m)) is not None
-    ]
 
 
 def _meta_of(row: dict[str, Any]) -> dict[str, Any]:
@@ -266,9 +238,9 @@ def _row_unit(row: dict[str, Any]) -> str | None:
         # 'unit:CH-03' -> 'CH-03', but tolerate any prefix before the code.
         value = link.rsplit(":", 1)[-1]
         if value:
-            return _normalize_unit_code(value)
+            return unit_code_from_subject_suffix(value)
     unit = _meta_of(row).get("unit")
-    return _normalize_unit_code(str(unit)) if unit else None
+    return normalize_unit_code(str(unit)) if unit else None
 
 
 def _row_type(row: dict[str, Any]) -> str | None:
@@ -319,6 +291,8 @@ def _row_to_image(
         "score": score,
         "match": match,
         "reason": reason,
+        "project_key": row.get("project_key"),
+        "unit_code": _row_unit(row),
     }
 
 
@@ -572,7 +546,7 @@ async def search_images(
             continue
         scored.append((r, float(score)))
 
-    codes = _extract_unit_codes(query_text)
+    codes = extract_unit_codes(query_text)
     if not codes:
         if not scored:
             return []

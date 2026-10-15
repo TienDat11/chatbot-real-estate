@@ -123,15 +123,37 @@ Query: "tụi tui có 3 tỉ thôi mua được gì hông"
 }
 ```
 
-## Example 8 — Khẩu ngữ financing (KHÔNG high-stakes): "trả góp 0% là sao, có bị lừa hông"
+## Example 8 — Khẩu ngữ financing / cọc / kỳ hạn vay (KHÔNG high-stakes): "trả góp 0% là sao, có bị lừa hông"
 History: []
 Query: "trả góp 0% là sao, có bị lừa hông"
 ```json
 {
-  "rewritten_query": "Chính sách trả góp 0% của dự án là gì, có rủi ro gì không?",
-  "routing": {"needs_rag": true, "needs_sql": false, "structured_path": "none"},
-  "sql_spec": null,
-  "hl_keywords": ["HTLS", "0%"], "ll_keywords": ["trả góp 0%", "rủi ro"],
+  "rewritten_query": "Chính sách trả góp 0% của dự án là gì, điều kiện vay và lãi suất như thế nào?",
+  "routing": {"needs_rag": true, "needs_sql": true, "structured_path": "spec"},
+  "sql_spec": {
+    "subject_type": "unit", "source": "facts",
+    "filters": [],
+    "limit": 50
+  },
+  "hl_keywords": ["HTLS", "0%"], "ll_keywords": ["trả góp 0%", "lãi suất", "vốn tự có"],
+  "high_stakes": false, "as_of": null
+}
+```
+
+## Example 8b — Hỏi giá cụm nhà / phân khu / đặt cọc / thời hạn vay chung của dự án
+History: []
+Query: "giá cụm nhà nào của dự án, đặt cọc bao nhiêu và vay tối đa mấy năm?"
+```json
+{
+  "rewritten_query": "Bảng giá các loại căn hộ theo phương thức thanh toán, tỷ lệ đặt cọc vốn tự có và thời hạn hỗ trợ lãi suất của dự án",
+  "routing": {"needs_rag": true, "needs_sql": true, "structured_path": "spec"},
+  "sql_spec": {
+    "subject_type": "unit", "source": "facts",
+    "filters": [],
+    "limit": 50
+  },
+  "hl_keywords": ["bảng giá", "thanh toán", "đặt cọc", "HTLS"],
+  "ll_keywords": ["cụm nhà", "giá bán", "đặt cọc", "vốn tự có", "thời hạn vay"],
   "high_stakes": false, "as_of": null
 }
 ```
@@ -154,9 +176,58 @@ Query: "tầng mấy đẹp nhất giá tốt"
 }
 ```
 
+## Example 10 — Loại căn + số phòng ngủ (filter JSONB)
+History: []
+Query: "giới thiệu các căn studio giúp tôi"
+```json
+{
+  "rewritten_query": "Liệt kê các căn hộ studio của dự án kèm giá và diện tích",
+  "routing": {"needs_rag": true, "needs_sql": true, "structured_path": "spec"},
+  "sql_spec": {
+    "subject_type": "unit", "source": "facts",
+    "filters": [{"field": "attrs_type", "op": "=", "value": "studio"}],
+    "order_by": {"field": "price_vnd", "dir": "asc"},
+    "limit": 10
+  },
+  "hl_keywords": [], "ll_keywords": ["studio", "loại căn"],
+  "high_stakes": false, "as_of": null
+}
+```
+
+## Example 11 — Số phòng ngủ (alias "2 ngủ", "2PN")
+History: []
+Query: "còn căn 2 ngủ nào giá dưới 3 tỷ không?"
+```json
+{
+  "rewritten_query": "Các căn hộ 2 phòng ngủ có giá dưới 3 tỷ đồng",
+  "routing": {"needs_rag": true, "needs_sql": true, "structured_path": "spec"},
+  "sql_spec": {
+    "subject_type": "unit", "source": "facts",
+    "filters": [
+      {"field": "attrs_bedrooms", "op": "=", "value": 2},
+      {"field": "price_vnd", "op": "<", "value": 3000000000}
+    ],
+    "order_by": {"field": "price_vnd", "dir": "asc"},
+    "limit": 10
+  },
+  "hl_keywords": [], "ll_keywords": ["2 phòng ngủ", "dưới 3 tỷ"],
+  "high_stakes": false, "as_of": null
+}
+```
+
 ## LUẬT CHƠI
 - Nếu không thể route → `structured_path: "none"`, `needs_rag: true` (fallback an toàn).
 - Số luôn là số nguyên (vnd) hoặc float (pct); KHÔNG để chữ "tỷ" trong value.
 - `high_stakes` = true nếu query chứa keyword: cầm cố, thế chấp, chuyển nhượng, công chứng,
   quy hoạch, thuế, sổ đỏ, giải chấp, tranh chấp, ủy quyền, kê biên, hiệu lực.
 - `as_of`: null (mặc định hôm nay) hoặc ISO date.
+- `field` trong filters/order_by CHỈ được dùng đúng tên trong danh sách dưới đây.
+  Loại căn và số phòng ngủ nằm trong JSONB `attrs`, tên field là `attrs_type` /
+  `attrs_bedrooms` — KHÔNG bịa `unit_type`, `layout_code`, `bedrooms`, `unit_code`
+  (dùng `subject_key` cho mã căn). Field sai sẽ bị bỏ và câu trả lời mất dữ liệu.
+  - `source: "facts"`: price_vnd, area_m2, deposit_pct, term_months, interest_rate_pct,
+    subject_key, subject_type, value_num, value_text, unit, quality, policy_key,
+    campaign_key, attrs_type, attrs_bedrooms
+  - `source: "v_unit_offers"`: subject_id, policy_key, price_vnd, deposit_pct,
+    term_months, interest_rate_pct, required_down_payment_vnd, loan_amount_vnd,
+    monthly_principal_vnd, monthly_interest_estimate_vnd

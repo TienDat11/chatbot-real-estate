@@ -9,6 +9,7 @@ import { Card, Col, Row, Tabs } from "antd";
 import { C, RADIUS, SHADOW } from "@/lib/tokens";
 import { ProjectForm } from "./ProjectForm";
 import { ProjectList } from "./ProjectList";
+import { MessengerPermissionPanel } from "./MessengerPermissionPanel";
 
 export function AdminWorkspace() {
   return (
@@ -36,6 +37,11 @@ export function AdminWorkspace() {
                     key: "new-project",
                     label: "Thêm dự án mới",
                     children: <ProjectForm />,
+                  },
+                  {
+                    key: "messenger-permissions",
+                    label: "Kiểm tra quyền Messenger",
+                    children: <MessengerPermissionPanel />,
                   },
                 ]}
               />

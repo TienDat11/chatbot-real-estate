@@ -115,6 +115,8 @@ _probe*
 # --- internal planning / docs (KHÔNG đẩy lên git — chỉ code) ---
 .claude/
 docs/
+.omp/
+.scratch/
 
 # --- turbo / build cache ---
 .turbo/
@@ -149,3 +151,5 @@ tools/
 # Keep local env files out of git; env-*.yaml files are passed to gcloud locally.
 /env-prod.yaml
 /env-staging.yaml
+# Candidate env file for the demo revision (same rule as env-prod.yaml)
+/env-prod-candidate.yaml

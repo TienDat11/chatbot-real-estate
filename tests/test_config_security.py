@@ -125,9 +125,24 @@ def test_llm_reasoning_effort_rejects_invalid_values(value: str) -> None:
 
 
 # --- Outbound SSRF allowlist canonical-host regression (CFG-01) ---
+#
+# Hermetic: ``Settings(_env_file=None)`` kills only the dotenv source, not
+# ``os.environ`` — pydantic-settings ranks the process environment ABOVE the
+# field default, so a host/CI-exported ``OUTBOUND_ALLOWED_HOSTS`` silently
+# replaces the declared default these tests assert on. ``_no_outbound_env``
+# drops it so the assertions really do pin the code default
+# (api/infrastructure/config/config.py).
 
 
-def test_default_outbound_allowlist_contains_canonical_provider_hosts() -> None:
+@pytest.fixture
+def _no_outbound_env(monkeypatch: pytest.MonkeyPatch):
+    """Drop any process-level OUTBOUND_ALLOWED_HOSTS override."""
+    monkeypatch.delenv("OUTBOUND_ALLOWED_HOSTS", raising=False)
+
+
+def test_default_outbound_allowlist_contains_canonical_provider_hosts(
+    _no_outbound_env,
+) -> None:
     """Canonical Settings default must cover every deployed provider host.
 
     Regression for CFG-01: staging configures the Jina reranker
@@ -141,8 +156,8 @@ def test_default_outbound_allowlist_contains_canonical_provider_hosts() -> None:
     assert "generativelanguage.googleapis.com" in settings.outbound_allowed_hosts
 
 
-def test_default_outbound_allowlist_is_exact_hostnames_only() -> None:
-    """No wildcard/suffix entries may sneak into the canonical allowlist."""
+def test_default_outbound_allowlist_is_exact_hostnames_only(_no_outbound_env) -> None:
+    """No wildcard/suffix/URL entries may sneak into the canonical allowlist."""
     settings = Settings(_env_file=None)
     for host in settings.outbound_allowed_hosts:
         assert "*" not in host

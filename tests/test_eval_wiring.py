@@ -53,3 +53,9 @@ def test_broken_canonical_import_raises_runtime_error(
     cause = excinfo.value.__cause__
     assert isinstance(cause, ImportError), "original ImportError must be chained"
     assert not hasattr(probe, "RagQueryPipeline"), "failure must raise before any binding, never assign None"
+
+
+def test_dry_eval_uses_eval_local_catalogue() -> None:
+    import asyncio
+
+    assert asyncio.run(run_eval._active_catalogue(dry=True)) == run_eval._DRY_EVAL_CATALOGUE

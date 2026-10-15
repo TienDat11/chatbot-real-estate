@@ -55,3 +55,11 @@ ragre_mvp/
 *.dump
 coverage*
 env-prod.yaml
+
+# Local agent scratch / accidental nested copies (never in build context)
+.omp-artifacts/
+.omp/
+.scratch/
+integration-final-p002-isolated/
+env-prod-candidate*.yaml
+RELEASE_NOTES.md

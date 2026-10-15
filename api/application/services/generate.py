@@ -9,20 +9,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 from api import get_cfg
 from api.application.services.conv_state import CONVERSION_STATES
 from api.application.services.project_config import brand_token, render_template
-from api.application.services.project_scope import is_training_scope
 from api.domain.services.route_intent import classify_intent
 from api.domain.services.utils import sha256_hex
 from api.domain.value_objects.constants import DEFAULT_MODEL_ANSWER, DEFAULT_MODEL_ANSWER_PRO
 from api.infrastructure.config.config import settings
 from api.infrastructure.dependencies import llm
 
-from .merge import Merged
+from .merge import Merged, build_evidence_context, build_facts
 from .sales_kit import inject_sales_context, sales_kit_block
 
 # Story 4.6 (§7.2): pro tier fires when the turn is at a conversion stage or
@@ -32,6 +32,65 @@ from .sales_kit import inject_sales_context, sales_kit_block
 _TIER_TO_MODEL_KEY = {"pro": "llm_model_answer_pro", "flash": "llm_model_answer"}
 _ANSWER_MAX_TOKENS = {"pro": 6000, "flash": 4000}
 
+_PROJECT_FACTS_HINT_RE = re.compile(
+    r"giá(?! trị)|bảng\s*giá|cụm|phân\s*khu|tòa|block|\bkhu\b|căn\s*hộ|\bcăn\b"
+    r"|studio|\bpn\b|phòng\s*ngủ|thanh\s*toán|phương\s*thức|phương\s*án"
+    r"|chiết\s*khấu|ưu\s*đãi|đặt\s*cọc|\bcọc\b|vốn\s*tự\s*có|trả\s*trước"
+    r"|trả\s*góp|\bvay\b|lãi\s*suất|htls|ân\s*hạn|kỳ\s*hạn|thời\s*hạn|mấy\s*năm",
+    re.IGNORECASE,
+)
+
+
+async def _hydrate_project_facts_board(merged: Merged) -> bool:
+    """Ensure project facts (min->max across 4 payment methods + policy terms) are present."""
+    project_key = merged.meta.get("retrieval_project_key") or merged.meta.get("project_key")
+    query_text = str(merged.meta.get("query") or "").strip()
+    if not project_key or not query_text:
+        return False
+    hint_text = f"{query_text} {merged.meta.get('rewritten') or ''}"
+    if not _PROJECT_FACTS_HINT_RE.search(hint_text):
+        return False
+    existing_facts = merged.facts or []
+    price_row_count = sum(
+        1 for row in existing_facts if "price_vnd" in (row.get("fields") or {})
+    )
+    if price_row_count >= 4 and len(existing_facts) >= 12:
+        return False
+    from .sql_leg import run_sql_leg  # noqa: PLC0415
+
+    res = await run_sql_leg(
+        {"subject_type": "unit", "source": "facts", "filters": [], "limit": 200},
+        None,
+        query_text,
+        str(project_key),
+    )
+    if not res.rows:
+        return False
+    existing_evidence = list(merged.meta.get("_fact_evidence") or [])
+    seen_fact_ids = {
+        row.get("fact_id") for row in existing_evidence if row.get("fact_id") is not None
+    }
+    combined = list(existing_evidence)
+    for row in res.rows:
+        fid = row.get("fact_id")
+        if fid is not None and fid in seen_fact_ids:
+            continue
+        if fid is not None:
+            seen_fact_ids.add(fid)
+        combined.append(dict(row))
+    for idx, row in enumerate(combined, start=1):
+        row["fe_id"] = f"fe-{idx:03d}"
+    merged.evidence_blocks = build_evidence_context(combined)
+    merged.facts = build_facts(combined)
+    merged.meta["_fact_evidence"] = combined
+    merged.meta["selected_fact_ids"] = tuple(
+        row.get("fact_id") for row in combined if row.get("fact_id") is not None
+    )
+    merged.meta["selected_fe_ids"] = tuple(
+        row.get("fe_id") for row in combined if row.get("fe_id")
+    )
+    merged.meta["sql_row_count"] = len(combined)
+    return True
 logger = logging.getLogger("api.generate")
 
 _SYSTEM_PATH = (
@@ -39,8 +98,8 @@ _SYSTEM_PATH = (
 )  # parents[2]=api/ (HF-0: canonical api/prompts/)
 
 # FR-25 (revised): detailed project-lookup prompt for sales staff — persona-
-# free, CTA-free, grounded on the SHARED project corpus (answer_mode=training
-# rides the real context project; see project_scope TRAINING_PROJECT_KEY).
+# free and CTA-free. ProjectContext.answer_mode selects this profile while
+# retrieval remains scoped to the real active project.
 _TRAINING_PATH = (
     Path(__file__).resolve().parents[2] / "prompts" / "training_policy.md"
 )
@@ -80,6 +139,24 @@ def _format_history(history: list[dict] | None) -> str:
         -MAX_HISTORY_TURNS:
     ]
     return "\n".join(f"{t['role']}: {t['content']}" for t in turns) or "(không có lịch sử)"
+def _serialized_rows(content: str, marker: str, *, header: bool = False) -> list[dict] | None:
+    try:
+        rows_text = content.split(marker, 1)[1]
+        if header:
+            rows_text = rows_text.split("\n", 1)[1]
+        rows = json.loads(rows_text.splitlines()[0])
+    except (IndexError, json.JSONDecodeError):
+        return None
+    return rows if isinstance(rows, list) and all(isinstance(row, dict) for row in rows) else None
+
+
+def _record_prompt_evidence(merged: Merged, content: str) -> None:
+    merged.meta["_prompt_rag_rows"] = _serialized_rows(
+        content, "RAG_CONTEXT (chunks từ LightRAG, đã lọc hiệu lực + rerank):\n"
+    )
+    merged.meta["_prompt_fact_rows"] = _serialized_rows(
+        content, "FACT_EVIDENCE (", header=True
+    )
 
 
 def build_messages(merged: Merged, history: list[dict] | None) -> list[dict]:
@@ -96,10 +173,11 @@ def build_messages(merged: Merged, history: list[dict] | None) -> list[dict]:
         f"{merged.rag_blocks}\n\n{merged.evidence_blocks}"
     )
     # FR-25 (revised) training profile: the shared project corpus grounds the
-    # answer; the marker only swaps in the detailed staff-lookup voice and keeps
-    # the customer sales material (sales kit, conversation directive, identity
-    # template) out by construction — normal mode below stays byte-identical.
-    if is_training_scope(project_key):
+    # answer; answer_mode selects the staff lookup voice and keeps customer
+    # sales material (persona/CTA) out by construction. Normal mode stays
+    # byte-identical.
+    if merged.meta.get("answer_mode") == "training":
+        _record_prompt_evidence(merged, data_block)
         return [
             {"role": "system", "content": _TRAINING_PROMPT},
             {"role": "user", "content": user_main},
@@ -128,6 +206,7 @@ def build_messages(merged: Merged, history: list[dict] | None) -> list[dict]:
             {"role": "user", "content": data_block},
         ]
     )
+    _record_prompt_evidence(merged, messages[-1]["content"])
     return messages
 
 
@@ -142,7 +221,7 @@ def select_answer_tier(merged: Merged, high_stakes: bool) -> str:
     # FR-25 (revised): a training lookup is a data-dense staff answer (specs,
     # layouts, price baskets, payment schedules) — always worth the pro budget
     # (6000 vs 4000 tokens). The customer matrix below stays byte-identical.
-    if is_training_scope(merged.meta.get("project_key")):
+    if merged.meta.get("answer_mode") == "training":
         return "pro"
     if high_stakes:
         return "pro"
@@ -174,9 +253,14 @@ async def stream_answer(
     merged: Merged, history: list[dict] | None, high_stakes: bool
 ) -> AsyncIterator[str]:
     """Stream answer tokens; records model + tier + prompt_hash in merged.meta."""
-    # Bug B safety net: an EMPTY FACT_EVIDENCE on a project that only publishes
-    # an indicative board must not produce a "chưa cập nhật bảng giá" answer —
-    # hydrate evidence from v_unit_estimates first (no-op when facts exist).
+    # Hydrate the full project facts board (min->max across all 4 payment
+    # methods + deposit/rate/term) whenever a price/cluster/unit/payment query
+    # reaches generation without the full board, then fall back to v_unit_estimates
+    # if the project has no facts rows.
+    try:
+        await _hydrate_project_facts_board(merged)
+    except Exception as exc:  # noqa: BLE001 — fallback never breaks generation
+        logger.warning("project facts board hydration failed (ignored): %s", exc)
     try:
         from .estimates_fallback import apply_estimates_fallback  # noqa: PLC0415
 
@@ -189,10 +273,10 @@ async def stream_answer(
     max_tokens = _ANSWER_MAX_TOKENS[tier]
     messages = build_messages(merged, history)
     merged.meta["model"] = model
-    merged.meta["answer_tier"] = tier  # story 4.6 audit: which tier was used
+    merged.meta["answer_tier"] = tier  # story 4.6 audit: which model tier was used
     merged.meta["prompt_profile"] = (
-        "training" if is_training_scope(merged.meta.get("project_key")) else "customer"
-    )  # FR-25 audit: which prompt profile produced the answer
+        "training" if merged.meta.get("answer_mode") == "training" else "customer"
+    )
     merged.meta["prompt_version"] = "v2"
     merged.meta["prompt_hash"] = sha256_hex(json.dumps(messages, ensure_ascii=False))
 

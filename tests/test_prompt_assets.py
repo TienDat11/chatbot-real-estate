@@ -68,3 +68,47 @@ def test_prompt_dir_exported_for_lightrag():
             os.environ["PROMPT_DIR"] = prior
         else:
             os.environ.pop("PROMPT_DIR", None)
+
+
+def test_router_field_allowlist_mirrors_sql_leg():
+    """The router's closed field set must stay equal to the SQL builder's.
+
+    ``rewrite._ALLOWED_SQL_FIELDS`` is a deliberate mirror (rewrite cannot
+    import the application-layer SQL leg), so a field added to only one side
+    would silently drop a filter at coercion time or reject the spec at
+    ``validate_spec``. Pinning equality turns that drift into a red test.
+    """
+    from api.application.services.sql_leg import ALLOWED_FIELDS
+    from api.domain.services.rewrite import _ALLOWED_SQL_FIELDS
+
+    assert set(_ALLOWED_SQL_FIELDS) == set(ALLOWED_FIELDS)
+    for source, fields in ALLOWED_FIELDS.items():
+        assert tuple(_ALLOWED_SQL_FIELDS[source]) == tuple(fields), source
+
+
+def test_every_field_alias_targets_an_allowlisted_field():
+    """A coerced alias must land on a name the builder accepts.
+
+    ``_coerce_filter_aliases`` drops a filter when its alias target is not in
+    the allowlist, so a stale alias silently loses the filter instead of
+    raising. Guard the mapping against exactly that.
+    """
+    from api.domain.services.rewrite import _ALLOWED_SQL_FIELDS, _FIELD_ALIASES
+
+    for alias, target in _FIELD_ALIASES.items():
+        assert any(target in fields for fields in _ALLOWED_SQL_FIELDS.values()), (
+            f"alias {alias!r} -> {target!r} is not in any source allowlist"
+        )
+
+
+def test_fewshot_documents_the_jsonb_unit_type_fields():
+    """The router can only emit ``attrs_type``/``attrs_bedrooms`` if told to.
+
+    Production specs used ``unit_type``/``layout_code``/``bedrooms`` (none of
+    which the builder accepts) because the prompt never named the JSONB-backed
+    fields. Keep the wording that closes that gap.
+    """
+    raw = (_ASSETS / "rewrite_fewshot.md").read_text(encoding="utf-8")
+    assert "attrs_type" in raw
+    assert "attrs_bedrooms" in raw
+    assert "subject_key" in raw

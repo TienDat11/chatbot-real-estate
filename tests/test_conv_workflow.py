@@ -44,6 +44,10 @@ from api.application.pipelines.conv_workflow import (
 )
 from api.application.services.generate import build_messages
 from api.application.services.merge import Merged
+from api.application.services.project_context import ProjectContext
+
+
+_CAMELLIA_CONTEXT = ProjectContext("camellia", "normal", (("camellia", "Camellia"),))
 
 
 # ==============================================================================
@@ -366,7 +370,8 @@ class _StubInner:
     def __init__(self, result):
         self._result = result
 
-    def run(self, **kwargs):
+    def run(self, *, project_context, **kwargs):
+        assert isinstance(project_context, ProjectContext)
         return self._handler()
 
     async def _handler(self):
@@ -379,7 +384,7 @@ async def test_conv_workflow_emits_routing_event_before_done():
     wf = RagRgreConvWorkflow(on_event=lambda e, d: events.append((e, d)))
     # Patch the inner workflow to return a clean dict fast (no DB/LLM needed).
     wf._inner = _StubInner({"answer": "x", "requires_review": False})
-    result = await wf.run(query="cho hỏi giá căn 2PN view biển", session_id="sess_int_routing", history=[])
+    result = await wf.run(query="cho hỏi giá căn 2PN view biển", session_id="sess_int_routing", history=[], project_context=_CAMELLIA_CONTEXT)
     names = [e[0] for e in events]
     assert SSE_EVENT_ROUTING in names, f"routing event missing from {names}"
     routing = [d for e, d in events if e == SSE_EVENT_ROUTING][0]
@@ -392,12 +397,53 @@ async def test_conv_workflow_facade_returns_conv_meta():
     events = []
     wf = RagRgreConvWorkflow(on_event=lambda e, d: events.append((e, d)))
     wf._inner = _StubInner({"answer": "x", "requires_review": False})
-    result = await wf.run(query="Tôi có 3 tỷ muốn tìm căn 2PN", session_id="sess_int_meta", history=[])
+    result = await wf.run(query="Tôi có 3 tỷ muốn tìm căn 2PN", session_id="sess_int_meta", history=[], project_context=_CAMELLIA_CONTEXT)
     assert isinstance(result, dict)
     assert "conv_state" in result
     assert "conversation_directive" in result
     # budget + bedrooms present -> afford answered -> recommend
     assert result["conv_state"] == "recommend"
+
+
+@pytest.mark.asyncio
+async def test_conv_workflow_preserves_project_context_identity(monkeypatch):
+    from llama_index.core.workflow import Context, StartEvent
+
+    from api.application.pipelines.conv_workflow import ConvRunEv
+
+    wf = RagRgreConvWorkflow()
+    passed_context = ProjectContext("camellia", "normal", (("camellia", "Camellia"),))
+    start = StartEvent(
+        query="cho hỏi giá căn 2PN",
+        session_id="sess_project_context_identity",
+        history=[],
+        project_context=passed_context,
+    )
+    conv_ev = await wf.start_conv(Context(wf), start)
+    assert isinstance(conv_ev, ConvRunEv)
+    assert conv_ev.project_context is passed_context
+
+    captured = {}
+
+    async def run(**kwargs):
+        captured.update(kwargs)
+        return {"answer": "x", "requires_review": False}
+
+    monkeypatch.setattr(wf._inner, "run", run)
+    await wf.run_inner(Context(wf), conv_ev)
+    assert captured["project_context"] is passed_context
+
+
+@pytest.mark.asyncio
+async def test_conv_workflow_start_conv_rejects_missing_project_context():
+    from llama_index.core.workflow import Context, StartEvent
+
+    wf = RagRgreConvWorkflow()
+    with pytest.raises(ValueError, match="project_context is required"):
+        await wf.start_conv(
+            Context(wf),
+            StartEvent(query="cho hỏi giá căn 2PN", session_id="sess_missing_project_context"),
+        )
 
 
 @pytest.mark.asyncio
@@ -422,6 +468,7 @@ async def test_rag_query_pipeline_conv_contract(monkeypatch):
         "căn 2PN giá bao nhiêu",
         session_id="sess_int_pipe",
         history=[],
+        project_context=_CAMELLIA_CONTEXT,
         on_event=lambda e, d: events.append(e),
     )
     assert isinstance(result, dict)

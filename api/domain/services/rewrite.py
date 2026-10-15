@@ -105,6 +105,42 @@ def detect_aggregate_intent(query: str) -> bool:
     return any(k in q for k in AGGREGATE_KEYWORDS)
 
 
+# Explicit price-ranking language. A facts spec that orders by price makes the
+# builder apply ELIGIBLE_PRICE_PREDICATES (exact + confirmed + active campaign),
+# so the rank is only ever filled by rows that can carry a current sale price.
+# When the user did NOT ask to rank by price, that predicate silently empties
+# the answer for any project whose prices are range/estimate — camellia's
+# studio subject has 7 facts and zero eligible price rows, so "giới thiệu các
+# căn studio" returned nothing purely because the router added a price sort.
+PRICE_RANK_KEYWORDS = (
+    "rẻ nhất",
+    "đắt nhất",
+    "giá thấp nhất",
+    "giá cao nhất",
+    "giá tốt nhất",
+    "thấp nhất",
+    "cao nhất",
+    "rẻ hơn",
+    "đắt hơn",
+    "theo giá",
+    "giá từ thấp",
+    "giá từ cao",
+    "sắp xếp theo giá",
+)
+
+
+def detect_price_rank_intent(query: str) -> bool:
+    """Deterministic 'user asked to rank by price' detector.
+
+    Gates whether a price ``order_by`` may stay in a facts spec. Over-detecting
+    is the safe direction: a missed keyword only means the rows come back
+    unsorted, while an unnecessary price rank hides every unit whose price is
+    not exact+confirmed.
+    """
+    q = (query or "").lower()
+    return any(k in q for k in PRICE_RANK_KEYWORDS)
+
+
 # Few-shot prompt, read once at import.
 _REWRITE_PROMPT_PATH = (
     Path(__file__).resolve().parents[2] / "prompts" / "rewrite_fewshot.md"
@@ -119,7 +155,10 @@ else:
 _SYSTEM_REWRITE = (
     "Bạn là bộ định tuyến query cho chatbot bất động sản pháp lý Việt Nam. "
     "Nhiệm vụ: viết lại query cho tự chứa (self-contained), quyết định route (RAG/SQL), "
-    "xây sql_spec nếu cần, liệt kê keywords. Trả về ĐÚNG MỘT JSON object, không kèm text khác."
+    "xây sql_spec nếu cần, liệt kê keywords. Trả về ĐÚNG MỘT JSON object, không kèm text khác. "
+    "sql_spec chỉ dùng field/ops đã liệt kê trong ví dụ; KHÔNG đưa "
+    "project_name/project_key (hay bất kỳ metadata danh tính dự án nào) vào sql_spec — "
+    "server tự gắn phạm vi dự án. Vẫn giữ nguyên tên dự án trong rewritten_query/history."
 )
 
 
@@ -218,6 +257,146 @@ def _has_relational_price(query: str) -> bool:
     return bool(_RELATIONAL_PRICE_RE.search(query or ""))
 
 
+# Canonical SQL field allowlist, mirrored from the SQL leg so the router and
+# the builder share one closed set — a coerced field must always be one the
+# builder accepts.
+_ALLOWED_SQL_FIELDS: dict[str, tuple[str, ...]] = {
+    "v_unit_offers": (
+        "subject_id",
+        "policy_key",
+        "price_vnd",
+        "deposit_pct",
+        "term_months",
+        "interest_rate_pct",
+        "required_down_payment_vnd",
+        "loan_amount_vnd",
+        "monthly_principal_vnd",
+        "monthly_interest_estimate_vnd",
+    ),
+    "facts": (
+        "price_vnd",
+        "area_m2",
+        "deposit_pct",
+        "term_months",
+        "interest_rate_pct",
+        "subject_key",
+        "subject_type",
+        "value_num",
+        "value_text",
+        "unit",
+        "quality",
+        "policy_key",
+        "campaign_key",
+        "attrs_type",
+        "attrs_bedrooms",
+    ),
+}
+
+# Hallucinated filter/order fields that have a canonical SQL allowlist target.
+# The router LLM invents names; 301 of 394 measured prod specs carried a
+# non-allowlist field and every one of them died at validate_spec, so a turn
+# that should have hit a JSONB layout/bedroom filter returned the canned
+# fallback instead. Coercing here keeps the route alive; unknown fields
+# still drop so the closed validator sees only legal names.
+_FIELD_ALIASES: dict[str, str] = {
+    "unit_code": "subject_key",
+    "unit_type": "attrs_type",
+    "property_type": "attrs_type",
+    "layout_code": "attrs_type",
+    "unit_type_key": "attrs_type",
+    "bedrooms": "attrs_bedrooms",
+    "bedroom_count": "attrs_bedrooms",
+    "num_bedrooms": "attrs_bedrooms",
+    "room_count": "attrs_bedrooms",
+}
+
+
+def _coerce_filter_aliases(spec: dict, query: str = "") -> tuple[dict, list[str]]:
+    """Rewrite hallucinated filter/order fields to their canonical SQL names.
+
+    The router LLM invents unit-attribute names (``unit_type``, ``layout_code``,
+    ``bedrooms``, ``unit_code``); the SQL leg validates against a closed field
+    set, so a spec carrying one used to die at ``validate_spec`` and the turn
+    fell back to the canned message. A filter or an ``order_by`` whose field is
+    a known alias is rewritten to the canonical name the builder accepts.
+
+    A price ``order_by`` is also dropped unless the user actually asked to rank
+    by price, because that ordering triggers ``ELIGIBLE_PRICE_PREDICATES`` and a
+    range/estimate project then returns zero rows (see
+    ``detect_price_rank_intent``). An exact-unit spec keeps its price rank: the
+    single unit selector is the ranking target there, and its price is meant to
+    be exact+confirmed.
+
+    Fields that are neither allowlisted nor a known alias are left untouched on
+    purpose. Dropping them would silently discard a constraint the question may
+    have implied, and it would strip ``project_name`` before
+    ``workflow._normalize_project_name_filter`` can reject a scope-widening
+    wildcard. Such a field still reaches the closed validator and fails the
+    route exactly as it did before — a loud, citation-backed fallback instead of
+    a quietly narrowed answer. The caller's dict is copied, never mutated.
+    """
+    source = spec.get("source")
+    allowed = _ALLOWED_SQL_FIELDS.get(source, ())
+    normalized: dict = dict(spec)
+    coerced = False
+    rank_stripped = False
+    unknown: list[str] = []
+
+    filters = spec.get("filters")
+    if isinstance(filters, list):
+        kept: list = []
+        for f in filters:
+            field_name = f.get("field") if isinstance(f, dict) else None
+            canonical = _FIELD_ALIASES.get(field_name) if field_name not in allowed else None
+            if canonical is not None and canonical in allowed:
+                kept.append({**f, "field": canonical})
+                coerced = True
+            else:
+                if isinstance(field_name, str) and field_name not in allowed:
+                    unknown.append(field_name)
+                kept.append(f)
+        normalized["filters"] = kept
+
+    order_by = spec.get("order_by")
+    if isinstance(order_by, dict):
+        field_name = order_by.get("field")
+        canonical = _FIELD_ALIASES.get(field_name) if field_name not in allowed else None
+        if canonical is not None and canonical in allowed:
+            normalized["order_by"] = {**order_by, "field": canonical}
+            coerced = True
+        elif isinstance(field_name, str) and field_name not in allowed:
+            unknown.append(field_name)
+
+    # Rank-by-price without rank intent: drop the ordering (not the question).
+    # Only for a broad facts spec — an exact-unit selector legitimately ranks
+    # its one unit's price, and v_unit_offers prices are already eligible.
+    order_field = (normalized.get("order_by") or {}).get("field")
+    exact_unit = any(
+        isinstance(f, dict) and f.get("field") == "subject_key" and f.get("op") == "="
+        for f in (normalized.get("filters") or [])
+    )
+    if (
+        source == "facts"
+        and order_field == "price_vnd"
+        and not exact_unit
+        and not detect_price_rank_intent(query)
+    ):
+        normalized.pop("order_by", None)
+        rank_stripped = True
+
+    if unknown:
+        # Not a behavior change: these still fail the closed validator. Logged so
+        # operators can see which invented names keep killing otherwise-valid routes.
+        logger.warning("sql_spec carries non-allowlist field(s): %s", sorted(set(unknown)))
+
+    flags: list = []
+    if coerced:
+        flags.append("sql_filter_coerced")
+    if rank_stripped:
+        flags.append("sql_price_rank_stripped")
+    return normalized, flags
+
+
 def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> RoutedResult:
     """Coerce and constrain the LLM routing output to a canonical shape."""
     routing_raw = data.get("routing") or {}
@@ -255,6 +434,14 @@ def _normalize_routed(data: dict[str, Any], query: str, as_of: str | None) -> Ro
 
     rewritten = str(data.get("rewritten_query") or query).strip()
     degraded: list[str] = []
+
+    # Coerce hallucinated filter/order fields to canonical SQL names before the
+    # closed validator sees the spec; unknown fields drop rather than killing
+    # the whole route (see _coerce_filter_aliases). Declared after `degraded`
+    # because the degradation flags append to it.
+    if spec is not None:
+        spec, alias_flags = _coerce_filter_aliases(spec, query)
+        degraded.extend(alias_flags)
 
     # Deterministic detector confirms NL2SQL (LLM proposes, detector decides).
     aggregate = detect_aggregate_intent(query) or detect_aggregate_intent(rewritten)

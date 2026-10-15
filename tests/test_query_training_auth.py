@@ -23,6 +23,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from api.application.ports.project_registry import ProjectRegistryRecord
+
 from api.application.services.query_quota_gate import UnmanagedTurnContext
 from api.interfaces.api.main import create_app
 from tests._auth_seams import MAPPED_SALES_ID_BY_UID, base_claims, mint_id_token
@@ -79,6 +81,21 @@ def client(monkeypatch, offline_auth_seams) -> TestClient:
         return project_key or "camellia"
 
     monkeypatch.setattr("api.application.services.project_scope.resolve_project_key", _fake_resolve)
+
+    async def _active_records():
+        return [
+            ProjectRegistryRecord(
+                project_key=key, ten_thuong_mai=name, ten_phap_ly=None,
+                vi_tri=None, hotline=None, location=None, geo_center_lat=None,
+                geo_center_lng=None, is_hot=False, status="active",
+            )
+            for key, name in (("camellia", "The Camellia Son Tra - Da Nang"), ("soleil", "The Soleil Đà Nẵng"))
+        ]
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _active_records,
+    )
     return TestClient(create_app())
 
 

@@ -86,6 +86,33 @@ def client(monkeypatch, offline_auth_seams) -> TestClient:
         return project_key or "camellia"
 
     monkeypatch.setattr("api.application.services.project_scope.resolve_project_key", _fake_resolve)
+    # /query reads the registry snapshot before scope resolution and an empty
+    # catalogue raises inside ProjectContext, so the snapshot is stubbed here
+    # instead of relying on a reachable project registry.
+    from api.application.ports.project_registry import ProjectRegistryRecord
+
+    async def _fetch_records():
+        return [
+            ProjectRegistryRecord(
+                project_key=key,
+                ten_thuong_mai=name,
+                ten_phap_ly=None,
+                vi_tri=None,
+                hotline=None,
+                location=None,
+                geo_center_lat=None,
+                geo_center_lng=None,
+                is_hot=key == "camellia",
+                status="active",
+            )
+            for key, name in (("camellia", "The Camellia Son Tra - Da Nang"),
+                              ("soleil", "The Soleil Đà Nẵng"))
+        ]
+
+    monkeypatch.setattr(
+        "api.application.services.project_scope.fetch_active_project_records",
+        _fetch_records,
+    )
     return TestClient(create_app())
 
 

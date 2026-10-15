@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS facts (
   value_text    TEXT,
   unit          TEXT NOT NULL CHECK (unit IN ('vnd', 'm2', 'pct', 'months', 'days', 'enum', 'm', 'count')),
   quality       TEXT NOT NULL DEFAULT 'exact' CHECK (quality IN ('exact', 'range', 'approx')),
+  trust_level   TEXT NOT NULL DEFAULT 'confirmed' CHECK (trust_level IN ('confirmed', 'estimate')),
   range_min     NUMERIC,
   range_max     NUMERIC,
   volatile      BOOLEAN NOT NULL DEFAULT true,
@@ -229,24 +230,25 @@ LANGUAGE sql
 STABLE
 AS $$
   WITH cur AS (
-    SELECT subject_id, policy_key, fact_key, value_num FROM facts
+    SELECT subject_id, policy_key, fact_key, value_num, trust_level FROM facts
     WHERE effective_from <= as_of
-      AND (effective_to IS NULL OR effective_to > as_of) AND quality = 'exact'
+      AND (effective_to IS NULL OR effective_to > as_of)
+      AND quality = 'exact'
   )
   SELECT pol.subject_id, pol.policy_key,
     price.value_num::NUMERIC(20,0) AS price_vnd,
-    dep.value_num::NUMERIC(5,2)    AS deposit_pct,
-    term.value_num::INTEGER        AS term_months,
-    int_pct.value_num::NUMERIC(6,4) AS interest_rate_pct,  -- NULL = not offered (distinct from 0%)
-    CEIL(price.value_num * dep.value_num / 100.0)::NUMERIC(20,0) AS required_down_payment_vnd, -- CEIL
+    dep.value_num::NUMERIC(5,2) AS deposit_pct,
+    term.value_num::INTEGER AS term_months,
+    int_pct.value_num::NUMERIC(6,4) AS interest_rate_pct,
+    CEIL(price.value_num * dep.value_num / 100.0)::NUMERIC(20,0) AS required_down_payment_vnd,
     ROUND(price.value_num * (100.0 - dep.value_num) / 100.0, 0)::NUMERIC(20,0) AS loan_amount_vnd,
     ROUND((price.value_num * (100.0 - dep.value_num) / 100.0) / NULLIF(term.value_num, 0), 0)::NUMERIC(20,0) AS monthly_principal_vnd,
-    ROUND((price.value_num * (100.0 - dep.value_num) / 100.0) * int_pct.value_num / 100.0 / 12.0, 0)::NUMERIC(20,0) AS monthly_interest_estimate_vnd -- ESTIMATE on initial principal outstanding
+    ROUND((price.value_num * (100.0 - dep.value_num) / 100.0) * int_pct.value_num / 100.0 / 12.0, 0)::NUMERIC(20,0) AS monthly_interest_estimate_vnd
   FROM (SELECT DISTINCT subject_id, policy_key FROM cur WHERE policy_key IS NOT NULL) pol
-  JOIN cur dep   ON dep.subject_id = pol.subject_id AND dep.policy_key = pol.policy_key AND dep.fact_key = 'deposit_pct'
-  JOIN cur term  ON term.subject_id = pol.subject_id AND term.policy_key = pol.policy_key AND term.fact_key = 'term_months'
+  JOIN cur dep ON dep.subject_id = pol.subject_id AND dep.policy_key = pol.policy_key AND dep.fact_key = 'deposit_pct'
+  JOIN cur term ON term.subject_id = pol.subject_id AND term.policy_key = pol.policy_key AND term.fact_key = 'term_months'
   LEFT JOIN cur int_pct ON int_pct.subject_id = pol.subject_id AND int_pct.policy_key = pol.policy_key AND int_pct.fact_key = 'interest_rate_pct'
-  JOIN cur price ON price.subject_id = pol.subject_id AND price.fact_key = 'price_vnd'
+  JOIN cur price ON price.subject_id = pol.subject_id AND price.fact_key = 'price_vnd' AND price.trust_level = 'confirmed'
 $$;
 
 CREATE OR REPLACE VIEW v_unit_offers
